@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(unit_gen_server2_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -compile(export_all).
@@ -66,8 +65,8 @@ gen_server2_with_state(Config) ->
       ?MODULE, gen_server2_with_state1, [Config]).
 
 gen_server2_with_state1(_Config) ->
-    fhc_state = gen_server2:with_state(file_handle_cache,
-                                       fun (S) -> element(1, S) end),
+    state = gen_server2:with_state(background_gc,
+                                   fun (S) -> element(1, S) end),
     passed.
 
 

@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule SetGlobalParameterCommandTest do
   use ExUnit.Case, async: false
@@ -79,9 +79,14 @@ defmodule SetGlobalParameterCommandTest do
 
   # Checks each element of the first parameter against the expected context values
   defp assert_parameter_fields(context) do
-    result_param = list_global_parameters() |> List.first()
+    result_params = list_global_parameters()
 
-    assert result_param[:value] == context[:value]
-    assert result_param[:name] == context[:key]
+    exp =
+      MapSet.new(
+        name: context[:key],
+        value: context[:value]
+      )
+
+    assert List.foldl(result_params, false, fn param, acc -> MapSet.new(param) == exp or acc end)
   end
 end

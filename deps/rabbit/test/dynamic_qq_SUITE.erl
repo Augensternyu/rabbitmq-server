@@ -2,16 +2,17 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(dynamic_qq_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
--import(quorum_queue_utils, [wait_for_messages_ready/3,
-                             ra_name/1]).
+-import(queue_utils, [wait_for_messages_ready/3,
+                      ra_name/1]).
 
 -compile(nowarn_export_all).
 -compile(export_all).
@@ -25,12 +26,12 @@ groups() ->
     [
       {clustered, [], [
           {cluster_size_3, [], [
-              recover_follower_after_standalone_restart,
               vhost_deletion,
+              quorum_unaffected_after_vhost_failure,
+              forget_cluster_node,
               force_delete_if_no_consensus,
               takeover_on_failure,
-              takeover_on_shutdown,
-              quorum_unaffected_after_vhost_failure
+              takeover_on_shutdown
             ]}
         ]}
     ].
@@ -48,8 +49,8 @@ end_per_suite(Config) ->
 
 init_per_group(clustered, Config) ->
     rabbit_ct_helpers:set_config(Config, [{rmq_nodes_clustered, true}]);
-init_per_group(cluster_size_2, Config) ->
-    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 2}]);
+init_per_group(cluster_size_5, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 5}]);
 init_per_group(cluster_size_3, Config) ->
     rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 3}]).
 
@@ -71,7 +72,8 @@ init_per_testcase(Testcase, Config) ->
                                                             {rmq_nodename_suffix, Testcase},
                                                             {tcp_ports_base, {skip_n_nodes, TestNumber * ClusterSize}},
                                                             {queue_name, Q},
-                                                            {queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>}]}
+                                                            {queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>},
+                                                                          {<<"x-quorum-initial-group-size">>, long, 3}]}
                                                            ]),
             rabbit_ct_helpers:run_steps(
               Config1,
@@ -105,17 +107,27 @@ vhost_deletion(Config) ->
     ok.
 
 force_delete_if_no_consensus(Config) ->
-    [A, B, C] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    ACh = rabbit_ct_client_helpers:open_channel(Config, A),
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     QName = ?config(queue_name, Config),
     Args = ?config(queue_args, Config),
-    amqp_channel:call(ACh, #'queue.declare'{queue = QName,
-                                            arguments = Args,
-                                            durable = true
-                                           }),
+    amqp_channel:call(Ch, #'queue.declare'{queue = QName,
+                                           arguments = Args,
+                                           durable = true
+                                          }),
+    rabbit_ct_client_helpers:close_channel(Ch),
+
+    RaName = queue_utils:ra_name(QName),
+    {ok, [{_, A}, {_, B}, {_, C}], _} = ra:members({RaName, Server}),
+
+    ACh = rabbit_ct_client_helpers:open_channel(Config, A),
     rabbit_ct_client_helpers:publish(ACh, QName, 10),
-    ok = rabbit_ct_broker_helpers:restart_node(Config, B),
-    ok = rabbit_ct_broker_helpers:stop_node(Config, A),
+
+    %% Delete a member on one node
+    ?assertEqual(ok,
+                 rpc:call(Server, rabbit_quorum_queue, delete_member,
+                          [<<"/">>, QName, B])),
+    %% stop another node
     ok = rabbit_ct_broker_helpers:stop_node(Config, C),
 
     BCh = rabbit_ct_client_helpers:open_channel(Config, B),
@@ -129,6 +141,7 @@ force_delete_if_no_consensus(Config) ->
     BCh2 = rabbit_ct_client_helpers:open_channel(Config, B),
     ?assertMatch(#'queue.delete_ok'{},
                  amqp_channel:call(BCh2, #'queue.delete'{queue = QName})),
+    ok = rabbit_ct_broker_helpers:restart_node(Config, C),
     ok.
 
 takeover_on_failure(Config) ->
@@ -138,16 +151,19 @@ takeover_on_shutdown(Config) ->
     takeover_on(Config, stop_node).
 
 takeover_on(Config, Fun) ->
-    [A, B, C] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
 
-    ACh = rabbit_ct_client_helpers:open_channel(Config, A),
     QName = ?config(queue_name, Config),
     Args = ?config(queue_args, Config),
-    amqp_channel:call(ACh, #'queue.declare'{queue = QName,
+    amqp_channel:call(Ch, #'queue.declare'{queue = QName,
                                             arguments = Args,
                                             durable = true
                                            }),
-    rabbit_ct_client_helpers:publish(ACh, QName, 10),
+    rabbit_ct_client_helpers:publish(Ch, QName, 10),
+
+    RaName = queue_utils:ra_name(QName),
+    {ok, [{_, A}, {_, B}, {_, C}], _} = ra:members({RaName, Server}),
     ok = rabbit_ct_broker_helpers:restart_node(Config, B),
 
     ok = rabbit_ct_broker_helpers:Fun(Config, C),
@@ -179,11 +195,14 @@ quorum_unaffected_after_vhost_failure(Config) ->
                                             arguments = Args,
                                             durable = true
                                            }),
-    timer:sleep(300),
-
-    Info0 = rpc:call(A, rabbit_quorum_queue, infos,
-                     [rabbit_misc:r(<<"/">>, queue, QName)]),
-    ?assertEqual(Servers, lists:sort(proplists:get_value(online, Info0, []))),
+    ?awaitMatch(
+       Servers,
+       begin
+           Info0 = rpc:call(A, rabbit_quorum_queue, infos,
+                            [rabbit_misc:r(<<"/">>, queue, QName)]),
+           lists:sort(proplists:get_value(online, Info0, []))
+       end,
+       60000),
 
     %% Crash vhost on both nodes
     {ok, SupA} = rabbit_ct_broker_helpers:rpc(Config, A, rabbit_vhost_sup_sup, get_vhost_sup, [<<"/">>]),
@@ -191,57 +210,48 @@ quorum_unaffected_after_vhost_failure(Config) ->
     {ok, SupB} = rabbit_ct_broker_helpers:rpc(Config, B, rabbit_vhost_sup_sup, get_vhost_sup, [<<"/">>]),
     exit(SupB, foo),
 
-    Info = rpc:call(A, rabbit_quorum_queue, infos,
-                    [rabbit_misc:r(<<"/">>, queue, QName)]),
-    ?assertEqual(Servers, lists:sort(proplists:get_value(online, Info, []))).
+    ?awaitMatch(
+       Servers,
+       begin
+           Info = rpc:call(A, rabbit_quorum_queue, infos,
+                            [rabbit_misc:r(<<"/">>, queue, QName)]),
+           lists:sort(proplists:get_value(online, Info, []))
+       end,
+       60000).
 
-recover_follower_after_standalone_restart(Config) ->
-    case rabbit_ct_helpers:is_mixed_versions() of
-      false ->
-            %% Tests that followers can be brought up standalone after forgetting the
-            %% rest of the cluster. Consensus won't be reached as there is only one node in the
-            %% new cluster.
-            Servers = [A, B, C] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-            Ch = rabbit_ct_client_helpers:open_channel(Config, A),
+forget_cluster_node(Config) ->
+    %% Tests that quorum queues shrink when forget_cluster_node
+    %% operations are issues.
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
 
-            QName = ?config(queue_name, Config),
-            Args = ?config(queue_args, Config),
-            amqp_channel:call(Ch, #'queue.declare'{queue = QName,
-                                                   arguments = Args,
-                                                   durable = true
-                                                  }),
+    QName = ?config(queue_name, Config),
+    Args = ?config(queue_args, Config),
+    amqp_channel:call(Ch, #'queue.declare'{queue = QName,
+                                           arguments = Args,
+                                           durable = true
+                                          }),
 
-            rabbit_ct_client_helpers:publish(Ch, QName, 15),
-            rabbit_ct_client_helpers:close_channel(Ch),
+    RaName = queue_utils:ra_name(QName),
+    {ok, [{_, A}, {_, B}, {_, C}], _} = ra:members({RaName, Server}),
+    Servers = [A, B, C],
 
-            Name = ra_name(QName),
-            wait_for_messages_ready(Servers, Name, 15),
+    Name = ra_name(QName),
 
-            rabbit_ct_broker_helpers:stop_node(Config, C),
-            rabbit_ct_broker_helpers:stop_node(Config, B),
-            rabbit_ct_broker_helpers:stop_node(Config, A),
+    rabbit_ct_client_helpers:publish(Ch, QName, 15),
+    wait_for_messages_ready(Servers, Name, 15),
+    rabbit_ct_client_helpers:close_channel(Ch),
 
-            %% Restart one follower
-            forget_cluster_node(Config, B, C),
-            forget_cluster_node(Config, B, A),
+    %% Restart one follower
+    forget_cluster_node(Config, C, B),
+    wait_for_messages_ready([C], Name, 15),
+    forget_cluster_node(Config, C, A),
+    wait_for_messages_ready([C], Name, 15),
 
-            ok = rabbit_ct_broker_helpers:start_node(Config, B),
-            wait_for_messages_ready([B], Name, 15),
-            ok = rabbit_ct_broker_helpers:stop_node(Config, B),
-
-            %% Restart the other
-            forget_cluster_node(Config, C, B),
-            forget_cluster_node(Config, C, A),
-
-            ok = rabbit_ct_broker_helpers:start_node(Config, C),
-            wait_for_messages_ready([C], Name, 15),
-            ok = rabbit_ct_broker_helpers:stop_node(Config, C),
-            ok;
-        _ ->
-            {skip, "cannot be run in mixed mode"}
-    end.
+    ok.
 
 %%----------------------------------------------------------------------------
 forget_cluster_node(Config, Node, NodeToRemove) ->
+    ok = rabbit_control_helper:command(stop_app, NodeToRemove),
     rabbit_ct_broker_helpers:rabbitmqctl(
-      Config, Node, ["forget_cluster_node", "--offline", NodeToRemove]).
+      Config, Node, ["forget_cluster_node", NodeToRemove]).

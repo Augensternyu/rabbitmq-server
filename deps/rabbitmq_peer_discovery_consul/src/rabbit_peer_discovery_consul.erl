@@ -4,14 +4,13 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_consul).
 -behaviour(rabbit_peer_discovery_backend).
 
 -include_lib("kernel/include/logger.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbitmq_peer_discovery_common/include/rabbit_peer_discovery.hrl").
 -include("rabbit_peer_discovery_consul.hrl").
 
@@ -33,6 +32,9 @@
 -define(UTIL_MODULE,   rabbit_peer_discovery_util).
 
 -define(CONSUL_CHECK_NOTES, "RabbitMQ Consul-based peer discovery plugin TTL check").
+
+-define(META_KEY_CLUSTER_NAME, <<"cluster">>).
+-define(META_KEY_ERLANG_NODENAME, <<"erlang-node-name">>).
 
 %%
 %% API
@@ -65,21 +67,31 @@ list_nodes() ->
                    {ok, {[], disc}}
            end,
     Fun2 = fun(Proplist) ->
-                   M = maps:from_list(Proplist),
-                   Path = rabbit_peer_discovery_httpc:build_path([v1, health, service, get_config_key(consul_svc, M)]),
-                   HttpOpts = http_options(M),
-                   case rabbit_peer_discovery_httpc:get(get_config_key(consul_scheme, M),
-                                                        get_config_key(consul_host, M),
-                                                        get_integer_config_key(consul_port, M),
-                                                        Path,
-                                                        list_nodes_query_args(),
-                                                        maybe_add_acl([]),
-                                                        HttpOpts) of
-                       {ok, Nodes} ->
-                           IncludeWithWarnings = get_config_key(consul_include_nodes_with_warnings, M),
-                           Result = extract_nodes(
-                                      filter_nodes(Nodes, IncludeWithWarnings)),
-                           {ok, {Result, disc}};
+                   case internal_lock() of
+                       {ok, Priv} ->
+                           try
+                               M = maps:from_list(Proplist),
+                               Path = rabbit_peer_discovery_httpc:build_path([v1, health, service, service_name()]),
+                               HttpOpts = http_options(M),
+                               case rabbit_peer_discovery_httpc:get(get_config_key(consul_scheme, M),
+                                                                    get_config_key(consul_host, M),
+                                                                    get_integer_config_key(consul_port, M),
+                                                                    Path,
+                                                                    list_nodes_query_args(),
+                                                                    maybe_add_acl([]),
+                                                                    HttpOpts) of
+                                   {ok, Nodes} ->
+                                       IncludeWithWarnings = get_config_key(consul_include_nodes_with_warnings, M),
+                                       Result = extract_node(
+                                                  sort_nodes(
+                                                    filter_nodes(Nodes, IncludeWithWarnings))),
+                                       {ok, {Result, disc}};
+                                   {error, _} = Error ->
+                                       Error
+                               end
+                           after
+                               internal_unlock(Priv)
+                           end;
                        {error, _} = Error ->
                            Error
                    end
@@ -160,13 +172,26 @@ post_registration() ->
     send_health_check_pass(),
     ok.
 
--spec lock(Node :: atom()) -> {ok, Data :: term()} | {error, Reason :: string()}.
+-spec lock(Nodes :: [node()]) ->
+    not_supported.
 
-lock(Node) ->
+lock(_Nodes) ->
+    not_supported.
+
+-spec unlock(Data :: term()) -> ok.
+
+unlock(_Data) ->
+    ok.
+
+-spec internal_lock() ->
+    {ok, Data :: term()} | {error, Reason :: string()}.
+
+internal_lock() ->
     M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
     ?LOG_DEBUG(
        "Effective Consul peer discovery configuration: ~tp", [M],
        #{domain => ?RMQLOG_DOMAIN_PEER_DIS}),
+    Node = node(),
     case create_session(Node, get_config_key(consul_svc_ttl, M)) of
         {ok, SessionId} ->
             TRef = start_session_ttl_updater(SessionId),
@@ -174,13 +199,13 @@ lock(Node) ->
             EndTime = Now + get_config_key(lock_wait_time, M),
             lock(TRef, SessionId, Now, EndTime);
         {error, Reason} ->
-            {error, lists:flatten(io_lib:format("Error while creating a session, reason: ~ts",
+            {error, lists:flatten(io_lib:format("Error while creating a session, reason: ~0p",
                                                 [Reason]))}
     end.
 
--spec unlock({SessionId :: string(), TRef :: timer:tref()}) -> ok.
+-spec internal_unlock({SessionId :: string(), TRef :: timer:tref()}) -> ok.
 
-unlock({SessionId, TRef}) ->
+internal_unlock({SessionId, TRef}) ->
     _ = timer:cancel(TRef),
     ?LOG_DEBUG(
        "Stopped session renewal",
@@ -251,24 +276,41 @@ filter_nodes(Nodes, Warn) ->
     false -> Nodes
   end.
 
--spec extract_nodes(ConsulResult :: [#{binary() => term()}]) -> list().
-extract_nodes(Data) -> extract_nodes(Data, []).
+-spec sort_nodes(ConsulResult :: [#{binary() => term()}]) -> [#{binary() => term()}].
+sort_nodes(Nodes) ->
+  lists:sort(
+    fun(NodeA, NodeB) ->
+        IndexA = maps:get(
+                   <<"CreateIndex">>,
+                   maps:get(<<"Service">>, NodeA, #{}), undefined),
+        IndexB = maps:get(
+                   <<"CreateIndex">>,
+                   maps:get(<<"Service">>, NodeB, #{}), undefined),
+        %% `undefined' is always greater than an integer, so we are fine here.
+        IndexA =< IndexB
+    end, Nodes).
 
--spec extract_nodes(ConsulResult :: [#{binary() => term()}], Nodes :: list())
-    -> list().
-extract_nodes([], Nodes)    -> Nodes;
-extract_nodes([H | T], Nodes) ->
-  Service  = maps:get(<<"Service">>, H),
-  Value    = maps:get(<<"Address">>, Service),
-  NodeName = case ?UTIL_MODULE:as_string(Value) of
-    "" ->
-      NodeData = maps:get(<<"Node">>, H),
-      Node = maps:get(<<"Node">>, NodeData),
-      maybe_add_domain(?UTIL_MODULE:node_name(Node));
-    Address ->
-      ?UTIL_MODULE:node_name(Address)
+-spec extract_node(ConsulResult :: [#{binary() => term()}]) -> list().
+extract_node([]) ->
+    [];
+extract_node([H | _]) ->
+  Service = maps:get(<<"Service">>, H),
+  Meta = maps:get(<<"Meta">>, Service, #{}),
+  NodeName = case Meta of
+    #{?META_KEY_ERLANG_NODENAME := Node} ->
+      binary_to_atom(Node);
+    _ ->
+      Value = maps:get(<<"Address">>, Service),
+      case ?UTIL_MODULE:as_string(Value) of
+        "" ->
+          NodeData = maps:get(<<"Node">>, H),
+          Node = maps:get(<<"Node">>, NodeData),
+          maybe_add_domain(?UTIL_MODULE:node_name(Node));
+        Address ->
+          ?UTIL_MODULE:node_name(Address)
+      end
   end,
-  extract_nodes(T, lists:merge(Nodes, [NodeName])).
+  NodeName.
 
 -spec maybe_add_acl(QArgs :: list()) -> list().
 maybe_add_acl(List) ->
@@ -333,8 +375,7 @@ registration_body_add_id() ->
 
 -spec registration_body_add_name(Payload :: list()) -> list().
 registration_body_add_name(Payload) ->
-  M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
-  Name = rabbit_data_coercion:to_atom(get_config_key(consul_svc, M)),
+  Name = rabbit_data_coercion:to_atom(service_name()),
   lists:append(Payload, [{'Name', Name}]).
 
 -spec registration_body_maybe_add_address(Payload :: list())
@@ -416,24 +457,19 @@ registration_body_maybe_add_tag(Payload, Cluster, Tags) ->
 
 -spec registration_body_maybe_add_meta(Payload :: list()) -> list().
 registration_body_maybe_add_meta(Payload) ->
-  M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
-  ClusterName = get_config_key(cluster_name, M),
-  Meta = ?UTIL_MODULE:as_list(get_config_key(consul_svc_meta, M)),
-  registration_body_maybe_add_meta(Payload, ClusterName, Meta).
-
--spec registration_body_maybe_add_meta(Payload :: list(),
-                                       ClusterName :: string(),
-                                       Meta :: list()) -> list().
-registration_body_maybe_add_meta(Payload, "default", []) ->
-  Payload;
-registration_body_maybe_add_meta(Payload, "default", Meta) ->
-  lists:append(Payload, [{<<"meta">>, Meta}]);
-registration_body_maybe_add_meta(Payload, _ClusterName, []) ->
-  Payload;
-registration_body_maybe_add_meta(Payload, ClusterName, Meta) ->
-  Merged = maps:to_list(maps:merge(#{<<"cluster">> => rabbit_data_coercion:to_binary(ClusterName)}, maps:from_list(Meta))),
-  lists:append(Payload, [{<<"meta">>, Merged}]).
-
+    M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
+    Meta0 = ?UTIL_MODULE:as_list(get_config_key(consul_svc_meta, M)),
+    Meta1 = maps:from_list(Meta0),
+    Meta2 = Meta1#{?META_KEY_ERLANG_NODENAME => atom_to_binary(node())},
+    Meta3 = case get_config_key(cluster_name, M) of
+                "default" ->
+                    Meta2;
+                ClusterName ->
+                    ClusterName1 = rabbit_data_coercion:to_binary(ClusterName),
+                    Meta2#{?META_KEY_CLUSTER_NAME => ClusterName1}
+            end,
+    Merged = maps:to_list(Meta3),
+    lists:append(Payload, [{'Meta', Merged}]).
 
 -spec validate_addr_parameters(false | true, false | true) -> false | true.
 validate_addr_parameters(false, true) ->
@@ -482,13 +518,23 @@ service_address(_, false, NIC, _) ->
 -spec service_id() -> string().
 service_id() ->
   M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
-  service_id(get_config_key(consul_svc, M),
-             service_address()).
+  case get_config_key(consul_svc_id, M) of
+      "undefined" ->
+          service_id(get_config_key(consul_svc, M),
+                     service_address());
+      ID ->
+          ID
+  end.
 
 -spec service_id(Name :: string(), Address :: string()) -> string().
 service_id(Service, "undefined") -> Service;
 service_id(Service, Address) ->
   string:join([Service, Address], ":").
+
+-spec service_name() -> string().
+service_name() ->
+  M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
+  get_config_key(consul_svc, M).
 
 -spec service_ttl(TTL :: integer()) -> string().
 service_ttl(Value) ->
@@ -605,7 +651,7 @@ wait_for_list_nodes(N) ->
 %% Create a session to be acquired for a common key
 %% @end
 %%--------------------------------------------------------------------
--spec create_session(atom(), pos_integer()) -> {ok, string()} | {error, Reason::string()}.
+-spec create_session(atom(), pos_integer()) -> {ok, string()} | {error, Reason::any()}.
 create_session(Name, TTL) ->
     case consul_session_create([], maybe_add_acl([]),
                                [{'Name', Name},
@@ -690,7 +736,7 @@ start_session_ttl_updater(SessionId) ->
 %% Tries to acquire lock. If the lock is held by someone else, waits until it
 %% is released, or too much time has passed
 %% @end
--spec lock(timer:tref(), string(), pos_integer(), pos_integer()) -> {ok, string()} | {error, string()}.
+-spec lock(timer:tref(), string(), pos_integer(), pos_integer()) -> {ok, {SessionId :: string(), TRef :: timer:tref()}} | {error, string()}.
 lock(TRef, _, Now, EndTime) when EndTime < Now ->
     _ = timer:cancel(TRef),
     {error, "Acquiring lock taking too long, bailing out"};

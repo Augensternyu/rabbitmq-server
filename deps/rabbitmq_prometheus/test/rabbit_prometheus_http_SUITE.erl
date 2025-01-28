@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_prometheus_http_SUITE).
@@ -11,8 +11,9 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_mgmt_test.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 
 all() ->
     [
@@ -23,7 +24,10 @@ all() ->
         {group, per_object_metrics},
         {group, per_object_endpoint_metrics},
         {group, commercial},
-        {group, detailed_metrics}
+        {group, detailed_metrics},
+        {group, special_chars},
+        {group, authentication},
+        {group, memory_breakdown_endpoint_metrics}
     ].
 
 groups() ->
@@ -35,17 +39,22 @@ groups() ->
             aggregated_metrics_test,
             specific_erlang_metrics_present_test,
             global_metrics_present_test,
-            global_metrics_single_metric_family_test
+            global_metrics_single_metric_family_test,
+            message_size_metrics_present
         ]},
         {per_object_metrics, [], [
             globally_configure_per_object_metrics_test,
             specific_erlang_metrics_present_test,
             global_metrics_present_test,
-            global_metrics_single_metric_family_test
+            global_metrics_single_metric_family_test,
+            message_size_metrics_present
         ]},
         {per_object_endpoint_metrics, [], [
             endpoint_per_object_metrics,
             specific_erlang_metrics_present_test
+        ]},
+        {memory_breakdown_endpoint_metrics, [], [
+            memory_breakdown_metrics_test
         ]},
         {commercial, [], [
             build_info_product_test
@@ -55,17 +64,23 @@ groups() ->
                                      queue_consumer_count_single_vhost_per_object_test,
                                      queue_consumer_count_all_vhosts_per_object_test,
                                      queue_coarse_metrics_per_object_test,
+                                     queue_delivery_metrics_per_object_test,
+                                     exchange_metrics_per_object_test,
+                                     queue_exchange_metrics_per_object_test,
                                      queue_metrics_per_object_test,
                                      queue_consumer_count_and_queue_metrics_mutually_exclusive_test,
                                      vhost_status_metric,
                                      exchange_bindings_metric,
-                                     exchange_names_metric
-        ]}
+                                     exchange_names_metric,
+                                     stream_pub_sub_metrics
+        ]},
+       {special_chars, [], [core_metrics_special_chars]},
+       {authentication, [], [basic_auth]}
     ].
 
 generic_tests() ->
     [
-        get_test,
+     get_test,
         content_type_test,
         encoding_test,
         gzip_encoding_test,
@@ -202,7 +217,49 @@ init_per_group(aggregated_metrics, Config0) ->
 init_per_group(commercial, Config0) ->
     ProductConfig = {rabbit, [{product_name, "WolfMQ"}, {product_version, "2020"}]},
     Config1 = rabbit_ct_helpers:merge_app_env(Config0, ProductConfig),
-    init_per_group(commercial, Config1, []).
+    init_per_group(commercial, Config1, []);
+
+init_per_group(special_chars, Config0) ->
+    StatsEnv = {rabbit, [{collect_statistics, fine}, {collect_statistics_interval, 100}]},
+    Config1 = init_per_group(special_chars, rabbit_ct_helpers:merge_app_env(Config0, StatsEnv), []),
+
+    VHost = <<"vhost\"\n\\">>,
+    rabbit_ct_broker_helpers:add_vhost(Config1, 0, VHost, <<"guest">>),
+    rabbit_ct_broker_helpers:set_full_permissions(Config1, VHost),
+    VHostConn = rabbit_ct_client_helpers:open_unmanaged_connection(Config1, 0, VHost),
+    {ok, VHostCh} = amqp_connection:open_channel(VHostConn),
+
+    %% new line characters (\r and \n) are removed from queue and
+    %% exchange names during creation (unlike for vhosts)
+    QName = <<"queue\"\\">>,
+    #'queue.declare_ok'{} = amqp_channel:call(VHostCh,
+                                              #'queue.declare'{queue = QName,
+                                                               durable = true
+                                                              }),
+    Exchange = <<"exchange\"\\">>,
+    #'exchange.declare_ok'{} = amqp_channel:call(VHostCh, #'exchange.declare'{exchange = Exchange}),
+    #'queue.bind_ok'{} = amqp_channel:call(VHostCh, #'queue.bind'{queue = QName, exchange = Exchange, routing_key = QName}),
+
+    amqp_channel:call(VHostCh,
+                      #'basic.publish'{exchange = Exchange, routing_key = QName},
+                      #amqp_msg{payload = <<"msg">>}),
+
+    Config2 = [{vhost_name, VHost},
+               {queue_name, QName},
+               {exchange_name, Exchange},
+               {connection, VHostConn},
+               {channel, VHostCh}
+               |Config1],
+    Config2;
+
+init_per_group(authentication, Config) ->
+    Config1 = rabbit_ct_helpers:merge_app_env(
+                Config, {rabbitmq_prometheus, [{authentication, [{enabled, true}]}]}),
+    init_per_group(authentication, Config1, []);
+init_per_group(memory_breakdown_endpoint_metrics, Config) ->
+    init_per_group(memory_breakdown_endpoint_metrics, Config, []).
+
+
 
 init_per_group(Group, Config0, Extra) ->
     rabbit_ct_helpers:log_environment(),
@@ -242,7 +299,15 @@ end_per_group(detailed_metrics, Config) ->
 
     %% Delete queues?
     end_per_group_(Config);
-
+end_per_group(special_chars, Config) ->
+    amqp_channel:close(?config(channel, Config)),
+    amqp_connection:close(?config(connection, Config)),
+    %% Delete queues?
+    end_per_group_(Config);
+end_per_group(authentication, Config) ->
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, application, unset_env,
+                                      [rabbitmq_prometheus, authentication]),
+    end_per_group_(Config);
 end_per_group(_, Config) ->
     end_per_group_(Config).
 
@@ -315,12 +380,15 @@ aggregated_metrics_test(Config) ->
     %% Check the first metric value from each ETS table owned by rabbitmq_metrics
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_consumers ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_messages_published_total ", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_exchange_messages_published_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_process_reductions_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_get_ack_total ", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_queue_get_ack_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_connections_opened_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_connection_incoming_bytes_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_connection_incoming_packets_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_queue_messages_published_total ", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_queue_exchange_messages_published_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_process_open_fds ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_process_max_fds ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_io_read_ops_total ", [{capture, none}, multiline])),
@@ -351,12 +419,15 @@ per_object_metrics_test(Config, Path) ->
     %% Check the first metric value from each ETS table owned by rabbitmq_metrics
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_consumers{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_messages_published_total{", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_exchange_messages_published_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_process_reductions_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_channel_get_ack_total{", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_queue_get_ack_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_connections_opened_total ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_connection_incoming_bytes_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_connection_incoming_packets_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_queue_messages_published_total{", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_queue_exchange_messages_published_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_process_open_fds ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_process_max_fds ", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_io_read_ops_total ", [{capture, none}, multiline])),
@@ -371,6 +442,12 @@ per_object_metrics_test(Config, Path) ->
     ?assertEqual(match, re:run(Body, "^rabbitmq_raft_entry_commit_latency_seconds{", [{capture, none}, multiline])),
     %% Check the first TOTALS metric value
     ?assertEqual(match, re:run(Body, "^rabbitmq_connections ", [{capture, none}, multiline])).
+
+memory_breakdown_metrics_test(Config) ->
+    {_Headers, Body} = http_get_with_pal(Config, "/metrics/memory-breakdown", [], 200),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_memory_quorum_queue_erlang_process_bytes ", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_memory_classic_queue_erlang_process_bytes ", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_memory_binary_heap_bytes ", [{capture, none}, multiline])).
 
 build_info_test(Config) ->
     {_Headers, Body} = http_get_with_pal(Config, [], 200),
@@ -416,6 +493,35 @@ global_metrics_present_test(Config) ->
     ?assertEqual(match, re:run(Body, "^rabbitmq_global_messages_acknowledged_total{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_global_publishers{", [{capture, none}, multiline])),
     ?assertEqual(match, re:run(Body, "^rabbitmq_global_consumers{", [{capture, none}, multiline])).
+
+message_size_metrics_present(Config) ->
+    {_Headers, Body} = http_get_with_pal(Config, [], 200),
+
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"100\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"1000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"10000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"100000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"1000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"10000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"10000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"50000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"100000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp091\",le=\"\\+Inf\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_count{protocol=\"amqp091\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_sum{protocol=\"amqp091\"}", [{capture, none}, multiline])),
+
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"100\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"1000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"10000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"100000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"1000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"10000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"10000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"50000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"100000000\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_bucket{protocol=\"amqp10\",le=\"\\+Inf\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_count{protocol=\"amqp10\"}", [{capture, none}, multiline])),
+    ?assertEqual(match, re:run(Body, "^rabbitmq_message_size_bytes_sum{protocol=\"amqp10\"}", [{capture, none}, multiline])).
 
 global_metrics_single_metric_family_test(Config) ->
     {_Headers, Body} = http_get_with_pal(Config, [], 200),
@@ -469,6 +575,93 @@ queue_coarse_metrics_per_object_test(Config) ->
     {_, Body3} = http_get_with_pal(Config, "/metrics/detailed?vhost=vhost-1&vhost=vhost-2&family=queue_coarse_metrics", [], 200),
     ?assertEqual(lists:foldl(fun maps:merge/2, #{}, [Expected1, Expected2]),
                  map_get(rabbitmq_detailed_queue_messages, parse_response(Body3))),
+    ok.
+
+queue_delivery_metrics_per_object_test(Config) ->
+    Expected1 = #{#{queue => "vhost-1-queue-with-consumer", vhost => "vhost-1"} => [7]},
+
+    {_, Body1} = http_get_with_pal(Config,
+                                   "/metrics/detailed?vhost=vhost-1&family=queue_delivery_metrics",
+                                   [], 200),
+    ?assertEqual(
+        Expected1,
+        map_get(
+            rabbitmq_detailed_queue_messages_delivered_ack_total,
+            parse_response(Body1))),
+
+    {_, Body2} = http_get_with_pal(Config,
+                                   "/metrics/detailed?vhost=vhost-2&family=queue_delivery_metrics",
+                                   [], 200),
+    Expected2 = #{#{queue => "vhost-2-queue-with-consumer", vhost => "vhost-2"} => [11]},
+
+    ?assertEqual(
+        Expected2,
+        map_get(
+            rabbitmq_detailed_queue_messages_delivered_ack_total,
+            parse_response(Body2))),
+    ok.
+
+exchange_metrics_per_object_test(Config) ->
+    Expected1 = #{#{exchange => "", vhost => "vhost-1"} => [14]},
+
+    {_, Body} = http_get_with_pal(Config,
+                                   "/metrics/detailed?vhost=vhost-1&family=exchange_metrics",
+                                   [], 200),
+    ?assertEqual(
+        Expected1,
+        map_get(
+            rabbitmq_detailed_exchange_messages_published_total,
+            parse_response(Body))),
+    ok.
+
+queue_exchange_metrics_per_object_test(Config) ->
+    Expected1 = #{
+        #{
+            queue => "vhost-1-queue-with-messages",
+            vhost => "vhost-1",
+            exchange => ""
+        } => [7],
+        #{
+            exchange => "",
+            queue => "vhost-1-queue-with-consumer",
+            vhost => "vhost-1"
+        } => [7]
+    },
+
+    {_, Body1} = http_get_with_pal(Config,
+                                   "/metrics/detailed?vhost=vhost-1&family=queue_exchange_metrics",
+                                   [], 200),
+    ?assertEqual(
+        Expected1,
+        map_get(
+            rabbitmq_detailed_queue_exchange_messages_published_total,
+            parse_response(Body1))),
+
+
+    {_, Body2} = http_get_with_pal(Config,
+                                   "/metrics/detailed?vhost=vhost-2&family=queue_exchange_metrics",
+                                   [], 200),
+
+
+    Expected2 = #{
+        #{
+            queue => "vhost-2-queue-with-messages",
+            vhost => "vhost-2",
+            exchange => ""
+        } => [11],
+        #{
+            exchange => "",
+            queue => "vhost-2-queue-with-consumer",
+            vhost => "vhost-2"
+        } => [11]
+    },
+
+    ?assertEqual(
+        Expected2,
+        map_get(
+            rabbitmq_detailed_queue_exchange_messages_published_total,
+            parse_response(Body2))),
+
     ok.
 
 queue_metrics_per_object_test(Config) ->
@@ -548,6 +741,113 @@ exchange_names_metric(Config) ->
                   }, Names),
     ok.
 
+stream_pub_sub_metrics(Config) ->
+    Stream1 = atom_to_list(?FUNCTION_NAME) ++ "1",
+    MsgPerBatch1 = 2,
+    {ok, S1, C1} = publish_via_stream_protocol(list_to_binary(Stream1), MsgPerBatch1, Config),
+    Stream2 = atom_to_list(?FUNCTION_NAME) ++ "2",
+    MsgPerBatch2 = 3,
+    {ok, S2, C2} = publish_via_stream_protocol(list_to_binary(Stream2), MsgPerBatch2, Config),
+
+    %% aggregated metrics
+
+    %% wait for the stream to emit stats
+    %% (collect_statistics_interval set to 100ms in this test group)
+    ?awaitMatch(V when V == #{rabbitmq_stream_consumer_max_offset_lag => #{undefined => [3]}},
+                 begin
+                     {_, Body1} = http_get_with_pal(Config, "/metrics", [], 200),
+                     maps:with([rabbitmq_stream_consumer_max_offset_lag],
+                               parse_response(Body1))
+                 end,
+                 30000),
+
+    %% per-object metrics
+     {_, Body2} = http_get_with_pal(Config, "/metrics/detailed?family=stream_consumer_metrics",
+                                   [], 200),
+    ParsedBody2 = parse_response(Body2),
+    #{rabbitmq_detailed_stream_consumer_max_offset_lag := MaxOffsetLag} = ParsedBody2,
+
+    ?assertEqual([{#{vhost => "/", queue => Stream1}, [2]},
+                  {#{vhost => "/", queue => Stream2}, [3]}],
+                 lists:sort(maps:to_list(MaxOffsetLag))),
+    dispose_stream_connection(S1, C1, list_to_binary(Stream1)),
+    dispose_stream_connection(S2, C2, list_to_binary(Stream2)),
+    ok.
+
+core_metrics_special_chars(Config) ->
+    {_, Body1} = http_get_with_pal(Config, "/metrics/detailed?family=queue_coarse_metrics", [], 200),
+    ?assertMatch(#{rabbitmq_detailed_queue_messages :=
+                       #{#{vhost => "vhost\\\"\\n\\\\",
+                           queue => "queue\\\"\\\\"} := [I]}}
+                 when I == 0; I == 1,
+                      parse_response(Body1)),
+
+    {_, Body2} = http_get_with_pal(Config, "/metrics/detailed?family=channel_exchange_metrics", [], 200),
+    #{rabbitmq_detailed_channel_messages_published_total := LabelValue2} = parse_response(Body2),
+    ?assertMatch([{#{channel := _,
+                     vhost := "vhost\\\"\\n\\\\",
+                     exchange := "exchange\\\"\\\\"}, [I]}]
+                 when I == 0; I == 1,
+                      maps:to_list(LabelValue2)),
+
+    {_, Body3} = http_get_with_pal(Config, "/metrics/detailed?family=channel_queue_exchange_metrics", [], 200),
+    #{rabbitmq_detailed_queue_messages_published_total := LabelValue3} = parse_response(Body3),
+    ?assertMatch([{#{channel := _,
+                     queue_vhost := "vhost\\\"\\n\\\\",
+                     queue := "queue\\\"\\\\",
+                     exchange_vhost := "vhost\\\"\\n\\\\",
+                     exchange := "exchange\\\"\\\\"}, [I]}]
+                 when I == 0; I == 1,
+                      maps:to_list(LabelValue3)),
+    ok.
+
+basic_auth(Config) ->
+    http_get(Config, [{"accept-encoding", "deflate"}], 401),
+    AuthHeader = rabbit_mgmt_test_util:auth_header("guest", "guest"),
+    http_get(Config, [{"accept-encoding", "deflate"}, AuthHeader], 200),
+
+    rabbit_ct_broker_helpers:add_user(Config, <<"monitor">>),
+    rabbit_ct_broker_helpers:set_user_tags(Config, 0, <<"monitor">>, [monitoring]),
+    MonAuthHeader = rabbit_mgmt_test_util:auth_header("monitor", "monitor"),
+    http_get(Config, [{"accept-encoding", "deflate"}, MonAuthHeader], 200),
+
+    rabbit_ct_broker_helpers:add_user(Config, <<"management">>),
+    rabbit_ct_broker_helpers:set_user_tags(Config, 0, <<"management">>, [management]),
+    MgmtAuthHeader = rabbit_mgmt_test_util:auth_header("management", "management"),
+    http_get(Config, [{"accept-encoding", "deflate"}, MgmtAuthHeader], 401),
+
+    rabbit_ct_broker_helpers:delete_user(Config, <<"monitor">>),
+    rabbit_ct_broker_helpers:delete_user(Config, <<"management">>).
+
+%% -------------------------------------------------------------------
+%% Helpers
+%% -------------------------------------------------------------------
+
+publish_via_stream_protocol(Stream, MsgPerBatch, Config) ->
+    {ok, S, C0} = stream_test_utils:connect(Config, 0),
+    {ok, C1} = stream_test_utils:create_stream(S, C0, Stream),
+    PublisherId = 98,
+    {ok, C2} = stream_test_utils:declare_publisher(S, C1, Stream, PublisherId),
+    Payloads = lists:duplicate(MsgPerBatch, <<"m1">>),
+    SequenceFrom1 = 1,
+    {ok, C3} = stream_test_utils:publish(S, C2, PublisherId, SequenceFrom1, Payloads),
+
+    PublisherId2 = 99,
+    {ok, C4} = stream_test_utils:declare_publisher(S, C3, Stream, PublisherId2),
+    Payloads2 = lists:duplicate(MsgPerBatch, <<"m2">>),
+    SequenceFrom2 = SequenceFrom1 + MsgPerBatch,
+    {ok, C5} = stream_test_utils:publish(S, C4, PublisherId2, SequenceFrom2, Payloads2),
+
+    SubscriptionId = 97,
+    {ok, C6} = stream_test_utils:subscribe(S, C5, Stream, SubscriptionId, _InitialCredit = 1),
+    %% delivery of first batch of messages
+    {{deliver, SubscriptionId, _Bin1}, C7} = stream_test_utils:receive_stream_commands(S, C6),
+    {ok, S, C7}.
+
+dispose_stream_connection(Sock, C0, Stream) ->
+    {ok, C1} = stream_test_utils:delete_stream(Sock, C0, Stream),
+    {_MetadataUpdateFrame, C2} = stream_test_utils:receive_stream_commands(Sock, C1),
+    {ok, _} = stream_test_utils:close(Sock, C2).
 
 http_get(Config, ReqHeaders, CodeExp) ->
     Path = proplists:get_value(prometheus_path, Config, "/metrics"),

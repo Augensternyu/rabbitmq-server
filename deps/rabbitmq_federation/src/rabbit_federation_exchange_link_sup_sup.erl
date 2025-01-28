@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_federation_exchange_link_sup_sup).
@@ -17,6 +17,7 @@
 
 -export([start_link/0, start_child/1, adjust/1, stop_child/1]).
 -export([init/1]).
+-export([id_to_khepri_path/1]).
 
 %%----------------------------------------------------------------------------
 
@@ -75,5 +76,11 @@ init([]) ->
     {ok, {{one_for_one, 1200, 60}, []}}.
 
 %% See comment in rabbit_federation_queue_link_sup_sup:id/1
-id(X = #exchange{policy = Policy}) -> X1 = rabbit_exchange:immutable(X),
-                                      X1#exchange{policy = Policy}.
+id(X = #exchange{policy = Policy}) ->
+    X1 = rabbit_exchange:immutable(X),
+    X2 = X1#exchange{policy = Policy},
+    X2.
+
+id_to_khepri_path(
+  #exchange{name = #resource{virtual_host = VHost, name = Name}}) ->
+    [exchange, VHost, Name].

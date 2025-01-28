@@ -2,12 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_ldap_seed).
 
--include_lib("eldap/include/eldap.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 -export([seed/1,delete/1]).
 
@@ -32,16 +32,21 @@ rabbitmq_com() ->
 
 delete(Logon) ->
     H = connect(Logon),
-    eldap:delete(H, "ou=test,dc=rabbitmq,dc=com"),
-    eldap:delete(H, "ou=test,ou=vhosts,dc=rabbitmq,dc=com"),
-    eldap:delete(H, "ou=vhosts,dc=rabbitmq,dc=com"),
-    [ eldap:delete(H, P) || {P, _} <- groups() ],
-    [ eldap:delete(H, P) || {P, _} <- people() ],
-    eldap:delete(H, "ou=groups,dc=rabbitmq,dc=com"),
-    eldap:delete(H, "ou=people,dc=rabbitmq,dc=com"),
-    eldap:delete(H, "dc=rabbitmq,dc=com"),
-    eldap:close(H),
+    assert_benign(eldap:delete(H, "ou=test,dc=rabbitmq,dc=com")),
+    assert_benign(eldap:delete(H, "ou=test,ou=vhosts,dc=rabbitmq,dc=com")),
+    assert_benign(eldap:delete(H, "ou=vhosts,dc=rabbitmq,dc=com")),
+    [ assert_benign(eldap:delete(H, P)) || {P, _} <- groups() ],
+    [ assert_benign(eldap:delete(H, P)) || {P, _} <- people() ],
+    assert_benign(eldap:delete(H, "ou=groups,dc=rabbitmq,dc=com")),
+    assert_benign(eldap:delete(H, "ou=people,dc=rabbitmq,dc=com")),
+    assert_benign(eldap:delete(H, "dc=rabbitmq,dc=com")),
+    ok = eldap:close(H),
     ok.
+
+assert_benign({error,noSuchObject}) ->
+    ok;
+assert_benign(Other) ->
+    ?assertEqual(ok, Other).
 
 people() ->
     [ bob(),
@@ -152,10 +157,7 @@ peter() ->
                        "organizationalPerson",
                        "person"]},
       {"loginShell", ["/bin/bash"]},
-      {"userPassword", ["password"]},
-      {"memberOf", ["cn=wheel,ou=groups,dc=rabbitmq,dc=com",
-                    "cn=staff,ou=groups,dc=rabbitmq,dc=com",
-                    "cn=people,ou=groups,dc=rabbitmq,dc=com"]}]}.
+      {"userPassword", ["password"]}]}.
 
 carol() ->
     {"uid=carol,ou=people,dc=rabbitmq,dc=com",
@@ -189,7 +191,11 @@ add(H, {A, B}) ->
     ok = eldap:add(H, A, B).
 
 connect({Host, Port}) ->
-    {ok, H} = eldap:open([Host], [{port, Port}]),
+    LogOpts = [],
+    %% This can be swapped with the line above to add verbose logging of the
+    %% LDAP operations used for seeding.
+    %% LogOpts = [{log, fun(_Level, FormatString, FormatArgs) -> ct:pal(FormatString, FormatArgs) end}],
+    {ok, H} = eldap:open([Host], [{port, Port} | LogOpts]),
     ok = eldap:simple_bind(H, "cn=admin,dc=rabbitmq,dc=com", "admin"),
     H.
 

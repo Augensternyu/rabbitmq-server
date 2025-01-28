@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_external_stats).
@@ -14,8 +14,6 @@
          code_change/3]).
 
 -export([list_registry_plugins/1]).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -define(METRICS_KEYS, [fd_used, sockets_used, mem_used, disk_free, proc_used, gc_num,
                        gc_bytes_reclaimed, context_switches]).
@@ -104,29 +102,27 @@ get_used_fd({unix, _}, State0) ->
 %% you will see a list of handles of various types, including network sockets
 %% shown as file handles to \Device\Afd.
 get_used_fd({win32, _}, State0) ->
+    MissingHandleMsg = "Could not execute handle.exe, please install from "
+                       "https://learn.microsoft.com/en-us/sysinternals/downloads/handle",
     Pid = os:getpid(),
     case os:find_executable("handle.exe") of
         false ->
-            State1 = log_fd_warning_once("Could not find handle.exe, using powershell to determine handle count", [], State0),
-            UsedFd = get_used_fd_via_powershell(Pid),
-            {State1, UsedFd};
+            State1 = log_fd_warning_once(MissingHandleMsg, [], State0),
+            {State1, 0};
         HandleExe ->
             Args = ["/accepteula", "-s", "-p", Pid],
             {ok, HandleExeOutput} = rabbit_misc:win32_cmd(HandleExe, Args),
             case HandleExeOutput of
                 [] ->
-                    State1 = log_fd_warning_once("Could not execute handle.exe, using powershell to determine handle count", [], State0),
-                    UsedFd = get_used_fd_via_powershell(Pid),
-                    {State1, UsedFd};
+                    State1 = log_fd_warning_once(MissingHandleMsg, [], State0),
+                    {State1, 0};
                 _  ->
                     case find_files_line(HandleExeOutput) of
                         unknown ->
                             State1 = log_fd_warning_once("handle.exe output did not contain "
-                                                         "a line beginning with 'File', using "
-                                                         "powershell to determine used file descriptor "
-                                                         "count: ~tp", [HandleExeOutput], State0),
-                            UsedFd = get_used_fd_via_powershell(Pid),
-                            {State1, UsedFd};
+                                                         "a line beginning with 'File': ~tp",
+                                                         [HandleExeOutput], State0),
+                            {State1, 0};
                         UsedFd ->
                             {State0, UsedFd}
                     end
@@ -143,11 +139,6 @@ find_files_line(["File " ++ Rest | _T]) ->
     list_to_integer(Files);
 find_files_line([_H | T]) ->
     find_files_line(T).
-
-get_used_fd_via_powershell(Pid) ->
-    Cmd = "Get-Process -Id " ++ Pid ++ " | Select-Object -ExpandProperty HandleCount",
-    {ok, [Result]} = rabbit_misc:pwsh_cmd(Cmd),
-    list_to_integer(Result).
 
 -define(SAFE_CALL(Fun, NoProcFailResult),
     try
@@ -204,10 +195,11 @@ i(fd_used, State) ->
     get_used_fd(State);
 i(fd_total, #state{fd_total = FdTotal}=State) ->
     {State, FdTotal};
+%% sockets_used and sockets_total are unused since RabbitMQ 4.0.
 i(sockets_used, State) ->
-    {State, proplists:get_value(sockets_used, file_handle_cache:info([sockets_used]))};
+    {State, 0};
 i(sockets_total, State) ->
-    {State, proplists:get_value(sockets_limit, file_handle_cache:info([sockets_limit]))};
+    {State, 0};
 i(os_pid, State) ->
     {State, rabbit_data_coercion:to_utf8_binary(os:getpid())};
 i(mem_used, State) ->
@@ -252,7 +244,7 @@ i(net_ticktime, State) ->
 i(persister_stats, State) ->
     {State, persister_stats(State)};
 i(enabled_plugins, State) ->
-    {ok, Dir} = application:get_env(rabbit, enabled_plugins_file),
+    Dir = rabbit_plugins:enabled_plugins_file(),
     {State, rabbit_plugins:read_enabled(Dir)};
 i(auth_mechanisms, State) ->
     {ok, Mechanisms} = application:get_env(rabbit, auth_mechanisms),
@@ -422,10 +414,23 @@ update_state(State0) ->
     FHC = get_fhc_stats(),
     State0#state{fhc_stats = FHC}.
 
+%% @todo All these stats are zeroes. Remove eventually.
 get_fhc_stats() ->
     dict:to_list(dict:merge(fun(_, V1, V2) -> V1 + V2 end,
-                            dict:from_list(file_handle_cache_stats:get()),
+                            dict:from_list(zero_fhc_stats()),
                             dict:from_list(get_ra_io_metrics()))).
+
+zero_fhc_stats() ->
+    [{{Op, Counter}, 0} || Op <- [io_read, io_write],
+                           Counter <- [count, bytes, time]]
+    ++
+    [{{Op, Counter}, 0} || Op <- [io_sync, io_seek],
+                           Counter <- [count, time]]
+    ++
+    [{{Op, Counter}, 0} || Op <- [io_reopen, mnesia_ram_tx, mnesia_disk_tx,
+                                  msg_store_read, msg_store_write,
+                                  queue_index_write, queue_index_read],
+                           Counter <- [count]].
 
 get_ra_io_metrics() ->
     lists:sort(ets:tab2list(ra_io_metrics)).

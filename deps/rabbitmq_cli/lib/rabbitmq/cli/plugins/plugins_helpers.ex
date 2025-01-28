@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Plugins.Helpers do
   import RabbitMQ.CLI.Core.DataCoercion
@@ -195,7 +195,9 @@ defmodule RabbitMQ.CLI.Plugins.Helpers do
     all_plugin_names = Enum.map(all, &plugin_name/1)
     missing = MapSet.difference(MapSet.new(plugins), MapSet.new(all_plugin_names))
 
-    case Enum.empty?(missing) do
+    hard_write = Map.get(opts, :hard_write, false)
+
+    case Enum.empty?(missing) or hard_write do
       true ->
         case :rabbit_file.write_term_file(to_charlist(plugins_file), [plugins]) do
           :ok ->

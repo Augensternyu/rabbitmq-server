@@ -24,6 +24,7 @@ var KNOWN_ARGS = {'alternate-exchange':        {'short': 'AE',  'type': 'string'
                   'x-dead-letter-exchange':    {'short': 'DLX', 'type': 'string'},
                   'x-dead-letter-routing-key': {'short': 'DLK', 'type': 'string'},
                   'x-queue-master-locator':    {'short': 'ML', 'type': 'string'},
+                  'x-queue-leader-locator':    {'short': 'LL', 'type': 'string'},
                   'x-max-priority':            {'short': 'Pri', 'type': 'int'},
                   'x-single-active-consumer':  {'short': 'SAC', 'type': 'boolean'}};
 
@@ -40,18 +41,21 @@ for (var k in IMPLICIT_ARGS) ALL_ARGS[k] = IMPLICIT_ARGS[k];
 for (var k in KNOWN_ARGS)    ALL_ARGS[k] = KNOWN_ARGS[k];
 
 var NAVIGATION = {'Overview':    ['#/',            "management"],
-                  'Connections': ['#/connections', "management"],
-                  'Channels':    ['#/channels',    "management"],
-                  'Exchanges':   ['#/exchanges',   "management"],
-                  'Queues':      ['#/queues',      "management"],
+                  'Connections': ['#/connections', "management", true],
+                  'Channels':    ['#/channels',    "management", true],
+                  'Exchanges':   ['#/exchanges',   "management", true],
+                  'Queues and Streams': ['#/queues',      "management", true],
                   'Admin':
                     [{'Users':         ['#/users',              "administrator"],
                       'Virtual Hosts': ['#/vhosts',             "administrator"],
                       'Feature Flags': ['#/feature-flags',      "administrator"],
+                      'Deprecated Features': ['#/deprecated-features',      "administrator"],
                       'Policies':      ['#/policies',           "management"],
                       'Limits':        ['#/limits',             "management"],
                       'Cluster':       ['#/cluster-name',       "administrator"]},
-                     "management"]
+                     "management",
+                     true
+                     ]
                  };
 
 var CHART_RANGES = {'global': [], 'basic': []};
@@ -104,7 +108,8 @@ var ALL_COLUMNS =
                         ['rate-redeliver', 'redelivered',        false],
                         ['rate-ack',       'ack',                true]]},
      'connections':
-     {'Overview': [['user',   'User name', true],
+     {'Overview': [['container_id', 'Container ID', true],
+                   ['user',   'User name', true],
                    ['state',  'State',     true]],
       'Details': [['ssl',            'TLS',      true],
                   ['ssl_info',       'TLS details',    false],
@@ -133,11 +138,11 @@ var ALL_COLUMNS =
                         ['rate-deliver', 'deliver / get', true]]},
      'overview':
      {'Statistics': [['file_descriptors',   'File descriptors',   true],
-                     ['socket_descriptors', 'Socket descriptors', true],
                      ['erlang_processes',   'Erlang processes',   true],
                      ['memory',             'Memory',             true],
                      ['disk_space',         'Disk space',         true]],
       'General': [['uptime',    'Uptime',       true],
+                  ['cores',     'Cores',        true],
                   ['info',      'Info',         true],
                   ['reset_stats',     'Reset stats',        true]]}};
 
@@ -175,7 +180,7 @@ const QUEUE_EXTRA_CONTENT_REQUESTS = [];
 // All help ? popups
 var HELP = {
     'delivery-limit':
-      'The number of allowed unsuccessful delivery attempts. Once a message has been delivered unsuccessfully more than this many times it will be dropped or dead-lettered, depending on the queue configuration.',
+      'The number of allowed unsuccessful delivery attempts. Once a message has been delivered unsuccessfully more than this many times it will be dropped or dead-lettered, depending on the queue configuration. The default is always 20. A value of -1 or lower sets the limit to "unlimited".',
 
     'exchange-auto-delete':
       'If yes, the exchange will delete itself after at least one queue or exchange has been bound to this one, and then all queues or exchanges have been unbound.',
@@ -189,6 +194,9 @@ var HELP = {
     'queue-message-ttl':
     'How long a message published to a queue can live before it is discarded (milliseconds).<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/ttl.html#per-queue-message-ttl">x-message-ttl</a>" argument.)',
 
+    'queue-consumer-timeout':
+    'If a consumer does not ack its delivery for more than the <a href="https://www.rabbitmq.com/consumers.html#acknowledgement-timeout">timeout value</a> (30 minutes by default), its channel will be closed with a <code>PRECONDITION_FAILED</code> channel exception.',
+
     'queue-expires':
       'How long a queue can be unused for before it is automatically deleted (milliseconds).<br/>(Sets the "<a target="_blank" href="https://rabbitmq.com/ttl.html#queue-ttl">x-expires</a>" argument.)',
 
@@ -201,8 +209,8 @@ var HELP = {
     'queue-max-age':
       'How long a message published to a stream queue can live before it is discarded.',
 
-    'queue-stream-max-segment-size-bytes':
-      'Total segment size for stream segments on disk.<br/>(Sets the x-stream-max-segment-size-bytes argument.)',
+    'queue-stream-filter-size-bytes':
+      'Size of the filter data attached to each stream chunk.<br/>(Sets the x-stream-filter-size-bytes argument.)',
 
     'queue-auto-delete':
       'If yes, the queue will delete itself after at least one consumer has connected, and then all consumers have disconnected.',
@@ -225,17 +233,11 @@ var HELP = {
     'queue-max-age':
       'Sets the data retention for stream queues in time units </br>(Y=Years, M=Months, D=Days, h=hours, m=minutes, s=seconds).<br/>E.g. "1h" configures the stream to only keep the last 1 hour of received messages.</br></br>(Sets the x-max-age argument.)',
 
-    'queue-lazy':
-      'Set the queue into lazy mode, keeping as many messages as possible on disk to reduce RAM usage; if not set, the queue will keep an in-memory cache to deliver messages as fast as possible.<br/>(Sets the "<a target="_blank" href="https://www.rabbitmq.com/lazy-queues.html">x-queue-mode</a>" argument.)',
-
-    'queue-version':
-      'Set the queue version. Defaults to version 1.<br/>Version 1 has a journal-based index that embeds small messages.<br/>Version 2 has a different index which improves memory usage and performance in many scenarios, as well as a per-queue store for messages that were previously embedded.<br/>(Sets the "x-queue-version" argument.)',
-
     'queue-overflow':
       'Sets the <a target="_blank" href="https://www.rabbitmq.com/maxlength.html#overflow-behaviour">queue overflow behaviour</a>. This determines what happens to messages when the maximum length of a queue is reached. Valid values are <code>drop-head</code>, <code>reject-publish</code> or <code>reject-publish-dlx</code>. The quorum queue type only supports <code>drop-head</code> and <code>reject-publish</code>.',
 
     'queue-master-locator':
-       'Set the queue into master location mode, determining the rule by which the queue master is located when declared on a cluster of nodes.<br/>(Sets the "<a target="_blank" href="https://www.rabbitmq.com/ha.html">x-queue-master-locator</a>" argument.)',
+       'Deprecated: please use `queue-leader-locator` instead. <a target="_blank" href="https://www.rabbitmq.com/docs/clustering#replica-placement">Controls which node the queue will be running on.</a>',
 
     'queue-leader-locator':
        'Set the rule by which the queue leader is located when declared on a cluster of nodes. Valid values are <code>client-local</code> (default) and <code>balanced</code>.',
@@ -249,8 +251,14 @@ var HELP = {
     'queue-messages':
       '<p>Message counts.</p><p>Note that "in memory" and "persistent" are not mutually exclusive; persistent messages can be in memory as well as on disc, and transient messages can be paged out if memory is tight. Non-durable queues will consider all messages to be transient.</p>',
 
+    'queue-messages-stream':
+      '<p>Approximate message counts.</p><p>Note that streams store some entries that are not user messages such as offset tracking data which is included in this count. Thus this value will never be completely correct.</p>',
+
     'queue-dead-lettered':
       'Applies to messages dead-lettered with dead-letter-strategy <code>at-least-once</code>.',
+
+    'queue-delivery-limit':
+      'The number of times a message can be returned to this queue before it is dead-lettered (if configured) or dropped.',
 
     'queue-message-body-bytes':
       '<p>The sum total of the sizes of the message bodies in this queue. This only counts message bodies; it does not include message properties (including headers) or metadata used by the queue.</p><p>Note that "in memory" and "persistent" are not mutually exclusive; persistent messages can be in memory as well as on disc, and transient messages can be paged out if memory is tight. Non-durable queues will consider all messages to be transient.</p><p>If a message is routed to multiple queues on publication, its body will be stored only once (in memory and on disk) and shared between queues. The value shown here does not take account of this effect.</p>',
@@ -297,33 +305,23 @@ var HELP = {
       </dl>',
 
     'channel-prefetch':
-      'Channel prefetch counts. \
+      'Channel prefetch count.\
        <p> \
-         Each channel can have two prefetch counts: A per-consumer count, which \
-         will limit each new consumer created on the channel, and a global \
-         count, which is shared between all consumers on the channel.\
+         Each channel can have a prefetch count. The prefetch is the number of messages that will be held \
+         by the client. Setting a value of 0 will result in an unlimited prefetch. \
        </p> \
-       <p> \
-         This column shows one, the other, or both limits if they are set. \
-       </p>',
+       ',
 
     'file-descriptors':
       '<p>File descriptor count and limit, as reported by the operating \
       system. The count includes network sockets and file handles.</p> \
-      <p>To optimize disk access RabbitMQ uses as many free descriptors as are \
-      available, so the count may safely approach the limit. \
-      However, if most of the file descriptors are used by sockets then \
-      persister performance will be negatively impacted.</p> \
+      <p>To optimize disk access RabbitMQ uses as many file descriptors as \
+      needed, so the limit must be high enough for safe operation.</p> \
       <p>To change the limit on Unix / Linux, use "ulimit -n". To change \
       the limit on Windows, set the ERL_MAX_PORTS environment variable</p> \
       <p>To report used file handles on Windows, handle.exe from \
       sysinternals must be installed in your path. You can download it \
       <a target="_blank" href="https://technet.microsoft.com/en-us/sysinternals/bb896655">here</a>.</p>',
-
-    'socket-descriptors':
-      'The network sockets count and limit managed by RabbitMQ.<br/> \
-      When the limit is exhausted RabbitMQ will stop accepting new \
-      network connections.',
 
     'memory-alarm':
       '<p>The <a target="_blank" href="https://www.rabbitmq.com/memory.html#memsup">memory \
@@ -445,10 +443,6 @@ var HELP = {
         <dd>Rate at which empty queues are hit in response to basic.get.</dd>\
         <dt>Return</dt>\
         <dd>Rate at which basic.return is sent to publishers for unroutable messages published with the \'mandatory\' flag set.</dd>\
-        <dt>Disk read</dt>\
-        <dd>Rate at which queues read messages from disk.</dd>\
-        <dt>Disk write</dt>\
-        <dd>Rate at which queues write messages to disk.</dd>\
       </dl>\
       <p>\
         Note that the last two items originate in queues rather than \
@@ -468,18 +462,6 @@ var HELP = {
 
     'binary-use' : '<p>Binary accounting is not exact; binaries are shared between processes (and thus the same binary might be counted in more than one section), and the VM does not allow us to track binaries that are not associated with processes (so some binary use might not appear at all).</p>',
 
-    'policy-ha-mode' : 'One of <code>all</code> (mirror to all nodes in the cluster), <code>exactly</code> (mirror to a set number of nodes) or <code>nodes</code> (mirror to an explicit list of nodes). If you choose one of the latter two, you must also set <code>ha-params</code>.',
-
-    'policy-ha-params' : 'Absent if <code>ha-mode</code> is <code>all</code>, a number\
-    if <code>ha-mode</code> is <code>exactly</code>, or a list\
-    of strings if <code>ha-mode</code> is <code>nodes</code>.',
-
-    'policy-ha-sync-mode' : 'One of <code>manual</code> or <code>automatic</code>. <a target="_blank" href="https://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
-
-    'policy-ha-promote-on-shutdown' : 'One of <code>when-synced</code> or <code>always</code>. <a target="_blank" href="https://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
-
-    'policy-ha-promote-on-failure' : 'One of <code>when-synced</code> or <code>always</code>. <a target="_blank" href="https://www.rabbitmq.com/ha.html#unsynchronised-mirrors">Learn more</a>',
-
     'policy-federation-upstream-set' :
     'A string; only if the federation plugin is enabled. Chooses the name of a set of upstreams to use with federation, or "all" to use all upstreams. Incompatible with <code>federation-upstream</code>.',
 
@@ -490,8 +472,7 @@ var HELP = {
 
     'filter-regex' :
     'Whether to enable regular expression matching. Both string literals \
-    and regular expressions are matched in a case-insensitive manner.<br/><br/> \
-    (<a href="https://developer.mozilla.org/en/docs/Web/JavaScript/Guide/Regular_Expressions" target="_blank">Regular expression reference</a>)',
+    and regular expressions are matched in a case-insensitive manner.<br/><br/>',
 
     'consumer-active' :
     'Whether the consumer is active or not, i.e. whether the consumer can get messages from the queue. \
@@ -501,7 +482,7 @@ var HELP = {
     (<a href="https://www.rabbitmq.com/consumers.html#active-consumer" target="_blank">Documentation</a>)',
 
     'consumer-owner' :
-    '<a href="https://www.rabbitmq.com/consumers.html">AMQP consumers</a> belong to an AMQP channel, \
+    '<a href="https://www.rabbitmq.com/consumers.html">AMQP 0-9-1 consumers</a> belong to a channel, \
     and <a href="https://www.rabbitmq.com/stream.html">stream consumers</a> belong to a stream connection.',
 
     'plugins' :
@@ -602,8 +583,37 @@ var HELP = {
         <dd>Rate at which queues are created. Declaring a queue that already exists counts for a "Declared" event, but not for a "Created" event. </dd>\
         <dt>Deleted</dt>\
         <dd>Rate at which queues are deleted.</dd>\
-     </dl> '
+     </dl> ',
 
+    'container-id':
+      'Name of the client application as sent from client to RabbitMQ in the "container-id" field of the AMQP 1.0 <a target="_blank" href="https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-transport-v1.0-os.html#type-open">open</a> frame.',
+
+    'incoming-links':
+      '<a target="_blank" href="https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-transport-v1.0-os.html#section-links">Links</a> where the client is the sender/publisher and RabbitMQ is the receiver of messages.',
+
+    'outgoing-links':
+      '<a target="_blank" href="https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-transport-v1.0-os.html#section-links">Links</a> where the client is the receiver/consumer and RabbitMQ is the sender of messages.',
+
+    'target-address':
+      'The "address" field of the link <a target="_blank" href="https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-messaging-v1.0-os.html#type-target">target</a>.',
+
+    'source-address':
+      'The "address" field of the link <a target="_blank" href="https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-messaging-v1.0-os.html#type-source">source</a>.',
+
+    'amqp-source-queue':
+      'The client receives messages from this queue.',
+
+    'amqp-unconfirmed-messages':
+      'Number of messages that have been sent to queues but have not been confirmed by all queues.',
+
+    'snd-settle-mode':
+      '<a target="_blank" href="https://docs.oasis-open.org/amqp/core/v1.0/os/amqp-core-transport-v1.0-os.html#type-sender-settle-mode">Sender Settle Mode</a>',
+
+    'sender-settles':
+      '"true" if the sender sends all deliveries settled to the receiver. "false" if the sender sends all deliveries initially unsettled to the receiver.',
+
+    'outgoing-unsettled-deliveries':
+      'Number of messages that have been sent to consumers but have not yet been settled/acknowledged.'
 };
 
 ///////////////////////////////////////////////////////////////////////////
@@ -639,10 +649,77 @@ var exchange_types;
 // Used for access control
 var user_tags;
 var user;
+var ac = new AccessControl();
+var display = new DisplayControl();
+
+var ui_data_model = {
+  vhosts: [],
+  nodes: [],
+
+};
+
+// Access control
+
+function AccessControl() {
+
+  this.update = function(user, ui_data_model) {
+    this.user = user;
+    this.user_tags = expand_user_tags(user.tags);
+    this.ui_data_model = ui_data_model;
+  };
+  this.isMonitoringUser = function() {
+    if (this.user_tags)
+      return this.user_tags.includes("monitoring");
+    else return false;
+  };
+  this.isAdministratorUser = function() {
+    if (this.user_tags)
+      return this.user_tags.includes("administrator");
+    else return false;
+  };
+  this.isPolicyMakerUser = function() {
+    if (this.user_tags)
+      return this.user_tags.includes("policymaker");
+    else return false;
+  };
+  this.canAccessVhosts = function() {
+    if (this.ui_data_model)
+      return this.ui_data_model.vhosts.length > 0;
+    else return false;
+  };
+  this.canListNodes = function() {
+    if (this.ui_data_model)
+      return this.isMonitoringUser() && this.ui_data_model.nodes.length > 1;
+    else return false;
+  };
+
+};
+
+function DisplayControl() {
+  this.nodes = false
+  this.vhosts = false
+  this.rabbitmqVersions = false
+
+  this.update = function(overview, ui_data_model) {    
+    this.nodes = ac.canListNodes() && ui_data_model.nodes.length > 1
+    this.vhosts = ac.canAccessVhosts()
+    this.rabbitmqVersions = false
+    var v = '';
+    for (var i = 0; i < ui_data_model.nodes.length; i++) {
+        var v1 = fmt_rabbit_version(ui_data_model.nodes[i].applications);
+        if (v1 != 'unknown') {
+            if (v != '' && v != v1) this.rabbitmqVersions = true;
+            v = v1;
+        }
+    }
+    this.data = ui_data_model;
+  }
+
+}
+
 
 // Set up the above vars
-function setup_global_vars() {
-    var overview = JSON.parse(sync_get('/overview'));
+function setup_global_vars(overview) {
     rates_mode = overview.rates_mode;
     is_op_policy_updating_enabled = overview.is_op_policy_updating_enabled;
     user_tags = expand_user_tags(user.tags);
@@ -656,9 +733,9 @@ function setup_global_vars() {
       '<li>Cluster ' + (user_administrator ?  '<a href="#/cluster-name">' + cluster_name + '</a>' : cluster_name) + '</li>'
     );
 
-    user_name = fmt_escape_html(user.name);
+    user_name = fmt_escape_html(user.name); 
     $('#header #logout').prepend(
-      'User ' + (user_administrator && !oauth.enabled ?  '<a href="#/users/' + user_name + '">' + user_name + '</a>' : user_name)
+      'User ' + (user_administrator && user.is_internal_user ?  '<a href="#/users/' + user_name + '">' + user_name + '</a>' : user_name)
     );
 
     var product = overview.rabbitmq_version;
@@ -677,8 +754,8 @@ function setup_global_vars() {
         if (nodes.length > 1) {
             nodes_interesting = true;
             var v = '';
-            for (var i = 0; i < nodes.length; i++) {
-                var v1 = fmt_rabbit_version(nodes[i].applications);
+            for (var i = 0; i < ui_data_model.nodes.length; i++) {
+                var v1 = fmt_rabbit_version(ui_data_model.nodes[i].applications);
                 if (v1 != 'unknown') {
                     if (v != '' && v != v1) rabbit_versions_interesting = true;
                     v = v1;
@@ -686,7 +763,7 @@ function setup_global_vars() {
             }
         }
     }
-    vhosts_interesting = JSON.parse(sync_get('/vhosts')).length > 1;
+    vhosts_interesting = ui_data_model.vhosts.length > 1;
 
     queue_type = "default";
     current_vhost = get_pref('vhost');

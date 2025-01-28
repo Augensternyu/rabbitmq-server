@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_auth_backend_ldap).
@@ -17,7 +17,8 @@
 
 -export([user_login_authentication/2, user_login_authorization/2,
          check_vhost_access/3, check_resource_access/4, check_topic_access/4,
-         state_can_expire/0]).
+         expiry_timestamp/1,
+         format_multi_attr/1, format_multi_attr/2]).
 
 -export([get_connections/0]).
 
@@ -57,7 +58,7 @@ user_login_authentication(Username, []) ->
     R;
 
 user_login_authentication(Username, AuthProps) when is_list(AuthProps) ->
-    case pget(password, AuthProps) of
+    case extractPassword(AuthProps) of
         undefined -> user_login_authentication(Username, []);
         <<>> ->
             %% Password "" is special in LDAP, see
@@ -78,8 +79,28 @@ user_login_authentication(Username, AuthProps) when is_list(AuthProps) ->
             R
     end;
 
-user_login_authentication(Username, AuthProps) ->
-    exit({unknown_auth_props, Username, AuthProps}).
+user_login_authentication(Username, _AuthProps) ->
+    {refused, "user '~ts' - unauthenticated. Not enough credentials", [Username]}.
+
+%% Credentials (i.e. password) maybe directly in the password attribute in AuthProps
+%% or as a Function with the attribute rabbit_auth_backend_ldap if the user was already authenticated with http backend
+%% or as a Function with the attribute rabbit_auth_backend_cache if the user was already authenticated via cache backend
+-spec extractPassword(list()) -> rabbit_types:option(binary()).
+extractPassword(AuthProps) ->
+    case proplists:get_value(password, AuthProps, none) of
+        none ->
+            case proplists:get_value(rabbit_auth_backend_ldap, AuthProps, none) of
+                none -> case proplists:get_value(rabbit_auth_backend_cache, AuthProps, none) of
+                            none -> undefined;
+                            PasswordFun ->
+                                (PasswordFun())#impl.password
+                        end;
+                PasswordFun ->
+                    (PasswordFun())#impl.password
+            end;
+        Password ->
+            Password
+    end.
 
 user_login_authorization(Username, AuthProps) ->
     case user_login_authentication(Username, AuthProps) of
@@ -148,7 +169,7 @@ check_topic_access(User = #auth_user{username = Username,
          log_result(R0), log_result(R1)]),
     R1.
 
-state_can_expire() -> false.
+expiry_timestamp(_) -> never.
 
 %%--------------------------------------------------------------------
 
@@ -357,14 +378,8 @@ search_groups(LDAP, Desc, GroupsBase, Scope, DN) ->
             [];
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        %% support #eldap_search_result before and after
-        %% https://github.com/erlang/otp/pull/5538
-        {ok, {eldap_search_result, [], _Referrals}} ->
-            [];
         {ok, {eldap_search_result, [], _Referrals, _Controls}}->
             [];
-        {ok, {eldap_search_result, Entries, _Referrals}} ->
-            [ON || #eldap_entry{object_name = ON} <- Entries];
         {ok, {eldap_search_result, Entries, _Referrals, _Controls}} ->
             [ON || #eldap_entry{object_name = ON} <- Entries]
     end.
@@ -449,10 +464,6 @@ object_exists(DN, Filter, LDAP) ->
                        {scope, eldap:baseObject()}]) of
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        %% support #eldap_search_result before and after
-        %% https://github.com/erlang/otp/pull/5538
-        {ok, {eldap_search_result, Entries, _Referrals}} ->
-            length(Entries) > 0;
         {ok, {eldap_search_result, Entries, _Referrals, _Controls}} ->
             length(Entries) > 0;
         {error, _} = E ->
@@ -466,14 +477,8 @@ attribute(DN, AttributeName, LDAP) ->
                        {attributes, [AttributeName]}]) of
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        %% support #eldap_search_result before and after
-        %% https://github.com/erlang/otp/pull/5538
-        {ok, {eldap_search_result, E = [#eldap_entry{}|_], _Referrals}} ->
-            get_attributes(AttributeName, E);
         {ok, {eldap_search_result, E = [#eldap_entry{}|_], _Referrals, _Controls}} ->
             get_attributes(AttributeName, E);
-        {ok, {eldap_search_result, _Entries, _Referrals}} ->
-            {error, not_found};
         {ok, {eldap_search_result, _Entries, _Referrals, _Controls}} ->
             {error, not_found};
         {error, _} = E ->
@@ -680,13 +685,31 @@ get_attributes(AttrName, [#eldap_entry{attributes = A}|Rem]) ->
 get_attributes(AttrName, [_|Rem])    -> get_attributes(AttrName, Rem).
 
 %% Format multiple attribute values for logging
-format_multi_attr(Attrs) ->
-    format_multi_attr(io_lib:printable_list(Attrs), Attrs).
+%% The attribute can be:
+%%  - an ascii string (Erlang recognizes it as a printable_list)
+%%  - an non-ascii string (Erlang does not recognize it as a printable_list)
+%%  - a list/array of strings, which may contain ascii only or non-ascii and ascii characters
+utf8_list_to_string(List) -> unicode:characters_to_list(list_to_binary(List)).
+join_utf8_list(Acc, Sep, List) -> Acc ++ utf8_list_to_string(List) ++ Sep.
 
+format_multi_attr_value(Acc, _Sep, []) -> Acc;
+format_multi_attr_value(Acc, Sep, [H|T]) when is_list(H) ->
+  [H1|_T1] = H,
+  case H1 of
+    V when is_list(V) -> format_multi_attr_value(join_utf8_list(Acc, Sep, V), Sep, T);
+    _ -> format_multi_attr_value(join_utf8_list(Acc, Sep, H), Sep, T)
+  end;
+format_multi_attr_value(Acc, Sep, List) -> join_utf8_list(Acc, Sep, List).
+
+format_multi_attr(Attrs) -> format_multi_attr(io_lib:printable_list(Attrs), Attrs).
 format_multi_attr(true, Attrs)                     -> Attrs;
-format_multi_attr(_,    Attrs) when is_list(Attrs) -> string:join(Attrs, "; ");
+format_multi_attr(_,    Attrs) when is_list(Attrs) ->
+  [H|_T] = Attrs,
+  case H of
+    V when is_list(V) -> format_multi_attr_value("", "; ", Attrs);
+    _ -> utf8_list_to_string(Attrs)
+  end;
 format_multi_attr(_,    Error)                     -> Error.
-
 
 %% In case of multiple attributes, check for equality bi-directionally
 is_multi_attr_member(Str1, Str2) ->
@@ -738,7 +761,7 @@ ssl_conf() ->
     end.
 
 ssl_options() ->
-    Opts0 = rabbit_networking:fix_ssl_options(env(ssl_options)),
+    Opts0 = rabbit_ssl_options:fix_client(env(ssl_options)),
     case env(ssl_hostname_verification, undefined) of
         wildcard ->
             rabbit_log_ldap:debug("Enabling wildcard-aware hostname verification for LDAP client connections"),
@@ -851,18 +874,9 @@ dn_lookup(Username, LDAP) ->
                        {attributes, ["distinguishedName"]}]) of
         {ok, {referral, Referrals}} ->
             {error, {referrals_not_supported, Referrals}};
-        %% support #eldap_search_result before and after
-        %% https://github.com/erlang/otp/pull/5538
-        {ok, {eldap_search_result, [#eldap_entry{object_name = DN}], _Referrals}}->
-            ?L1("DN lookup: ~ts -> ~ts", [Username, DN]),
-            DN;
         {ok, {eldap_search_result, [#eldap_entry{object_name = DN}], _Referrals, _Controls}}->
             ?L1("DN lookup: ~ts -> ~ts", [Username, DN]),
             DN;
-        {ok, {eldap_search_result, Entries, _Referrals}} ->
-            rabbit_log_ldap:warning("Searching for DN for ~ts, got back ~tp",
-                               [Filled, Entries]),
-            Filled;
         {ok, {eldap_search_result, Entries, _Referrals, _Controls}} ->
             rabbit_log_ldap:warning("Searching for DN for ~ts, got back ~tp",
                                [Filled, Entries]),

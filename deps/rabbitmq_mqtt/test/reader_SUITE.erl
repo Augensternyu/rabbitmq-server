@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(reader_SUITE).
 -compile([export_all,
@@ -16,55 +16,56 @@
 -import(util, [all_connection_pids/1,
                publish_qos1_timeout/4,
                expect_publishes/3,
-               connect/2,
-               connect/3,
-               await_exit/1]).
+               connect/2, connect/3,
+               await_exit/1,
+               non_clean_sess_opts/0
+              ]).
 
 all() ->
     [
-     {group, tests}
+     {group, v4},
+     {group, v5}
     ].
 
 groups() ->
     [
-     {tests, [],
-      [
-       block_connack_timeout,
-       handle_invalid_packets,
-       login_timeout,
-       stats,
-       quorum_clean_session_false,
-       quorum_clean_session_true,
-       classic_clean_session_true,
-       classic_clean_session_false,
-       event_authentication_failure,
-       rabbit_mqtt_qos0_queue_overflow
-      ]}
+     {v4, [shuffle], tests()},
+     {v5, [shuffle], tests()}
+    ].
+
+tests() ->
+    [
+     block_connack_timeout,
+     handle_invalid_packets,
+     login_timeout,
+     stats,
+     quorum_clean_session_false,
+     quorum_clean_session_true,
+     classic_clean_session_true,
+     classic_clean_session_false,
+     event_authentication_failure,
+     rabbit_mqtt_qos0_queue_overflow
     ].
 
 suite() ->
-    [{timetrap, {seconds, 60}}].
+    [{timetrap, {minutes, 3}}].
 
 %% -------------------------------------------------------------------
 %% Testsuite setup/teardown.
 %% -------------------------------------------------------------------
 
 merge_app_env(Config) ->
-    rabbit_ct_helpers:merge_app_env(Config,
-                                    {rabbit, [
-                                              {collect_statistics, basic},
-                                              {collect_statistics_interval, 100}
-                                             ]}).
+    rabbit_ct_helpers:merge_app_env(
+      Config, {rabbit, [{collect_statistics, basic},
+                        {collect_statistics_interval, 100}
+                       ]}).
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE},
-        {rmq_extra_tcp_ports, [tcp_port_mqtt_extra,
-                               tcp_port_mqtt_tls_extra]}
-      ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      [ fun merge_app_env/1 ] ++
+    Config1 = rabbit_ct_helpers:set_config(Config, {rmq_nodename_suffix, ?MODULE}),
+    rabbit_ct_helpers:run_setup_steps(
+      Config1,
+      [fun merge_app_env/1] ++
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
@@ -73,8 +74,8 @@ end_per_suite(Config) ->
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).
 
-init_per_group(_, Config) ->
-    Config.
+init_per_group(Group, Config) ->
+    rabbit_ct_helpers:set_config(Config, {mqtt_version, Group}).
 
 end_per_group(_, Config) ->
     Config.
@@ -85,15 +86,15 @@ init_per_testcase(Testcase, Config) ->
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
-
 %% -------------------------------------------------------------------
 %% Testsuite cases
 %% -------------------------------------------------------------------
 
 block_connack_timeout(Config) ->
     P = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt),
-    Ports0 = rpc(Config, erlang, ports, []),
+    Ports = rpc(Config, erlang, ports, []),
 
+    DefaultWatermark = rpc(Config, vm_memory_monitor, get_vm_memory_high_watermark, []),
     ok = rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [0]),
     %% Let connection block.
     timer:sleep(100),
@@ -102,38 +103,39 @@ block_connack_timeout(Config) ->
     {ok, Client} = emqtt:start_link([{host, "localhost"},
                                      {port, P},
                                      {clientid, atom_to_binary(?FUNCTION_NAME)},
-                                     {proto_ver, v4},
+                                     {proto_ver, ?config(mqtt_version, Config)},
                                      {connect_timeout, 1}]),
     unlink(Client),
     ClientMRef = monitor(process, Client),
     {error, connack_timeout} = emqtt:connect(Client),
-    receive
-        {'DOWN', ClientMRef, process, Client, connack_timeout} ->
-            ok
-    after 200 ->
-              ct:fail("missing connack_timeout in client")
+    receive {'DOWN', ClientMRef, process, Client, connack_timeout} -> ok
+    after 30_000 -> ct:fail("missing connack_timeout in client")
     end,
 
-    Ports = rpc(Config, erlang, ports, []),
-    %% Server creates 1 new port to handle our MQTT connection.
-    [NewPort] = Ports -- Ports0,
-    {connected, MqttReader} = rpc(Config, erlang, port_info, [NewPort, connected]),
+    MqttReader = rpc(Config, ?MODULE, mqtt_connection_pid, [Ports]),
     MqttReaderMRef = monitor(process, MqttReader),
 
     %% Unblock connection. CONNECT packet will be processed on the server.
-    rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [0.4]),
+    rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [DefaultWatermark]),
 
-    receive
-        {'DOWN', MqttReaderMRef, process, MqttReader, {shutdown, {socket_ends, einval}}} ->
-            %% We expect that MQTT reader process exits (without crashing)
-            %% because our client already disconnected.
-            ok
-    after 2000 ->
-              ct:fail("missing peername_not_known from server")
+    receive {'DOWN', MqttReaderMRef, process, MqttReader, {shutdown, {socket_ends, einval}}} ->
+                %% We expect that MQTT reader process exits (without crashing)
+                %% because our client already disconnected.
+                ok
+    after 30_000 -> ct:fail("missing peername_not_known from server")
     end,
     %% Ensure that our client is not registered.
     ?assertEqual([], all_connection_pids(Config)),
     ok.
+
+mqtt_connection_pid(ExistingPorts) ->
+    NewPorts = erlang:ports() -- ExistingPorts,
+    %% Server creates 1 new TCP port to handle our MQTT connection.
+    [MqttConnectionPort] = lists:filter(fun(P) ->
+                                                erlang:port_info(P, name) =:= {name, "tcp_inet"}
+                                        end, NewPorts),
+    {connected, MqttConnectionPid} = erlang:port_info(MqttConnectionPort, connected),
+    MqttConnectionPid.
 
 handle_invalid_packets(Config) ->
     N = rpc(Config, ets, info, [connection_metrics, size]),
@@ -148,15 +150,13 @@ handle_invalid_packets(Config) ->
     ?assertEqual(N, rpc(Config, ets, info, [connection_metrics, size])).
 
 login_timeout(Config) ->
-    rpc(Config, application, set_env, [rabbitmq_mqtt, login_timeout, 400]),
-    P = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt),
-    {ok, C} = gen_tcp:connect("localhost", P, [{active, false}]),
-
-    try
-        {error, closed} = gen_tcp:recv(C, 0, 500)
-    after
-        rpc(Config, application, unset_env, [rabbitmq_mqtt, login_timeout])
-    end.
+    App = rabbitmq_mqtt,
+    Par = ?FUNCTION_NAME,
+    ok = rpc(Config, application, set_env, [App, Par, 400]),
+    Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt),
+    {ok, Socket} = gen_tcp:connect("localhost", Port, [{active, false}]),
+    ?assertEqual({error, closed}, gen_tcp:recv(Socket, 0, 500)),
+    ok = rpc(Config, application, unset_env, [App, Par]).
 
 stats(Config) ->
     C = connect(?FUNCTION_NAME, Config),
@@ -184,9 +184,9 @@ set_env(QueueType) ->
 get_env() ->
     rabbit_mqtt_util:env(durable_queue_type).
 
-validate_durable_queue_type(Config, ClientName, CleanSession, ExpectedQueueType) ->
+validate_durable_queue_type(Config, ClientName, Opts, ExpectedQueueType) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    C = connect(ClientName, Config, [{clean_start, CleanSession}]),
+    C = connect(ClientName, Config, Opts),
     {ok, _, _} = emqtt:subscribe(C, <<"TopicB">>, qos1),
     ok = emqtt:publish(C, <<"TopicB">>, <<"Payload">>),
     ok = expect_publishes(C, <<"TopicB">>, [<<"Payload">>]),
@@ -200,7 +200,8 @@ validate_durable_queue_type(Config, ClientName, CleanSession, ExpectedQueueType)
 quorum_clean_session_false(Config) ->
     Default = rpc(Config, reader_SUITE, get_env, []),
     rpc(Config, reader_SUITE, set_env, [quorum]),
-    validate_durable_queue_type(Config, <<"quorumCleanSessionFalse">>, false, rabbit_quorum_queue),
+    validate_durable_queue_type(
+      Config, <<"quorumCleanSessionFalse">>, non_clean_sess_opts(), rabbit_quorum_queue),
     rpc(Config, reader_SUITE, set_env, [Default]).
 
 quorum_clean_session_true(Config) ->
@@ -208,14 +209,17 @@ quorum_clean_session_true(Config) ->
     rpc(Config, reader_SUITE, set_env, [quorum]),
     %% Since we use a clean session and quorum queues cannot be auto-delete or exclusive,
     %% we expect a classic queue.
-    validate_durable_queue_type(Config, <<"quorumCleanSessionTrue">>, true, rabbit_classic_queue),
+    validate_durable_queue_type(
+      Config, <<"quorumCleanSessionTrue">>, [{clean_start, true}], rabbit_classic_queue),
     rpc(Config, reader_SUITE, set_env, [Default]).
 
 classic_clean_session_true(Config) ->
-    validate_durable_queue_type(Config, <<"classicCleanSessionTrue">>, true, rabbit_classic_queue).
+    validate_durable_queue_type(
+      Config, <<"classicCleanSessionTrue">>, [{clean_start, true}], rabbit_classic_queue).
 
 classic_clean_session_false(Config) ->
-    validate_durable_queue_type(Config, <<"classicCleanSessionFalse">>, false, rabbit_classic_queue).
+    validate_durable_queue_type(
+      Config, <<"classicCleanSessionFalse">>, non_clean_sess_opts(), rabbit_classic_queue).
 
 event_authentication_failure(Config) ->
     {ok, C} = emqtt:start_link(
@@ -224,7 +228,7 @@ event_authentication_failure(Config) ->
                  {host, "localhost"},
                  {port, rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt)},
                  {clientid, atom_to_binary(?FUNCTION_NAME)},
-                 {proto_ver, v4}]),
+                 {proto_ver, ?config(mqtt_version, Config)}]),
     true = unlink(C),
 
     ok = rabbit_ct_broker_helpers:add_code_path_to_all_nodes(Config, event_recorder),
@@ -233,7 +237,7 @@ event_authentication_failure(Config) ->
 
     ?assertMatch({error, _}, emqtt:connect(C)),
 
-    [E] = util:get_events(Server),
+    [E | _] = util:get_events(Server, user_authentication_failure),
     util:assert_event_type(user_authentication_failure, E),
     util:assert_event_prop([{name, <<"Trudy">>},
                             {connection_type, network}],
@@ -244,7 +248,20 @@ event_authentication_failure(Config) ->
 %% Test that queue type rabbit_mqtt_qos0_queue drops QoS 0 messages when its
 %% max length is reached.
 rabbit_mqtt_qos0_queue_overflow(Config) ->
-    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config, rabbit_mqtt_qos0_queue),
+    ProtoVer = case ?config(mqtt_version, Config) of
+                   v4 -> mqtt311;
+                   v5 -> mqtt50
+               end,
+    QType = rabbit_mqtt_qos0_queue,
+
+    #{
+      [{protocol, ProtoVer}, {queue_type, QType}] :=
+      #{messages_delivered_total := 0,
+        messages_delivered_consume_auto_ack_total := 0},
+
+      [{queue_type, QType}, {dead_letter_strategy, disabled}] :=
+      #{messages_dead_lettered_maxlen_total := NumDeadLettered}
+     } = rabbit_ct_broker_helpers:rpc(Config, rabbit_global_counters, overview, []),
 
     Topic = atom_to_binary(?FUNCTION_NAME),
     Msg = binary:copy(<<"x">>, 4000),
@@ -279,7 +296,8 @@ rabbit_mqtt_qos0_queue_overflow(Config) ->
     {status, _, _, [_, _, _, _, Misc]} = sys:get_status(ServerConnectionPid),
     [State] = [S || {data, [{"State", S}]} <- Misc],
     #{proc_state := #{qos0_messages_dropped := NumDropped}} = State,
-    ct:pal("NumReceived=~b~nNumDropped=~b", [NumReceived, NumDropped]),
+
+    ct:pal("NumReceived=~b NumDropped=~b", [NumReceived, NumDropped]),
 
     %% We expect that
     %% 1. all sent messages were either received or dropped
@@ -292,6 +310,19 @@ rabbit_mqtt_qos0_queue_overflow(Config) ->
     %% of mailbox_soft_limit=200 should not be dropped
     ?assert(NumReceived >= 200),
 
+    %% Assert that Prometheus metrics counted correctly.
+    ExpectedNumDeadLettered = NumDeadLettered + NumDropped,
+    ?assertMatch(
+       #{
+         [{protocol, ProtoVer}, {queue_type, QType}] :=
+         #{messages_delivered_total := NumReceived,
+           messages_delivered_consume_auto_ack_total := NumReceived},
+
+         [{queue_type, QType}, {dead_letter_strategy, disabled}] :=
+         #{messages_dead_lettered_maxlen_total := ExpectedNumDeadLettered}
+        },
+       rabbit_ct_broker_helpers:rpc(Config, rabbit_global_counters, overview, [])),
+
     ok = emqtt:disconnect(Sub),
     ok = emqtt:disconnect(Pub).
 
@@ -300,6 +331,6 @@ num_received(Topic, Payload, N) ->
         {publish, #{topic := Topic,
                     payload := Payload}} ->
             num_received(Topic, Payload, N + 1)
-    after 1000 ->
+    after 3000 ->
               N
     end.

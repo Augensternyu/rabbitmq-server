@@ -2,13 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_web_stomp_handler).
 -behaviour(cowboy_websocket).
 -behaviour(cowboy_sub_protocol).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("rabbitmq_stomp/include/rabbit_stomp.hrl").
 -include_lib("rabbitmq_stomp/include/rabbit_stomp_frame.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
@@ -43,6 +44,8 @@
     stats_timer,
     connection
 }).
+
+-define(APP, rabbitmq_web_stomp).
 
 %% cowboy_sub_protcol
 upgrade(Req, Env, Handler, HandlerState) ->
@@ -93,7 +96,6 @@ init(Req0, Opts) ->
     }, WsOpts}.
 
 websocket_init(State) ->
-    ok = file_handle_cache:obtain(),
     process_flag(trap_exit, true),
     {ok, ProcessorState} = init_processor_state(State),
     {ok, rabbit_event:init_stats_timer(
@@ -110,7 +112,7 @@ close_connection(Pid, Reason) ->
 
 init_processor_state(#state{socket=Sock, peername=PeerAddr, auth_hd=AuthHd}) ->
     Self = self(),
-    SendFun = fun (_Sync, Data) ->
+    SendFun = fun(Data) ->
                       Self ! {send, Data},
                       ok
               end,
@@ -316,7 +318,6 @@ stop(State) ->
 
 stop(State = #state{proc_state = ProcState}, CloseCode, Error0) ->
     maybe_emit_stats(State),
-    ok = file_handle_cache:release(),
     _ = rabbit_stomp_processor:flush_and_die(ProcState),
     Error1 = rabbit_data_coercion:to_binary(Error0),
     {[{close, CloseCode, Error1}], State}.

@@ -1,7 +1,5 @@
 ## RabbitMQ Federation
 
-[![Build Status](https://travis-ci.org/rabbitmq/rabbitmq-federation.svg?branch=master)](https://travis-ci.org/rabbitmq/rabbitmq-federation)
-
 RabbitMQ federation offers a group of features for loosely
 coupled and WAN-friendly distributed RabbitMQ setups. Note that
 this is not an alternative to queue mirroring.
@@ -22,4 +20,4 @@ See [RabbitMQ federation plugin](https://www.rabbitmq.com/federation.html) on ra
 
 Released under [the same license as RabbitMQ](https://www.rabbitmq.com/mpl.html).
 
-2007-2015 (c) 2007-2020 VMware, Inc. or its affiliates.
+2007-2015 (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.

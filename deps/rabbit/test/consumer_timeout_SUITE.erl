@@ -2,69 +2,55 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(consumer_timeout_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
--include_lib("kernel/include/file.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
--define(CONSUMER_TIMEOUT, 3000).
--define(RECEIVE_TIMEOUT, 5000).
+-define(CONSUMER_TIMEOUT, 2000).
+%% Sometimes CI machines are really slow,
+%% expecting CONSUMER_TIMEOUT*2 might not be enough
+-define(RECEIVE_TIMEOUT, 30_000).
 
 -define(GROUP_CONFIG,
         #{global_consumer_timeout => [{rabbit, [{consumer_timeout, ?CONSUMER_TIMEOUT}]},
                                       {queue_policy, []},
-                                      {queue_arguments, []},
-                                      {consumer_arguments, []}],
+                                      {queue_arguments, []}],
           queue_policy_consumer_timeout => [{rabbit, []},
                                             {queue_policy, [{<<"consumer-timeout">>, ?CONSUMER_TIMEOUT}]},
-                                            {queue_arguments, []},
-                                            {consumer_arguments, []}],
+                                            {queue_arguments, []}],
           queue_argument_consumer_timeout => [{rabbit, []},
                                               {queue_policy, []},
-                                              {queue_arguments, [{<<"x-consumer-timeout">>, long, ?CONSUMER_TIMEOUT}]},
-                                              {consumer_arguments, []}],
-          consumer_argument_consumer_timeout => [{rabbit, []},
-                                                 {queue_policy, []},
-                                                 {queue_arguments, []},
-                                                 {consumer_arguments, [{<<"x-consumer-timeout">>, long, ?CONSUMER_TIMEOUT}]}]}).
+                                              {queue_arguments, [{<<"x-consumer-timeout">>, long, ?CONSUMER_TIMEOUT}]}]}).
 
--import(quorum_queue_utils, [wait_for_messages/2]).
+-import(queue_utils, [wait_for_messages/2]).
 
 all() ->
     [
      {group, global_consumer_timeout},
      {group, queue_policy_consumer_timeout},
-     {group, queue_argument_consumer_timeout},
-     {group, consumer_argument_consumer_timeout}
+     {group, queue_argument_consumer_timeout}
     ].
 
 groups() ->
-    ConsumerTests = [consumer_timeout,
-                     consumer_timeout_no_basic_cancel_capability],
-    AllTests = ConsumerTests ++ [consumer_timeout_basic_get],
-
-    ConsumerTestsParallel = [
-       {classic_queue, [parallel], ConsumerTests},
-       {mirrored_queue, [parallel], ConsumerTests},
-       {quorum_queue, [parallel], ConsumerTests}
-      ],
+    AllTests = [consumer_timeout,
+                consumer_timeout_no_basic_cancel_capability,
+                consumer_timeout_basic_get],
 
     AllTestsParallel = [
        {classic_queue, [parallel], AllTests},
-       {mirrored_queue, [parallel], AllTests},
        {quorum_queue, [parallel], AllTests}
       ],
     [
      {global_consumer_timeout, [], AllTestsParallel},
      {queue_policy_consumer_timeout, [], AllTestsParallel},
-     {queue_argument_consumer_timeout, [], AllTestsParallel},
-     {consumer_argument_consumer_timeout, [], ConsumerTestsParallel}
+     {queue_argument_consumer_timeout, [], AllTestsParallel}
     ].
 
 suite() ->
@@ -95,23 +81,15 @@ init_per_group(quorum_queue, Config) ->
       [{policy_type, <<"quorum_queues">>},
        {queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>}]},
        {queue_durable, true}]);
-init_per_group(mirrored_queue, Config) ->
-    rabbit_ct_broker_helpers:set_ha_policy(Config, 0, <<"^max_length.*queue">>,
-        <<"all">>, [{<<"ha-sync-mode">>, <<"automatic">>}]),
-    Config1 = rabbit_ct_helpers:set_config(
-                Config, [{policy_type, <<"classic_queues">>},
-                         {is_mirrored, true},
-                         {queue_args, [{<<"x-queue-type">>, longstr, <<"classic">>}]},
-                         {queue_durable, true}]),
-    rabbit_ct_helpers:run_steps(Config1, []);
 init_per_group(Group, Config0) ->
     case lists:member({group, Group}, all()) of
         true ->
             GroupConfig = maps:get(Group, ?GROUP_CONFIG),
             ClusterSize = 3,
             Config = rabbit_ct_helpers:merge_app_env(
-                       Config0, {rabbit, [{channel_tick_interval, 1000},
-                                          {quorum_tick_interval, 1000}] ++ ?config(rabbit, GroupConfig)}),
+                       Config0, {rabbit, [{channel_tick_interval, 256},
+                                          {quorum_tick_interval, 256}] ++
+                                 ?config(rabbit, GroupConfig)}),
             Config1 = rabbit_ct_helpers:set_config(
                         Config, [ {rmq_nodename_suffix, Group},
                                   {rmq_nodes_count, ClusterSize}
@@ -158,7 +136,7 @@ consumer_timeout(Config) ->
     declare_queue(Ch, Config, QName),
     publish(Ch, QName, [<<"msg1">>]),
     wait_for_messages(Config, [[QName, <<"1">>, <<"1">>, <<"0">>]]),
-    subscribe(Ch, QName, false, ?config(consumer_arguments, Config)),
+    subscribe(Ch, QName, false),
     erlang:monitor(process, Conn),
     erlang:monitor(process, Ch),
     receive
@@ -171,7 +149,7 @@ consumer_timeout(Config) ->
         {'DOWN', _, process, Conn, _} ->
               flush(1),
               exit(unexpected_connection_exit)
-    after 2000 ->
+    after ?RECEIVE_TIMEOUT ->
               ok
     end,
     rabbit_ct_client_helpers:close_channel(Ch),
@@ -196,7 +174,7 @@ consumer_timeout_basic_get(Config) ->
         {'DOWN', _, process, Conn, _} ->
               flush(1),
               exit(unexpected_connection_exit)
-    after 2000 ->
+    after ?RECEIVE_TIMEOUT ->
               ok
     end,
     ok.
@@ -226,7 +204,7 @@ consumer_timeout_no_basic_cancel_capability(Config) ->
     wait_for_messages(Config, [[QName, <<"1">>, <<"1">>, <<"0">>]]),
     erlang:monitor(process, Conn),
     erlang:monitor(process, Ch),
-    subscribe(Ch, QName, false, ?config(consumer_arguments, Config)),
+    subscribe(Ch, QName, false),
     receive
         {#'basic.deliver'{delivery_tag = _,
                           redelivered  = false}, _} ->
@@ -245,7 +223,7 @@ consumer_timeout_no_basic_cancel_capability(Config) ->
         {'DOWN', _, process, Conn, _} ->
               flush(1),
               exit(unexpected_connection_exit)
-    after 2000 ->
+    after ?RECEIVE_TIMEOUT ->
               ok
     end,
     ok.
@@ -280,14 +258,13 @@ consume(Ch, QName, NoAck, Payloads) ->
          DTag
      end || Payload <- Payloads].
 
-subscribe(Ch, Queue, NoAck, Args) ->
-    subscribe(Ch, Queue, NoAck, <<"ctag">>, Args).
+subscribe(Ch, Queue, NoAck) ->
+    subscribe(Ch, Queue, NoAck, <<"ctag">>).
 
-subscribe(Ch, Queue, NoAck, Ctag, Args) ->
+subscribe(Ch, Queue, NoAck, Ctag) ->
     amqp_channel:subscribe(Ch, #'basic.consume'{queue = Queue,
                                                 no_ack = NoAck,
-                                                consumer_tag = Ctag,
-                                                arguments = Args
+                                                consumer_tag = Ctag
                                                },
                            self()),
     receive

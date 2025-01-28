@@ -2,21 +2,20 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_core_metrics_gc_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 all() ->
     [
-      {group, non_parallel_tests},
-      {group, cluster_tests}
+      {group, non_parallel_tests}
     ].
 
 groups() ->
@@ -29,8 +28,7 @@ groups() ->
         gen_server2_metrics,
         consumer_metrics
       ]
-     },
-     {cluster_tests, [], [cluster_queue_metrics]}
+     }
     ].
 
 %% -------------------------------------------------------------------
@@ -43,11 +41,6 @@ merge_app_env(Config) ->
                        {collect_statistics, fine}]},
     rabbit_ct_helpers:merge_app_env(Config, AppEnv).
 
-init_per_group(cluster_tests, Config) ->
-    rabbit_ct_helpers:log_environment(),
-    Conf = [{rmq_nodename_suffix, cluster_tests}, {rmq_nodes_count, 2}],
-    Config1 = rabbit_ct_helpers:set_config(Config, Conf),
-    rabbit_ct_helpers:run_setup_steps(Config1, setup_steps());
 init_per_group(non_parallel_tests, Config) ->
     rabbit_ct_helpers:log_environment(),
     Conf = [{rmq_nodename_suffix, non_parallel_tests}],
@@ -127,10 +120,13 @@ connection_metrics(Config) ->
 
     DeadPid = rabbit_ct_broker_helpers:rpc(Config, A, ?MODULE, dead_pid, []),
 
+    Infos = [{info0, foo}, {info1, bar}, {info2, baz},
+             {authz_backends, [rabbit_auth_backend_oauth2,rabbit_auth_backend_http]}],
+
     rabbit_ct_broker_helpers:rpc(Config, A, rabbit_core_metrics,
-                                 connection_created, [DeadPid, infos]),
+                                 connection_created, [DeadPid, Infos]),
     rabbit_ct_broker_helpers:rpc(Config, A, rabbit_core_metrics,
-                                 connection_stats, [DeadPid, infos]),
+                                 connection_stats, [DeadPid, Infos]),
     rabbit_ct_broker_helpers:rpc(Config, A, rabbit_core_metrics,
                                  connection_stats, [DeadPid, 1, 1, 1]),
 
@@ -321,72 +317,3 @@ x(Name) ->
     #resource{ virtual_host = <<"/">>,
                kind = exchange,
                name = Name }.
-
-%% -------------------------------------------------------------------
-%% Cluster Testcases.
-%% -------------------------------------------------------------------
-
-cluster_queue_metrics(Config) ->
-    VHost = <<"/">>,
-    QueueName = <<"cluster_queue_metrics">>,
-    PolicyName = <<"ha-policy-1">>,
-    PolicyPattern = <<".*">>,
-    PolicyAppliesTo = <<"queues">>,
-
-    Node0 = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    Node1 = rabbit_ct_broker_helpers:get_node_config(Config, 1, nodename),
-
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Node0),
-
-    Node0Name = rabbit_data_coercion:to_binary(Node0),
-    Definition0 = [{<<"ha-mode">>, <<"nodes">>}, {<<"ha-params">>, [Node0Name]}],
-    ok = rabbit_ct_broker_helpers:set_policy(Config, 0,
-                                             PolicyName, PolicyPattern,
-                                             PolicyAppliesTo, Definition0),
-
-    amqp_channel:call(Ch, #'queue.declare'{queue = QueueName}),
-    amqp_channel:call(Ch, #'basic.publish'{routing_key = QueueName},
-                          #amqp_msg{payload = <<"hello">>}),
-
-    % Update policy to point to other node
-    Node1Name = rabbit_data_coercion:to_binary(Node1),
-    Definition1 = [{<<"ha-mode">>, <<"nodes">>}, {<<"ha-params">>, [Node1Name]}],
-    ok = rabbit_ct_broker_helpers:set_policy(Config, 0,
-                                             PolicyName, PolicyPattern,
-                                             PolicyAppliesTo, Definition1),
-
-    % Synchronize
-    Name = rabbit_misc:r(VHost, queue, QueueName),
-    [Q] = rabbit_ct_broker_helpers:rpc(Config, Node0, ets, lookup, [rabbit_queue, Name]),
-    QPid = amqqueue:get_pid(Q),
-    ok = rabbit_ct_broker_helpers:rpc(Config, Node0, rabbit_amqqueue, sync_mirrors, [QPid]),
-
-    % Check ETS table for data
-    wait_for(fun () ->
-                     [] =:= rabbit_ct_broker_helpers:rpc(
-                              Config, Node0, ets, tab2list,
-                              [queue_coarse_metrics])
-             end, 60),
-
-    wait_for(fun () ->
-                     Ret = rabbit_ct_broker_helpers:rpc(
-                             Config, Node1, ets, tab2list,
-                             [queue_coarse_metrics]),
-                     case Ret of
-                         [{Name, 1, 0, 1, _}] -> true;
-                         _                    -> false
-                     end
-             end, 60),
-
-    amqp_channel:call(Ch, #'queue.delete'{queue=QueueName}),
-    rabbit_ct_client_helpers:close_channel(Ch),
-    Config.
-
-wait_for(_Fun, 0) -> false;
-wait_for(Fun, Seconds) ->
-    case Fun() of
-        true -> ok;
-        false ->
-            timer:sleep(1000),
-            wait_for(Fun, Seconds - 1)
-    end.

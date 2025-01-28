@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(config_SUITE).
 -compile([export_all,
@@ -62,7 +62,7 @@ init_per_testcase0(Testcase, Config0) ->
 
 end_per_testcase(Testcase, Config0) ->
     Config = rabbit_ct_helpers:testcase_finished(Config0, Testcase),
-    rabbit_ct_helpers:run_teardown_steps(
+    rabbit_ct_helpers:run_steps(
       Config,
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).

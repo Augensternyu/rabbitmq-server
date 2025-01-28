@@ -2,14 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_federation_parameters).
 -behaviour(rabbit_runtime_parameter).
 -behaviour(rabbit_policy_validator).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([validate/5, notify/5, notify_clear/4]).
 -export([register/0, unregister/0, validate_policy/1, adjust/1]).
@@ -89,7 +87,8 @@ shared_validation() ->
                               ['no-ack', 'on-publish', 'on-confirm']), optional},
      {<<"resource-cleanup-mode">>, rabbit_parameter_validation:enum(
                               ['default', 'never']), optional},
-     {<<"ha-policy">>,      fun rabbit_parameter_validation:binary/2, optional},
+     {<<"queue-type">>,       rabbit_parameter_validation:enum(
+                              ['classic', 'quorum']), optional},
      {<<"bind-nowait">>,    fun rabbit_parameter_validation:boolean/2, optional},
      {<<"channel-use-mode">>, rabbit_parameter_validation:enum(
                               ['multiple', 'single']), optional}].

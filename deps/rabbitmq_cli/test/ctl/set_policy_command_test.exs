@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule SetPolicyCommandTest do
   use ExUnit.Case, async: false
@@ -129,7 +129,7 @@ defmodule SetPolicyCommandTest do
              context[:opts]
            ) ==
              {:error_string,
-              'Validation failed\n\n[{<<"foo">>,<<"bar">>}] are not recognised policy settings\n'}
+              ~c"Validation failed\n\n[{<<\"foo\">>,<<\"bar\">>}] are not recognised policy settings\n"}
 
     assert list_policies(context[:vhost]) == []
   end
@@ -139,7 +139,7 @@ defmodule SetPolicyCommandTest do
     assert @command.run(
              [context[:key], context[:pattern], context[:value]],
              context[:opts]
-           ) == {:error_string, 'Validation failed\n\nno policy provided\n'}
+           ) == {:error_string, ~c"Validation failed\n\nno policy provided\n"}
 
     assert list_policies(context[:vhost]) == []
   end
@@ -156,25 +156,7 @@ defmodule SetPolicyCommandTest do
   test "ha policy validation", context do
     vhost_opts = Map.merge(context[:opts], %{vhost: context[:vhost]})
     context = Map.put(context, :opts, vhost_opts)
-    pass_validation(context, "{\"ha-mode\":\"all\"}")
-    fail_validation(context, "{\"ha-mode\":\"made_up\"}")
-
-    fail_validation(context, "{\"ha-mode\":\"nodes\"}")
-    fail_validation(context, "{\"ha-mode\":\"nodes\",\"ha-params\":2}")
-    fail_validation(context, "{\"ha-mode\":\"nodes\",\"ha-params\":[\"a\",2]}")
-    pass_validation(context, "{\"ha-mode\":\"nodes\",\"ha-params\":[\"a\",\"b\"]}")
-    fail_validation(context, "{\"ha-params\":[\"a\",\"b\"]}")
-
-    fail_validation(context, "{\"ha-mode\":\"exactly\"}")
-    fail_validation(context, "{\"ha-mode\":\"exactly\",\"ha-params\":[\"a\",\"b\"]}")
-    pass_validation(context, "{\"ha-mode\":\"exactly\",\"ha-params\":2}")
-    fail_validation(context, "{\"ha-params\":2}")
-
-    pass_validation(context, "{\"ha-mode\":\"all\",\"ha-sync-mode\":\"manual\"}")
-    pass_validation(context, "{\"ha-mode\":\"all\",\"ha-sync-mode\":\"automatic\"}")
-    fail_validation(context, "{\"ha-mode\":\"all\",\"ha-sync-mode\":\"made_up\"}")
-    fail_validation(context, "{\"ha-sync-mode\":\"manual\"}")
-    fail_validation(context, "{\"ha-sync-mode\":\"automatic\"}")
+    fail_validation(context, "{\"ha-mode\":\"all\"}")
   end
 
   @tag pattern: "ha_", key: "ha_policy_test", vhost: @vhost

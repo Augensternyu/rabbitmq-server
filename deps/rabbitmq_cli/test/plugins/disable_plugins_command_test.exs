@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule DisablePluginsCommandTest do
   use ExUnit.Case, async: false
@@ -264,7 +264,7 @@ defmodule DisablePluginsCommandTest do
   end
 
   test "formats enabled plugins mismatch errors", context do
-    err = {:enabled_plugins_mismatch, '/tmp/a/cli/path', '/tmp/a/server/path'}
+    err = {:enabled_plugins_mismatch, ~c"/tmp/a/cli/path", ~c"/tmp/a/server/path"}
 
     assert {:error, ExitCodes.exit_dataerr(),
             "Could not update enabled plugins file at /tmp/a/cli/path: target node #{context[:opts][:node]} uses a different path (/tmp/a/server/path)"} ==

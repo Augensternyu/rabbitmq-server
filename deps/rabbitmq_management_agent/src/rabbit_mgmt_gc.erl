@@ -2,11 +2,9 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbit_mgmt_gc).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -record(state, {timer,
                 interval
@@ -80,6 +78,7 @@ gc_queues() ->
     LocalGbSet = gb_sets:from_list(LocalQueues),
     gc_entity(queue_stats_publish, GbSet),
     gc_entity(queue_stats, LocalGbSet),
+    gc_entity(queue_basic_stats, LocalGbSet),
     gc_entity(queue_msg_stats, LocalGbSet),
     gc_entity(queue_process_stats, LocalGbSet),
     gc_entity(queue_msg_rates, LocalGbSet),

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(java_SUITE).
@@ -22,14 +22,14 @@
 
 all() ->
     [
-      {group, non_parallel_tests}
+      {group, v3},
+      {group, v5}
     ].
 
 groups() ->
     [
-      {non_parallel_tests, [], [
-                                java
-                               ]}
+      {v3, [], [java_v3]},
+      {v5, [], [java_v5]}
     ].
 
 suite() ->
@@ -47,27 +47,29 @@ merge_app_env(Config) ->
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE},
-        {rmq_certspwd, "bunnychow"},
-        {rmq_nodes_clustered, true},
-        {rmq_nodes_count, 3}
-      ]),
-    rabbit_ct_helpers:run_setup_steps(Config1,
-      [ fun merge_app_env/1 ] ++
+    Config.
+
+end_per_suite(Config) ->
+    Config.
+
+init_per_group(Group, Config0) ->
+    Suffix = rabbit_ct_helpers:testcase_absname(Config0, "", "-"),
+    Config = rabbit_ct_helpers:set_config(
+               Config0, [{rmq_nodename_suffix, Suffix},
+                         {rmq_certspwd, "bunnychow"},
+                         {rmq_nodes_clustered, true},
+                         {rmq_nodes_count, 3},
+                         {mqtt_version, Group}]),
+    rabbit_ct_helpers:run_setup_steps(
+      Config,
+      [fun merge_app_env/1] ++
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
-end_per_suite(Config) ->
+end_per_group(_, Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).
-
-init_per_group(_, Config) ->
-    Config.
-
-end_per_group(_, Config) ->
-    Config.
 
 init_per_testcase(Testcase, Config) ->
     CertsDir = ?config(rmq_certsdir, Config),
@@ -92,12 +94,17 @@ init_per_testcase(Testcase, Config) ->
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
-
 %% -------------------------------------------------------------------
 %% Testsuite cases
 %% -------------------------------------------------------------------
 
-java(Config) ->
+java_v3(Config) ->
+    run_test(Config, ["tests", "ssltests"]).
+
+java_v5(Config) ->
+    run_test(Config, ["v5tests", "v5ssltests"]).
+
+run_test(Config, Target) ->
     CertsDir = rabbit_ct_helpers:get_config(Config, rmq_certsdir),
     MqttPort = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_mqtt),
     MqttPort2 = rabbit_ct_broker_helpers:get_node_config(Config, 1, tcp_port_mqtt),
@@ -111,7 +118,7 @@ java(Config) ->
     os:putenv("MQTT_PORT_3", erlang:integer_to_list(MqttPort3)),
     os:putenv("AMQP_PORT", erlang:integer_to_list(AmqpPort)),
     DataDir = rabbit_ct_helpers:get_config(Config, data_dir),
-    MakeResult = rabbit_ct_helpers:make(Config, DataDir, ["tests"]),
+    MakeResult = rabbit_ct_helpers:make(Config, DataDir, Target),
     {ok, _} = MakeResult.
 
 rpc(Config, M, F, A) ->

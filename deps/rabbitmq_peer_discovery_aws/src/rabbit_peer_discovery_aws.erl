@@ -4,13 +4,12 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_aws).
 -behaviour(rabbit_peer_discovery_backend).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbitmq_peer_discovery_common/include/rabbit_peer_discovery.hrl").
 
 -export([init/0, list_nodes/0, supports_registration/0, register/0, unregister/0,
@@ -18,6 +17,8 @@
 
 -type tags() :: map().
 -type filters() :: [{string(), string()}].
+-type props() :: [{string(), props()}] | string().
+-type path() :: [string() | integer()].
 
 -ifdef(TEST).
 -compile(export_all).
@@ -54,6 +55,11 @@
                                                    type          = string,
                                                    env_variable  = "AWS_EC2_REGION",
                                                    default_value = "undefined"
+                                                  },
+          aws_hostname_path                 => #peer_discovery_config_entry_meta{
+                                                   type          = list,
+                                                   env_variable  = "AWS_HOSTNAME_PATH",
+                                                   default_value = ["privateDnsName"]
                                                   },
           aws_use_private_ip                 => #peer_discovery_config_entry_meta{
                                                    type          = atom,
@@ -113,34 +119,28 @@ unregister() ->
 post_registration() ->
     ok.
 
--spec lock(Node :: node()) -> {ok, {{ResourceId :: string(), LockRequesterId :: node()}, Nodes :: [node()]}} |
-                              {error, Reason :: string()}.
+-spec lock(Nodes :: [node()]) ->
+    {ok, {{ResourceId :: string(), LockRequesterId :: node()}, Nodes :: [node()]}} |
+    {error, Reason :: string()}.
 
-lock(Node) ->
-  %% call list_nodes/0 externally such that meck can mock the function
-  case ?MODULE:list_nodes() of
-    {ok, {[], disc}} ->
-          {error, "Cannot lock since no nodes got discovered."};
-    {ok, {Nodes, disc}} ->
-      case lists:member(Node, Nodes) of
+lock(Nodes) ->
+    Node = node(),
+    case lists:member(Node, Nodes) of
         true ->
-          rabbit_log:info("Will try to lock connecting to nodes ~tp", [Nodes]),
-          LockId = rabbit_nodes:lock_id(Node),
-          Retries = rabbit_nodes:lock_retries(),
-          case global:set_lock(LockId, Nodes, Retries) of
-            true ->
-              {ok, {LockId, Nodes}};
-            false ->
-              {error, io_lib:format("Acquiring lock taking too long, bailing out after ~b retries", [Retries])}
-          end;
+            rabbit_log:info("Will try to lock connecting to nodes ~tp", [Nodes]),
+            LockId = rabbit_nodes:lock_id(Node),
+            Retries = rabbit_nodes:lock_retries(),
+            case global:set_lock(LockId, Nodes, Retries) of
+                true ->
+                    {ok, {LockId, Nodes}};
+                false ->
+                    {error, io_lib:format("Acquiring lock taking too long, bailing out after ~b retries", [Retries])}
+            end;
         false ->
-          %% Don't try to acquire the global lock when our own node is not discoverable by peers.
-          %% We shouldn't run into this branch because our node is running and should have been discovered.
-          {error, lists:flatten(io_lib:format("Local node ~ts is not part of discovered nodes ~tp", [Node, Nodes]))}
-      end;
-    {error, _} = Error ->
-      Error
-  end.
+            %% Don't try to acquire the global lock when our own node is not discoverable by peers.
+            %% We shouldn't run into this branch because our node is running and should have been discovered.
+            {error, lists:flatten(io_lib:format("Local node ~ts is not part of discovered nodes ~tp", [Node, Nodes]))}
+    end.
 
 -spec unlock({{ResourceId :: string(), LockRequestedId :: atom()}, Nodes :: [atom()]}) -> 'ok'.
 unlock({LockId, Nodes}) ->
@@ -312,16 +312,15 @@ get_node_list_from_tags(M) when map_size(M) =:= 0 ->
 get_node_list_from_tags(Tags) ->
     {ok, {[?UTIL_MODULE:node_name(N) || N <- get_hostname_by_tags(Tags)], disc}}.
 
+-spec get_hostname_name_from_reservation_set(props(), [string()]) -> [string()].
 get_hostname_name_from_reservation_set([], Accum) -> Accum;
 get_hostname_name_from_reservation_set([{"item", RI}|T], Accum) ->
     InstancesSet = proplists:get_value("instancesSet", RI),
     Items = [Item || {"item", Item} <- InstancesSet],
-    HostnameKey = select_hostname(),
-    Hostnames = [Hostname || Item <- Items,
-                             {HKey, Hostname} <- Item,
-                             HKey == HostnameKey,
-                             Hostname =/= ""],
-    get_hostname_name_from_reservation_set(T, Accum ++ Hostnames).
+    HostnamePath = get_hostname_path(),
+    Hostnames = [get_hostname(HostnamePath, Item) || Item <- Items],
+    Hostnames2 = [Name || Name <- Hostnames, Name =/= ""],
+    get_hostname_name_from_reservation_set(T, Accum ++ Hostnames2).
 
 get_hostname_names(Path) ->
     case rabbitmq_aws:api_get_request("ec2", Path) of
@@ -347,13 +346,31 @@ get_hostname_by_tags(Tags) ->
             Names
     end.
 
--spec select_hostname() -> string().
-select_hostname() ->
-    case get_config_key(aws_use_private_ip, ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY)) of
-        true  -> "privateIpAddress";
-        false -> "privateDnsName";
-        _     -> "privateDnsName"
+-spec get_hostname_path() -> path().
+get_hostname_path() ->
+    UsePrivateIP = get_config_key(aws_use_private_ip, ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY)),
+    HostnamePath = get_config_key(aws_hostname_path, ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY)),
+    case HostnamePath of
+        ["privateDnsName"] when UsePrivateIP -> ["privateIpAddress"];
+        P -> P
     end.
+
+-spec get_hostname(path(), props()) -> string().
+get_hostname(Path, Props) ->
+    List = lists:foldl(fun get_value/2, Props, Path),
+    case io_lib:latin1_char_list(List) of
+        true -> List;
+        _ -> ""
+    end.
+
+-spec get_value(string()|integer(), props()) -> props().
+get_value(_, []) ->
+    [];
+get_value(Key, Props) when is_integer(Key) ->
+    {"item", Props2} = lists:nth(Key, Props),
+    Props2;
+get_value(Key, Props) ->
+    proplists:get_value(Key, Props).
 
 -spec get_tags() -> tags().
 get_tags() ->

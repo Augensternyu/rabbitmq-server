@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule TableFormatterTest do
   use ExUnit.Case, async: false
@@ -17,7 +17,7 @@ defmodule TableFormatterTest do
              "apple\tbeer\t1"
            ]
 
-    assert @formatter.format_output([a: "apple", b: 'beer', c: 1], %{}) == [
+    assert @formatter.format_output([a: "apple", b: ~c"beer", c: 1], %{}) == [
              "a\tb\tc",
              "apple\t\"beer\"\t1"
            ]
@@ -25,7 +25,7 @@ defmodule TableFormatterTest do
 
   test "format_stream tab-separates keyword values" do
     assert @formatter.format_stream(
-             [[a: :apple, b: :beer, c: 1], [a: "aadvark", b: 'bee', c: 2]],
+             [[a: :apple, b: :beer, c: 1], [a: "aadvark", b: ~c"bee", c: 2]],
              %{}
            )
            |> Enum.to_list() ==

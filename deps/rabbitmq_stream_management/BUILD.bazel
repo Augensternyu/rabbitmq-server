@@ -51,6 +51,7 @@ rabbitmq_app(
         "//deps/rabbit:erlang_app",
         "//deps/rabbitmq_management:erlang_app",
         "//deps/rabbitmq_stream:erlang_app",
+        "@osiris//:erlang_app",
     ],
 )
 
@@ -63,7 +64,7 @@ plt(
     name = "deps_plt",
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
 )
 
@@ -83,7 +84,6 @@ rabbitmq_home(
     name = "broker-for-tests-home",
     plugins = [
         "//deps/rabbit:erlang_app",
-        "//deps/rabbitmq_amqp1_0:erlang_app",
         ":erlang_app",
     ],
 )

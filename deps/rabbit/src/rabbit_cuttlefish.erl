@@ -2,14 +2,17 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2023-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_cuttlefish).
 
 -export([
     aggregate_props/2,
-    aggregate_props/3
+    aggregate_props/3,
+
+    optionally_tagged_binary/2,
+    optionally_tagged_string/2
 ]).
 
 -type keyed_props() :: [{binary(), [{binary(), any()}]}].
@@ -41,3 +44,25 @@ aggregate_props(Conf, Prefix, KeyFun) ->
             FlatList
         )
     ).
+
+optionally_tagged_binary(Key, Conf) ->
+    case cuttlefish:conf_get(Key, Conf) of
+        undefined                            -> cuttlefish:unset();
+        {encrypted, Bin} when is_binary(Bin) -> {encrypted, Bin};
+        {_,         Bin} when is_binary(Bin) -> {encrypted, Bin};
+        {encrypted, Str} when is_list(Str) -> {encrypted, list_to_binary(Str)};
+        {_,         Str} when is_list(Str) -> {encrypted, list_to_binary(Str)};
+        Bin when is_binary(Bin) -> Bin;
+        Str when is_list(Str) -> list_to_binary(Str)
+    end.
+
+optionally_tagged_string(Key, Conf) ->
+    case cuttlefish:conf_get(Key, Conf) of
+        undefined                          -> cuttlefish:unset();
+        {encrypted, Str} when is_list(Str) -> {encrypted, Str};
+        {_,         Str} when is_list(Str) -> {encrypted, Str};
+        {encrypted, Bin} when is_binary(Bin) -> {encrypted, binary_to_list(Bin)};
+        {_,         Bin} when is_binary(Bin) -> {encrypted, binary_to_list(Bin)};
+        Str when is_list(Str) -> Str;
+        Bin when is_binary(Bin) -> binary_to_list(Bin)
+    end.

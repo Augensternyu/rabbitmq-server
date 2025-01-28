@@ -68,6 +68,9 @@ rabbitmq_app(
 
 xref(
     name = "xref",
+    additional_libs = [
+        "//deps/rabbitmq_cli:erlang_app",  # keep
+    ],
     target = ":erlang_app",
 )
 
@@ -75,8 +78,9 @@ plt(
     name = "deps_plt",
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
+    deps = ["//deps/rabbitmq_cli:erlang_app"],  # keep
 )
 
 dialyze(
@@ -90,7 +94,7 @@ eunit(
     name = "eunit",
     compiled_suites = [
         ":test_src_rabbit_ws_test_util_beam",
-        ":test_src_rfc6455_client_beam",
+        ":test_rabbit_web_mqtt_test_util_beam",
     ],
     target = ":test_erlang_app",
 )
@@ -98,11 +102,21 @@ eunit(
 broker_for_integration_suites()
 
 rabbitmq_integration_suite(
-    name = "config_schema_SUITE",
+    name = "web_mqtt_config_schema_SUITE",
 )
 
 rabbitmq_integration_suite(
-    name = "proxy_protocol_SUITE",
+    name = "web_mqtt_command_SUITE",
+    additional_beam = [
+        "test/rabbit_web_mqtt_test_util.beam",
+    ],
+    runtime_deps = [
+        "@emqtt//:erlang_app",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "web_mqtt_proxy_protocol_SUITE",
     additional_beam = [
         "test/src/rabbit_ws_test_util.beam",
         "test/src/rfc6455_client.beam",
@@ -110,7 +124,23 @@ rabbitmq_integration_suite(
 )
 
 rabbitmq_integration_suite(
-    name = "system_SUITE",
+    name = "web_mqtt_shared_SUITE",
+    additional_beam = [
+        "test/src/rabbit_ws_test_util.beam",
+        "test/src/rfc6455_client.beam",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "web_mqtt_system_SUITE",
+    additional_beam = [
+        "test/src/rabbit_ws_test_util.beam",
+        "test/src/rfc6455_client.beam",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "web_mqtt_v5_SUITE",
     additional_beam = [
         "test/src/rabbit_ws_test_util.beam",
         "test/src/rfc6455_client.beam",

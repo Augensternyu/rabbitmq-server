@@ -2,11 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2019-2024 Broadcom. All Rights Reserved. The term “Broadcom”
+%% refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @author The RabbitMQ team
-%% @copyright 2018-2023 VMware, Inc. or its affiliates.
+%% @copyright 2019-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc.
+%% and/or its subsidiaries. All rights reserved.
 %%
 %% @doc
 %% This module offers a framework to declare capabilities a RabbitMQ node
@@ -82,6 +84,8 @@
 
 -include_lib("rabbit_common/include/logging.hrl").
 
+-include("src/rabbit_feature_flags.hrl").
+
 -export([list/0,
          list/1,
          list/2,
@@ -101,7 +105,9 @@
          init/0,
          get_state/1,
          get_stability/1,
-         check_node_compatibility/1,
+         get_require_level/1,
+         get_experiment_level/1,
+         check_node_compatibility/1, check_node_compatibility/2,
          sync_feature_flags_with_cluster/2,
          refresh_feature_flags_after_app_load/0,
          enabled_feature_flags_list_file/0
@@ -113,11 +119,15 @@
          remote_nodes/0,
          running_remote_nodes/0,
          does_node_support/3,
-         inject_test_feature_flags/1,
+         inject_test_feature_flags/1, inject_test_feature_flags/2,
+         clear_injected_test_feature_flags/0,
          query_supported_feature_flags/0,
          does_enabled_feature_flags_list_file_exist/0,
          read_enabled_feature_flags_list/0,
-         uses_callbacks/1]).
+         copy_feature_states_after_reset/1,
+         uses_callbacks/1,
+         reset/0,
+         reset_registry/0]).
 
 -ifdef(TEST).
 -export([override_nodes/1,
@@ -126,11 +136,7 @@
          get_overriden_running_nodes/0]).
 -endif.
 
-%% Default timeout for operations on remote nodes.
--define(TIMEOUT, 60000).
-
--type feature_flag_modattr() :: {feature_name(),
-                                 feature_props()}.
+-type feature_flag_modattr() :: {feature_name(), feature_props()}.
 %% The value of a `-rabbitmq_feature_flag()' module attribute used to
 %% declare a new feature flag.
 
@@ -143,6 +149,8 @@
 -type feature_props() :: #{desc => string(),
                            doc_url => string(),
                            stability => stability(),
+                           require_level => require_level(),
+                           experiment_level => experiment_level(),
                            depends_on => [feature_name()],
                            callbacks =>
                            #{callback_name() => callback_fun_name()}}.
@@ -158,7 +166,7 @@
 %% <li>`stability': the level of stability</li>
 %% <li>`depends_on': a list of feature flags name which must be enabled
 %%   before this one</li>
-%% <li>`callbacks': a map of callback names</li>
+%% <li>`callbacks': a map of callbacks</li>
 %% </ul>
 %%
 %% Note that each `callbacks' is a {@type callback_fun_name()}, not a {@type
@@ -167,14 +175,20 @@
 %% represent it as an Erlang term when we regenerate the registry module
 %% source code (using {@link erl_syntax:abstract/1}).
 
--type feature_flags() :: #{feature_name() => feature_props_extended()}.
+-type feature_flags() ::
+      #{feature_name() =>
+        feature_props_extended() |
+        rabbit_deprecated_features:feature_props_extended()}.
 %% The feature flags map as returned or accepted by several functions in
 %% this module. In particular, this what the {@link list/0} function
 %% returns.
 
--type feature_props_extended() :: #{desc => string(),
+-type feature_props_extended() :: #{name := feature_name(),
+                                    desc => string(),
                                     doc_url => string(),
                                     stability => stability(),
+                                    require_level => require_level(),
+                                    experiment_level => experiment_level(),
                                     depends_on => [feature_name()],
                                     callbacks =>
                                     #{callback_name() => callback_fun_name()},
@@ -199,6 +213,33 @@
 %% Experimental feature flags are not enabled by default on a fresh RabbitMQ
 %% node. They must be enabled by the user.
 
+-type require_level() :: hard | soft.
+%% The level of requirement of a feature flag.
+%%
+%% A hard required feature flags must be enabled before a RabbitMQ node is
+%% upgraded to a version where it is required.
+%%
+%% A soft required feature flag will be automatically enabled when a RabbitMQ
+%% node is upgraded to a version where it is required.
+
+-type experiment_level() :: unsupported | supported.
+%% The level of support of an experimental feature flag.
+%%
+%% At first, an experimental feature flag is offered to give a chance to users
+%% to try it and give feedback as part of the design and development of the
+%% feature. At this stage, it is unsupported: it must not be enabled in a
+%% production environment and upgrade to a later version of RabbitMQ while
+%% this experimental feature flag is enabled is not supported.
+%%
+%% Then, the experimental feature flag becomes supported. At this point, it is
+%% stable enough that upgrading is guarantied and help will be provided.
+%% However it is not mature enough to be marked as stable (which would make it
+%% enabled by default in a new deployment or when running `rabbitmqctl
+%% enable_feature_flag all'.
+%%
+%% The next step is to change its stability to `stable'. Once done, the
+%% `experiment_level()' field is irrelevant.
+
 -type callback_fun_name() :: {Module :: module(), Function :: atom()}.
 %% The name of the module and function to call when changing the state of
 %% the feature flag.
@@ -222,7 +263,7 @@
 %% It is called when a feature flag is being enabled. The function is
 %% responsible for this feature-flag-specific verification and data
 %% conversion. It returns `ok' if RabbitMQ can mark the feature flag as
-%% enabled an continue with the next one, if any. `{error, Reason}' and
+%% enabled and continue with the next one, if any. `{error, Reason}' and
 %% exceptions are an error and the feature flag will remain disabled.
 %%
 %% The migration function is called on all nodes which fulfill the following
@@ -290,7 +331,8 @@
 
 -type inventory() :: #{applications := [atom()],
                        feature_flags := feature_flags(),
-                       states := feature_states()}.
+                       states := feature_states(),
+                       written_to_disk := boolean()}.
 
 -type cluster_inventory() :: #{feature_flags := feature_flags(),
                                applications_per_node :=
@@ -306,6 +348,8 @@
               feature_state/0,
               feature_states/0,
               stability/0,
+              require_level/0,
+              experiment_level/0,
               callback_fun_name/0,
               callbacks/0,
               callback_name/0,
@@ -336,11 +380,23 @@ list() -> list(all).
 %% `disabled'.
 %% @returns A map of selected feature flags.
 
-list(all)      -> rabbit_ff_registry:list(all);
-list(enabled)  -> rabbit_ff_registry:list(enabled);
-list(disabled) -> maps:filter(
-                    fun(FeatureName, _) -> is_disabled(FeatureName) end,
-                    list(all)).
+list(all) ->
+    maps:filter(
+      fun(_, FeatureProps) -> ?IS_FEATURE_FLAG(FeatureProps) end,
+      rabbit_ff_registry_wrapper:list(all));
+list(enabled) ->
+    maps:filter(
+      fun(_, FeatureProps) -> ?IS_FEATURE_FLAG(FeatureProps) end,
+      rabbit_ff_registry_wrapper:list(enabled));
+list(disabled) ->
+    maps:filter(
+      fun
+          (FeatureName, FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
+              is_disabled(FeatureName);
+          (_, _) ->
+              false
+      end,
+      list(all)).
 
 -spec list(all | enabled | disabled, stability()) -> feature_flags().
 %% @doc
@@ -354,13 +410,19 @@ list(disabled) -> maps:filter(
 %% @returns A map of selected feature flags.
 
 list(Which, stable) ->
-    maps:filter(fun(_, FeatureProps) ->
+    maps:filter(fun
+                    (_, FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
                         Stability = get_stability(FeatureProps),
-                        stable =:= Stability orelse required =:= Stability
+                        stable =:= Stability orelse required =:= Stability;
+                    (_, _) ->
+                        false
                 end, list(Which));
 list(Which, experimental) ->
-    maps:filter(fun(_, FeatureProps) ->
-                        experimental =:= get_stability(FeatureProps)
+    maps:filter(fun
+                    (_, FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
+                        experimental =:= get_stability(FeatureProps);
+                    (_, _) ->
+                        false
                 end, list(Which)).
 
 -spec enable(feature_name() | [feature_name()]) -> ok |
@@ -381,7 +443,7 @@ enable(FeatureNames) when is_list(FeatureNames) ->
     with_feature_flags(FeatureNames, fun enable/1).
 
 uses_callbacks(FeatureName) when is_atom(FeatureName) ->
-    case rabbit_ff_registry:get(FeatureName) of
+    case rabbit_ff_registry_wrapper:get(FeatureName) of
         undefined    -> false;
         FeatureProps -> uses_callbacks(FeatureProps)
     end;
@@ -504,9 +566,11 @@ is_supported(FeatureNames, Timeout) ->
 %%   `false' if one of them is not.
 
 is_supported_locally(FeatureName) when is_atom(FeatureName) ->
-    rabbit_ff_registry:is_supported(FeatureName);
+    rabbit_ff_registry_wrapper:is_supported(FeatureName);
 is_supported_locally(FeatureNames) when is_list(FeatureNames) ->
-    lists:all(fun(F) -> rabbit_ff_registry:is_supported(F) end, FeatureNames).
+    lists:all(
+      fun(F) -> rabbit_ff_registry_wrapper:is_supported(F) end,
+      FeatureNames).
 
 -spec is_enabled(feature_name() | [feature_name()]) -> boolean().
 %% @doc
@@ -563,19 +627,19 @@ is_enabled(FeatureNames, blocking) ->
     end.
 
 is_enabled_nb(FeatureName) when is_atom(FeatureName) ->
-    rabbit_ff_registry:is_enabled(FeatureName);
+    rabbit_ff_registry_wrapper:is_enabled(FeatureName);
 is_enabled_nb(FeatureNames) when is_list(FeatureNames) ->
     lists:foldl(
       fun
           (_F, state_changing = Acc) ->
               Acc;
           (F, false = Acc) ->
-              case rabbit_ff_registry:is_enabled(F) of
+              case rabbit_ff_registry_wrapper:is_enabled(F) of
                   state_changing -> state_changing;
                   _              -> Acc
               end;
           (F, _) ->
-              rabbit_ff_registry:is_enabled(F)
+              rabbit_ff_registry_wrapper:is_enabled(F)
       end,
       true, FeatureNames).
 
@@ -655,13 +719,17 @@ info() ->
 info(Options) when is_map(Options) ->
     rabbit_ff_extra:info(Options).
 
--spec get_state(feature_name()) -> enabled | disabled | unavailable.
+-spec get_state(feature_name()) -> enabled |
+                                   state_changing |
+                                   disabled |
+                                   unavailable.
 %% @doc
 %% Returns the state of a feature flag.
 %%
 %% The possible states are:
 %% <ul>
 %% <li>`enabled': the feature flag is enabled.</li>
+%% <li>`state_changing': the feature flag is being enabled.</li>
 %% <li>`disabled': the feature flag is supported by all nodes in the
 %%   cluster but currently disabled.</li>
 %% <li>`unavailable': the feature flag is unsupported by at least one
@@ -669,17 +737,20 @@ info(Options) when is_map(Options) ->
 %% </ul>
 %%
 %% @param FeatureName The name of the feature flag to check.
-%% @returns `enabled', `disabled' or `unavailable'.
+%% @returns `enabled', `state_changing', `disabled' or `unavailable'.
 
 get_state(FeatureName) when is_atom(FeatureName) ->
-    IsEnabled = is_enabled(FeatureName),
-    IsSupported = is_supported(FeatureName),
+    IsEnabled = is_enabled(FeatureName, non_blocking),
     case IsEnabled of
-        true  -> enabled;
-        false -> case IsSupported of
-                     true  -> disabled;
-                     false -> unavailable
-                 end
+        true  ->
+            enabled;
+        state_changing ->
+            state_changing;
+        false ->
+            case is_supported(FeatureName) of
+                true  -> disabled;
+                false -> unavailable
+            end
     end.
 
 -spec get_stability
@@ -687,7 +758,9 @@ get_state(FeatureName) when is_atom(FeatureName) ->
       FeatureName :: feature_name(),
       Stability :: stability();
 (FeatureProps) -> Stability when
-      FeatureProps :: feature_props_extended(),
+      FeatureProps ::
+      feature_props_extended() |
+      rabbit_deprecated_features:feature_props_extended(),
       Stability :: stability().
 %% @doc
 %% Returns the stability of a feature flag.
@@ -710,12 +783,101 @@ get_state(FeatureName) when is_atom(FeatureName) ->
 %% given feature flag name doesn't correspond to a known feature flag.
 
 get_stability(FeatureName) when is_atom(FeatureName) ->
-    case rabbit_ff_registry:get(FeatureName) of
+    case rabbit_ff_registry_wrapper:get(FeatureName) of
         undefined    -> undefined;
         FeatureProps -> get_stability(FeatureProps)
     end;
-get_stability(FeatureProps) when is_map(FeatureProps) ->
-    maps:get(stability, FeatureProps, stable).
+get_stability(FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
+    maps:get(stability, FeatureProps, stable);
+get_stability(FeatureProps) when ?IS_DEPRECATION(FeatureProps) ->
+    Phase = rabbit_deprecated_features:get_phase(FeatureProps),
+    case Phase of
+        removed              -> required;
+        disconnected         -> required;
+        denied_by_default    -> stable;
+        permitted_by_default -> experimental
+    end.
+
+-spec get_require_level
+(FeatureName) -> RequireLevel | undefined when
+      FeatureName :: feature_name(),
+      RequireLevel :: require_level() | none;
+(FeatureProps) -> RequireLevel when
+      FeatureProps ::
+      feature_props_extended() |
+      rabbit_deprecated_features:feature_props_extended(),
+      RequireLevel :: require_level() | none.
+%% @doc
+%% Returns the requirement level of a feature flag.
+%%
+%% The possible requirement levels are:
+%% <ul>
+%% <li>`hard': the feature flag must be enabled before the RabbitMQ node is
+%%   upgraded to a version where it is hard required.</li>
+%% <li>`soft': the feature flag will be automatically enabled wher a RabbitMQ
+%%   node is upgraded to a version where it is soft required.</li>
+%% <li>`none': the feature flag is not required.</li>
+%% </ul>
+%%
+%% @param FeatureName The name of the feature flag to check.
+%% @param FeatureProps A feature flag properties map.
+%% @returns `hard', `soft' or `none', or `undefined' if the given feature flag
+%% name doesn't correspond to a known feature flag.
+
+get_require_level(FeatureName) when is_atom(FeatureName) ->
+    case rabbit_ff_registry_wrapper:get(FeatureName) of
+        undefined    -> undefined;
+        FeatureProps -> get_require_level(FeatureProps)
+    end;
+get_require_level(FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
+    case get_stability(FeatureProps) of
+        required  -> maps:get(require_level, FeatureProps, soft);
+        _         -> none
+    end;
+get_require_level(FeatureProps) when ?IS_DEPRECATION(FeatureProps) ->
+    case get_stability(FeatureProps) of
+        required -> hard;
+        _        -> none
+    end.
+
+-spec get_experiment_level
+(FeatureName) -> ExperimentLevel | undefined when
+      FeatureName :: feature_name(),
+      ExperimentLevel :: experiment_level() | none;
+(FeatureProps) -> ExperimentLevel when
+      FeatureProps ::
+      feature_props_extended() |
+      rabbit_deprecated_features:feature_props_extended(),
+      ExperimentLevel :: experiment_level() | none.
+%% @doc
+%% Returns the experimental level of an experimental feature flag.
+%%
+%% The possible experiment levels are:
+%% <ul>
+%% <li>`unsupported': the experimental feature flag must not be enabled in
+%%   production and upgrades with it enabled is unsupported.</li>
+%% <li>`supported': the experimental feature flag is not yet stable enough but
+%%   upgrades are guarantied to be possible. This is returned too if the
+%%   feature flag is stable or required.</li>
+%% </ul>
+%%
+%% @param FeatureName The name of the feature flag to check.
+%% @param FeatureProps A feature flag properties map.
+%% @returns `unsupported', `supported', or `undefined' if the given feature
+%% flag name doesn't correspond to a known feature flag.
+
+get_experiment_level(FeatureName) when is_atom(FeatureName) ->
+    case rabbit_ff_registry_wrapper:get(FeatureName) of
+        undefined    -> undefined;
+        FeatureProps -> get_experiment_level(FeatureProps)
+    end;
+get_experiment_level(FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
+    case get_stability(FeatureProps) of
+        experimental -> maps:get(experiment_level, FeatureProps, unsupported);
+        _            -> supported
+    end;
+get_experiment_level(FeatureProps) when ?IS_DEPRECATION(FeatureProps) ->
+    supported.
 
 %% -------------------------------------------------------------------
 %% Feature flags registry.
@@ -736,8 +898,17 @@ init() ->
     ok.
 
 -define(PT_TESTSUITE_ATTRS, {?MODULE, testsuite_feature_flags_attrs}).
+%% We must lock while making updates to the above persistent_term in order to
+%% make the updates atomic. Otherwise if two processes attempt to inject
+%% different flags at the same time, they might race and a flag could be
+%% mistakenly discarded.
+-define(LOCK_TESTSUITE_ATTRS, {?PT_TESTSUITE_ATTRS, self()}).
 
 inject_test_feature_flags(FeatureFlags) ->
+    inject_test_feature_flags(FeatureFlags, true).
+
+inject_test_feature_flags(FeatureFlags, InitReg) ->
+    true = global:set_lock(?LOCK_TESTSUITE_ATTRS, [node()]),
     ExistingAppAttrs = module_attributes_from_testsuite(),
     FeatureFlagsPerApp0 = lists:foldl(
                             fun({Origin, Origin, FFlags}, Acc) ->
@@ -751,9 +922,12 @@ inject_test_feature_flags(FeatureFlags) ->
                                                  _ ->
                                                      '$injected'
                                              end,
+                                    FeatureProps1 = maps:remove(
+                                                      provided_by,
+                                                      FeatureProps),
                                     FFlags0 = maps:get(Origin, Acc, #{}),
                                     FFlags1 = FFlags0#{
-                                                FeatureName => FeatureProps},
+                                                FeatureName => FeatureProps1},
                                     Acc#{Origin => FFlags1}
                             end, FeatureFlagsPerApp0, FeatureFlags),
     AttributesFromTestsuite = maps:fold(
@@ -768,7 +942,18 @@ inject_test_feature_flags(FeatureFlags) ->
       [FeatureFlags, AttributesFromTestsuite],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     ok = persistent_term:put(?PT_TESTSUITE_ATTRS, AttributesFromTestsuite),
-    rabbit_ff_registry_factory:initialize_registry().
+    true = global:del_lock(?LOCK_TESTSUITE_ATTRS, [node()]),
+    case InitReg of
+        true  -> rabbit_ff_registry_factory:initialize_registry();
+        false -> ok
+    end.
+
+clear_injected_test_feature_flags() ->
+    _ = global:trans(
+          ?LOCK_TESTSUITE_ATTRS,
+          fun() -> persistent_term:erase(?PT_TESTSUITE_ATTRS) end,
+          [node()]),
+    ok.
 
 module_attributes_from_testsuite() ->
     persistent_term:get(?PT_TESTSUITE_ATTRS, []).
@@ -782,29 +967,44 @@ query_supported_feature_flags() ->
     ?LOG_DEBUG(
       "Feature flags: query feature flags in loaded applications",
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    T0 = erlang:timestamp(),
+    T0 = erlang:monotonic_time(),
     %% We need to know the list of applications we scanned for feature flags.
     %% We can't derive that list of the returned feature flags because an
     %% application might be loaded/present and not have a specific feature
     %% flag. In this case, the feature flag should be considered unsupported.
     ScannedApps = rabbit_misc:rabbitmq_related_apps(),
-    AttributesPerApp = rabbit_misc:module_attributes_from_apps(
-                         rabbit_feature_flag, ScannedApps),
-    AttributesFromTestsuite = module_attributes_from_testsuite(),
-    TestsuiteProviders = [App || {App, _, _} <- AttributesFromTestsuite],
-    T1 = erlang:timestamp(),
+    AttrsPerAppA = rabbit_misc:module_attributes_from_apps(
+                    rabbit_feature_flag, ScannedApps),
+    AttrsPerAppB = rabbit_misc:module_attributes_from_apps(
+                    rabbit_deprecated_feature, ScannedApps),
+    AttrsFromTestsuite = module_attributes_from_testsuite(),
+    TestsuiteProviders = [App || {App, _, _} <- AttrsFromTestsuite],
+    T1 = erlang:monotonic_time(),
     ?LOG_DEBUG(
-      "Feature flags: time to find supported feature flags: ~tp us",
-      [timer:now_diff(T1, T0)],
+      "Feature flags: time to find supported feature flags and deprecated "
+      "features: ~tp us",
+      [erlang:convert_time_unit(T1 - T0, native, microsecond)],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
-    AllAttributes = AttributesPerApp ++ AttributesFromTestsuite,
+    AllAttributes = AttrsPerAppA ++ AttrsPerAppB ++ AttrsFromTestsuite,
     AllApps = lists:usort(ScannedApps ++ TestsuiteProviders),
     {AllApps, prepare_queried_feature_flags(AllAttributes, #{})}.
+
+-spec prepare_queried_feature_flags(AllAttributes, AllFeatureFlags) ->
+    AllFeatureFlags when
+      AllAttributes :: [{App, Module, Attributes}],
+      App :: atom(),
+      Module :: module(),
+      Attributes ::
+      [feature_flag_modattr() |
+       rabbit_deprecated_features:deprecated_feature_modattr()],
+      AllFeatureFlags :: feature_flags().
+%% @private
 
 prepare_queried_feature_flags([{App, _Module, Attributes} | Rest],
                               AllFeatureFlags) ->
     ?LOG_DEBUG(
-      "Feature flags: application `~ts` has ~b feature flags",
+      "Feature flags: application `~ts` has ~b feature flags (including "
+      "deprecated features)",
       [App, length(Attributes)],
       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
     AllFeatureFlags1 = lists:foldl(
@@ -820,32 +1020,89 @@ prepare_queried_feature_flags([{App, _Module, Attributes} | Rest],
 prepare_queried_feature_flags([], AllFeatureFlags) ->
     AllFeatureFlags.
 
+-spec assert_feature_flag_is_valid(FeatureName, FeatureProps) -> ok when
+      FeatureName :: feature_name(),
+      FeatureProps :: feature_props() |
+                      rabbit_deprecated_features:feature_props().
+%% @private
+
 assert_feature_flag_is_valid(FeatureName, FeatureProps) ->
     try
         ?assert(is_atom(FeatureName)),
         ?assert(is_map(FeatureProps)),
-        Stability = get_stability(FeatureProps),
-        ?assert(Stability =:= stable orelse
-                Stability =:= experimental orelse
-                Stability =:= required),
-        ?assertNot(maps:is_key(migration_fun, FeatureProps)),
-        case FeatureProps of
-            #{callbacks := Callbacks} ->
-                Known = [enable,
-                         post_enable],
-                ?assert(is_map(Callbacks)),
-                ?assertEqual([], maps:keys(Callbacks) -- Known),
-                lists:foreach(
-                  fun(CallbackMF) ->
-                          ?assertMatch({_, _}, CallbackMF),
-                          {CallbackMod, CallbackFun} = CallbackMF,
-                          ?assert(is_atom(CallbackMod)),
-                          ?assert(is_atom(CallbackFun)),
-                          ?assert(erlang:function_exported(
-                                    CallbackMod, CallbackFun, 1))
-                  end, maps:values(Callbacks));
-            _ ->
-                ok
+        ?assert(is_list(maps:get(desc, FeatureProps, ""))),
+        ?assert(is_list(maps:get(doc_url, FeatureProps, ""))),
+        if
+            ?IS_FEATURE_FLAG(FeatureProps) ->
+                ValidProps = [desc,
+                              doc_url,
+                              stability,
+                              require_level,
+                              experiment_level,
+                              depends_on,
+                              callbacks],
+                ?assertEqual([], maps:keys(FeatureProps) -- ValidProps),
+                ?assert(is_list(maps:get(depends_on, FeatureProps, []))),
+                ?assert(lists:all(
+                          fun erlang:is_atom/1,
+                          maps:get(depends_on, FeatureProps, []))),
+                Stability = get_stability(FeatureProps),
+                ?assert(Stability =:= stable orelse
+                        Stability =:= experimental orelse
+                        Stability =:= required),
+                ?assert(Stability =:= experimental orelse
+                        not maps:is_key(experiment_level, FeatureProps)),
+                ?assert(Stability =:= required orelse
+                        not maps:is_key(require_level, FeatureProps)),
+                RequireLevel = maps:get(require_level, FeatureProps, soft),
+                ?assert(RequireLevel =:= hard orelse RequireLevel =:= soft),
+                ExperimentLevel = maps:get(
+                                    experiment_level, FeatureProps,
+                                    unsupported),
+                ?assert(ExperimentLevel =:= unsupported orelse
+                        ExperimentLevel =:= supported),
+                ?assertNot(maps:is_key(migration_fun, FeatureProps)),
+                ?assertNot(maps:is_key(warning, FeatureProps)),
+                case FeatureProps of
+                    #{callbacks := Callbacks} ->
+                        ValidCbs = [enable,
+                                    post_enable],
+                        ?assert(is_map(Callbacks)),
+                        ?assertEqual([], maps:keys(Callbacks) -- ValidCbs),
+                        assert_callbacks_are_valid(Callbacks);
+                    _ ->
+                        ok
+                end;
+            ?IS_DEPRECATION(FeatureProps) ->
+                ValidProps = [desc,
+                              doc_url,
+                              deprecation_phase,
+                              messages,
+                              callbacks],
+                ?assertEqual([], maps:keys(FeatureProps) -- ValidProps),
+                Phase = maps:get(deprecation_phase, FeatureProps),
+                ?assert(Phase =:= permitted_by_default orelse
+                        Phase =:= denied_by_default orelse
+                        Phase =:= disconnected orelse
+                        Phase =:= removed),
+                Msgs = maps:get(messages, FeatureProps, #{}),
+                ?assert(is_map(Msgs)),
+                ValidMsgs = [when_permitted,
+                             when_denied,
+                             when_removed],
+                ?assertEqual([], maps:keys(Msgs) -- ValidMsgs),
+                ?assert(lists:all(fun io_lib:char_list/1, maps:values(Msgs))),
+                ?assertNot(maps:is_key(stability, FeatureProps)),
+                ?assertNot(maps:is_key(migration_fun, FeatureProps)),
+                case FeatureProps of
+                    #{callbacks := Callbacks} ->
+                        ValidCbs = [is_feature_used],
+                        ?assert(is_map(Callbacks)),
+                        ?assertEqual([], maps:keys(Callbacks) -- ValidCbs),
+                        assert_callbacks_are_valid(Callbacks);
+                    _ ->
+                        ok
+                end
         end
     catch
         Class:Reason:Stacktrace ->
@@ -860,21 +1117,51 @@ assert_feature_flag_is_valid(FeatureName, FeatureProps) ->
             erlang:raise(Class, Reason, Stacktrace)
     end.
 
--spec merge_new_feature_flags(feature_flags(),
-                              atom(),
-                              feature_name(),
-                              feature_props()) -> feature_flags().
+assert_callbacks_are_valid(Callbacks) ->
+    lists:foreach(
+      fun(CallbackMF) ->
+              ?assertMatch({_, _}, CallbackMF),
+              {CallbackMod, CallbackFun} = CallbackMF,
+              ?assert(is_atom(CallbackMod)),
+              ?assert(is_atom(CallbackFun)),
+              %% Make sure the module is loaded before we check the function
+              %% is exported.
+              _ = CallbackMod:module_info(),
+              ?assert(erlang:function_exported(
+                        CallbackMod, CallbackFun, 1))
+      end, maps:values(Callbacks)).
+
+-spec merge_new_feature_flags(FeatureFlags,
+                              App,
+                              FeatureName,
+                              FeatureProps) -> FeatureFlags when
+      FeatureFlags :: feature_flags(),
+      App :: atom(),
+      FeatureName :: feature_name(),
+      FeatureProps :: feature_props() |
+                      rabbit_deprecated_features:feature_props(),
+      FeatureFlags :: feature_flags().
 %% @private
 
 merge_new_feature_flags(AllFeatureFlags, App, FeatureName, FeatureProps)
   when is_atom(FeatureName) andalso is_map(FeatureProps) ->
-    %% We expand the feature flag properties map with:
+    %% We extend the feature flag properties map with:
+    %%   - the name of the feature flag itself, just in case some code has
+    %%     access to the feature props only.
     %%   - the name of the application providing it: only informational
     %%     for now, but can be handy to understand that a feature flag
     %%     comes from a plugin.
-    FeatureProps1 = maps:put(provided_by, App, FeatureProps),
+    FeatureProps1 = FeatureProps#{name => FeatureName,
+                                  provided_by => App},
+    FeatureProps2 = if
+                        ?IS_DEPRECATION(FeatureProps) ->
+                            rabbit_deprecated_features:extend_properties(
+                              FeatureName, FeatureProps1);
+                        true ->
+                            FeatureProps1
+                    end,
     maps:merge(AllFeatureFlags,
-               #{FeatureName => FeatureProps1}).
+               #{FeatureName => FeatureProps2}).
 
 %% -------------------------------------------------------------------
 %% Feature flags state storage.
@@ -970,17 +1257,29 @@ try_to_write_enabled_feature_flags_list(FeatureNames) ->
                             {error, _} -> [];
                             List       -> List
                         end,
-    FeatureNames1 = lists:foldl(
+    FeatureNames1 = lists:filter(
+                      fun(FeatureName) ->
+                              FeatureProps = rabbit_ff_registry_wrapper:get(
+                                               FeatureName),
+                              case FeatureProps of
+                                  undefined -> false;
+                                  _         -> ?IS_FEATURE_FLAG(FeatureProps)
+                              end
+                      end, FeatureNames),
+    FeatureNames2 = lists:foldl(
                       fun(Name, Acc) ->
                               case is_supported_locally(Name) of
                                   true  -> Acc;
                                   false -> [Name | Acc]
                               end
-                      end, FeatureNames, PreviouslyEnabled),
-    FeatureNames2 = lists:sort(FeatureNames1),
+                      end, FeatureNames1, PreviouslyEnabled),
+    do_write_enabled_feature_flags_list(FeatureNames2).
+
+do_write_enabled_feature_flags_list(EnabledFeatureNames) ->
+    EnabledFeatureNames1 = lists:sort(EnabledFeatureNames),
 
     File = enabled_feature_flags_list_file(),
-    Content = io_lib:format("~tp.~n", [FeatureNames2]),
+    Content = io_lib:format("~1tp.~n", [EnabledFeatureNames1]),
     %% TODO: If we fail to write the the file, we should spawn a process
     %% to retry the operation.
     case file:write_file(File, Content) of
@@ -995,6 +1294,18 @@ try_to_write_enabled_feature_flags_list(FeatureNames) ->
             Error
     end.
 
+-spec delete_enabled_feature_flags_list_file() -> Ret when
+      Ret :: ok | {error, file:posix() | badarg}.
+%% @private
+
+delete_enabled_feature_flags_list_file() ->
+    File = enabled_feature_flags_list_file(),
+    case file:delete(File) of
+        ok              -> ok;
+        {error, enoent} -> ok;
+        Error           -> Error
+    end.
+
 -spec enabled_feature_flags_list_file() -> file:filename().
 %% @doc
 %% Returns the path to the file where the state of feature flags is stored.
@@ -1005,6 +1316,24 @@ enabled_feature_flags_list_file() ->
     case application:get_env(rabbit, feature_flags_file) of
         {ok, Val} -> Val;
         undefined -> throw(feature_flags_file_not_set)
+    end.
+
+copy_feature_states_after_reset(RemoteNode) ->
+    ?assertEqual(undefined, erlang:whereis(rabbit_ff_controller)),
+    EnabledFeatureFlags = erpc:call(
+                            RemoteNode, ?MODULE, list, [enabled], 60000),
+    EnabledFeatureNames = maps:keys(EnabledFeatureFlags),
+    ?LOG_DEBUG(
+       "Feature flags: copy feature states from remote node `~ts` after "
+       "a reset of this node `~ts`; enabled feature flags:~n~p",
+       [RemoteNode, node(), EnabledFeatureNames],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    case do_write_enabled_feature_flags_list(EnabledFeatureNames) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            File = enabled_feature_flags_list_file(),
+            throw({feature_flags_file_copy_error, File, Reason})
     end.
 
 %% -------------------------------------------------------------------
@@ -1091,7 +1420,7 @@ does_node_support(Node, FeatureNames, Timeout) ->
           end,
     case Ret of
         {error, Reason} ->
-            ?LOG_ERROR(
+            ?LOG_WARNING(
               "Feature flags: error while querying `~tp` support on "
               "node ~ts: ~tp",
               [FeatureNames, Node, Reason],
@@ -1112,7 +1441,9 @@ does_node_support(Node, FeatureNames, Timeout) ->
             false
     end.
 
--spec check_node_compatibility(node()) -> ok | {error, any()}.
+-spec check_node_compatibility(RemoteNode) -> Ret when
+      RemoteNode :: node(),
+      Ret :: ok | {error, any()}.
 %% @doc
 %% Checks if a node is compatible with the local node.
 %%
@@ -1124,11 +1455,40 @@ does_node_support(Node, FeatureNames, Timeout) ->
 %%   local node</li>
 %% </ol>
 %%
-%% @param Node the name of the remote node to test.
+%% @param RemoteNode the name of the remote node to test.
 %% @returns `ok' if they are compatible, `{error, Reason}' if they are not.
 
-check_node_compatibility(Node) ->
-    rabbit_ff_controller:check_node_compatibility(Node).
+check_node_compatibility(RemoteNode) ->
+    check_node_compatibility(RemoteNode, false).
+
+-spec check_node_compatibility(RemoteNode, LocalNodeAsVirgin) -> Ret when
+      RemoteNode :: node(),
+      LocalNodeAsVirgin :: boolean(),
+      Ret :: ok | {error, any()}.
+%% @doc
+%% Checks if a node is compatible with the local node.
+%%
+%% To be compatible, the following two conditions must be met:
+%% <ol>
+%% <li>feature flags enabled on the local node must be supported by the
+%%   remote node</li>
+%% <li>feature flags enabled on the remote node must be supported by the
+%%   local node</li>
+%% </ol>
+%%
+%% Unlike {@link check_node_compatibility/1}, the local node's feature flags
+%% inventory is evaluated as if the node was virgin if `LocalNodeAsVirgin' is
+%% true. This is useful if the local node will be reset as part of joining a
+%% remote cluster for instance.
+%%
+%% @param RemoteNode the name of the remote node to test.
+%% @param LocalNodeAsVirgin flag to indicate if the local node should be
+%% evaluated as if it was virgin.
+%% @returns `ok' if they are compatible, `{error, Reason}' if they are not.
+
+check_node_compatibility(RemoteNode, LocalNodeAsVirgin) ->
+    rabbit_ff_controller:check_node_compatibility(
+      RemoteNode, LocalNodeAsVirgin).
 
 run_feature_flags_mod_on_remote_node(Node, Function, Args, Timeout) ->
     rabbit_ff_controller:rpc_call(Node, ?MODULE, Function, Args, Timeout).
@@ -1140,12 +1500,34 @@ run_feature_flags_mod_on_remote_node(Node, Function, Args, Timeout) ->
 sync_feature_flags_with_cluster([] = _Nodes, true = _NodeIsVirgin) ->
     rabbit_ff_controller:enable_default();
 sync_feature_flags_with_cluster([] = _Nodes, false = _NodeIsVirgin) ->
-    ok;
-sync_feature_flags_with_cluster(_Nodes, _NodeIsVirgin) ->
-    rabbit_ff_controller:sync_cluster().
+    rabbit_ff_controller:enable_required();
+sync_feature_flags_with_cluster(Nodes, _NodeIsVirgin) ->
+    %% We don't use `rabbit_nodes:filter_running()' here because the given
+    %% `Nodes' list may contain nodes which are not members yet (the cluster
+    %% could be being created or expanded).
+    Nodes1 = [N || N <- Nodes, rabbit:is_running(N)],
+    Nodes2 = lists:usort([node() | Nodes1]),
+    rabbit_ff_controller:sync_cluster(Nodes2).
 
 -spec refresh_feature_flags_after_app_load() ->
     ok | {error, any()} | no_return().
 
 refresh_feature_flags_after_app_load() ->
     rabbit_ff_controller:refresh_after_app_load().
+
+-spec reset() -> ok.
+%% @doc Resets the feature flags registry and recorded states on disk.
+
+reset() ->
+    ok = reset_registry(),
+    ok = delete_enabled_feature_flags_list_file(),
+    ok.
+
+-spec reset_registry() -> ok.
+%% @doc Resets the feature flags registry.
+%%
+%% The registry will be automatically reloaded with the next use of it, after
+%% reading the recorded state from disc.
+
+reset_registry() ->
+    rabbit_ff_registry_factory:reset_registry().

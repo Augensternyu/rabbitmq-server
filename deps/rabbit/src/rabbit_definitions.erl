@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 
@@ -44,7 +44,8 @@
 -export([import_raw/1, import_raw/2, import_parsed/1, import_parsed/2,
          import_parsed_with_hashing/1, import_parsed_with_hashing/2,
          apply_defs/2, apply_defs/3,
-         should_skip_if_unchanged/0]).
+         should_skip_if_unchanged/0
+        ]).
 
 -export([all_definitions/0]).
 -export([
@@ -53,7 +54,13 @@
   list_exchanges/0, list_queues/0, list_bindings/0,
   is_internal_parameter/1
 ]).
--export([decode/1, decode/2, args/1]).
+-export([decode/1, decode/2, args/1, validate_definitions/1]).
+
+%% for tests
+-export([
+    maybe_load_definitions_from_local_filesystem_if_unchanged/3,
+    maybe_load_definitions_from_pluggable_source_if_unchanged/2
+]).
 
 -import(rabbit_misc, [pget/2, pget/3]).
 -import(rabbit_data_coercion, [to_binary/1]).
@@ -73,7 +80,8 @@
                                'bindings' |
                                'exchanges'.
 
--type definition_object() :: #{binary() => any()}.
+-type definition_key() :: binary() | atom().
+-type definition_object() :: #{definition_key() => any()}.
 -type definition_list() :: [definition_object()].
 
 -type definitions() :: #{
@@ -95,6 +103,76 @@ maybe_load_definitions() ->
             % Extensible sources
             maybe_load_definitions_from_pluggable_source(rabbit, definitions);
         {error, E} -> {error, E}
+    end.
+
+-spec validate_parsing_of_doc(any()) -> boolean().
+validate_parsing_of_doc(Body) when is_binary(Body) ->
+    case decode(Body) of
+        {ok, _Map}    -> true;
+        {error, _Err} -> false
+    end.
+
+-spec validate_parsing_of_doc_collection(list(any())) -> boolean().
+validate_parsing_of_doc_collection(Defs) when is_list(Defs) ->
+    lists:foldl(fun(_Body, false) ->
+        false;
+        (Body, true) ->
+            case decode(Body) of
+                {ok, _Map}    -> true;
+                {error, _Err} -> false
+            end
+    end, true, Defs).
+
+-spec filter_orphaned_objects(definition_list()) -> definition_list().
+filter_orphaned_objects(Maps) ->
+    lists:filter(fun(M) -> maps:get(<<"vhost">>, M, undefined) =:= undefined end, Maps).
+
+-spec any_orphaned_objects(definition_list()) -> boolean().
+any_orphaned_objects(Maps) ->
+    length(filter_orphaned_objects(Maps)) > 0.
+
+-spec any_orphaned_in_doc(definitions()) -> boolean().
+any_orphaned_in_doc(DefsMap) ->
+    any_orphaned_in_category(DefsMap, <<"queues">>)
+    orelse any_orphaned_in_category(DefsMap, <<"exchanges">>)
+    orelse any_orphaned_in_category(DefsMap, <<"bindings">>).
+
+-spec any_orphaned_in_category(definitions(), definition_category() | binary()) -> boolean().
+any_orphaned_in_category(DefsMap, Category) ->
+    %% try both binary and atom keys
+    any_orphaned_objects(maps:get(Category, DefsMap,
+                            maps:get(rabbit_data_coercion:to_atom(Category), DefsMap, []))).
+
+-spec validate_orphaned_objects_in_doc_collection(list() | binary()) -> boolean().
+validate_orphaned_objects_in_doc_collection(Defs) when is_list(Defs) ->
+    lists:foldl(fun(_Body, false) ->
+        false;
+        (Body, true) ->
+            validate_parsing_of_doc(Body)
+    end, true, Defs).
+
+-spec validate_orphaned_objects_in_doc(binary()) -> boolean().
+validate_orphaned_objects_in_doc(Body) when is_binary(Body) ->
+    case decode(Body) of
+        {ok, DefsMap}    ->
+            AnyOrphaned = any_orphaned_in_doc(DefsMap),
+            case AnyOrphaned of
+                true  ->
+                    log_an_error_about_orphaned_objects();
+                false -> ok
+            end,
+            AnyOrphaned;
+        {error, _Err} -> false
+    end.
+
+-spec validate_definitions(list(any()) | binary()) -> boolean().
+validate_definitions(Defs) when is_list(Defs) ->
+    validate_parsing_of_doc_collection(Defs) andalso
+    validate_orphaned_objects_in_doc_collection(Defs);
+validate_definitions(Body) when is_binary(Body) ->
+    case decode(Body) of
+        {ok, Defs}    -> validate_orphaned_objects_in_doc(Defs);
+        {error, _Err} -> false
     end.
 
 -spec import_raw(Body :: binary() | iolist()) -> ok | {error, term()}.
@@ -262,6 +340,7 @@ maybe_load_definitions_from_local_filesystem(App, Key) ->
         undefined  -> ok;
         {ok, none} -> ok;
         {ok, Path} ->
+            rabbit_log:debug("~ts.~ts is set to '~ts', will discover definition file(s) to import", [App, Key, Path]),
             IsDir = filelib:is_dir(Path),
             Mod = rabbit_definitions_import_local_filesystem,
             rabbit_log:debug("Will use module ~ts to import definitions", [Mod]),
@@ -271,18 +350,23 @@ maybe_load_definitions_from_local_filesystem(App, Key) ->
                     rabbit_log:debug("Will re-import definitions even if they have not changed"),
                     Mod:load(IsDir, Path);
                 true ->
-                    Algo = rabbit_definitions_hashing:hashing_algorithm(),
-                    rabbit_log:debug("Will import definitions only if definition file/directory has changed, hashing algo: ~ts", [Algo]),
-                    CurrentHash = rabbit_definitions_hashing:stored_global_hash(),
-                    rabbit_log:debug("Previously stored hash value of imported definitions: ~ts...", [binary:part(rabbit_misc:hexify(CurrentHash), 0, 12)]),
-                    case Mod:load_with_hashing(IsDir, Path, CurrentHash, Algo) of
-                        CurrentHash ->
-                            rabbit_log:info("Hash value of imported definitions matches current contents");
-                        UpdatedHash ->
-                            rabbit_log:debug("Hash value of imported definitions has changed to ~ts", [binary:part(rabbit_misc:hexify(UpdatedHash), 0, 12)]),
-                            rabbit_definitions_hashing:store_global_hash(UpdatedHash)
-                    end
+                    maybe_load_definitions_from_local_filesystem_if_unchanged(Mod, IsDir, Path)
             end
+    end.
+
+maybe_load_definitions_from_local_filesystem_if_unchanged(Mod, IsDir, Path) ->
+    Algo = rabbit_definitions_hashing:hashing_algorithm(),
+    rabbit_log:debug("Will import definitions only if definition file/directory has changed, hashing algo: ~ts", [Algo]),
+    CurrentHash = rabbit_definitions_hashing:stored_global_hash(),
+    rabbit_log:debug("Previously stored hash value of imported definitions: ~ts...", [binary:part(rabbit_misc:hexify(CurrentHash), 0, 12)]),
+    case Mod:load_with_hashing(IsDir, Path, CurrentHash, Algo) of
+        {error, Err} ->
+            {error, Err};
+        CurrentHash ->
+            rabbit_log:info("Hash value of imported definitions matches current contents");
+        UpdatedHash ->
+            rabbit_log:debug("Hash value of imported definitions has changed to ~ts", [binary:part(rabbit_misc:hexify(UpdatedHash), 0, 12)]),
+            rabbit_definitions_hashing:store_global_hash(UpdatedHash)
     end.
 
 maybe_load_definitions_from_pluggable_source(App, Key) ->
@@ -296,25 +380,32 @@ maybe_load_definitions_from_pluggable_source(App, Key) ->
                     {error, "definition import source is configured but definitions.import_backend is not set"};
                 ModOrAlias ->
                     Mod = normalize_backend_module(ModOrAlias),
-                    case should_skip_if_unchanged() of
-                        false ->
-                            rabbit_log:debug("Will use module ~ts to import definitions", [Mod]),
-                            Mod:load(Proplist);
-                        true ->
-                            rabbit_log:debug("Will use module ~ts to import definitions (if definition file/directory/source has changed)", [Mod]),
-                            CurrentHash = rabbit_definitions_hashing:stored_global_hash(),
-                            rabbit_log:debug("Previously stored hash value of imported definitions: ~ts...", [binary:part(rabbit_misc:hexify(CurrentHash), 0, 12)]),
-                            Algo = rabbit_definitions_hashing:hashing_algorithm(),
-                            case Mod:load_with_hashing(Proplist, CurrentHash, Algo) of
-                                CurrentHash ->
-                                    rabbit_log:info("Hash value of imported definitions matches current contents");
-                                UpdatedHash ->
-                                    rabbit_log:debug("Hash value of imported definitions has changed to ~ts...", [binary:part(rabbit_misc:hexify(CurrentHash), 0, 12)]),
-                                    rabbit_definitions_hashing:store_global_hash(UpdatedHash)
-                            end
-                    end
+                    maybe_load_definitions_from_pluggable_source_if_unchanged(Mod, Proplist)
             end
     end.
+
+maybe_load_definitions_from_pluggable_source_if_unchanged(Mod, Proplist) ->
+    case should_skip_if_unchanged() of
+        false ->
+            rabbit_log:debug("Will use module ~ts to import definitions", [Mod]),
+            Mod:load(Proplist);
+        true ->
+            rabbit_log:debug("Will use module ~ts to import definitions (if definition file/directory/source has changed)", [Mod]),
+            CurrentHash = rabbit_definitions_hashing:stored_global_hash(),
+            rabbit_log:debug("Previously stored hash value of imported definitions: ~ts...", [binary:part(rabbit_misc:hexify(CurrentHash), 0, 12)]),
+            Algo = rabbit_definitions_hashing:hashing_algorithm(),
+            case Mod:load_with_hashing(Proplist, CurrentHash, Algo) of
+                {error, Err} ->
+                    {error, Err};
+                CurrentHash ->
+                    rabbit_log:info("Hash value of imported definitions matches current contents");
+                UpdatedHash ->
+                    rabbit_log:debug("Hash value of imported definitions has changed to ~ts...", [binary:part(rabbit_misc:hexify(CurrentHash), 0, 12)]),
+                    rabbit_definitions_hashing:store_global_hash(UpdatedHash)
+            end
+    end.
+
+
 
 normalize_backend_module(local_filesystem) ->
     rabbit_definitions_import_local_filesystem;
@@ -375,6 +466,10 @@ should_skip_if_unchanged() ->
     ReachedTargetClusterSize = rabbit_nodes:reached_target_cluster_size(),
     OptedIn andalso ReachedTargetClusterSize.
 
+log_an_error_about_orphaned_objects() ->
+    rabbit_log:error("Definitions import: some queues, exchanges or bindings in the definition file "
+        "are missing the virtual host field. Such files are produced when definitions of "
+        "a single virtual host are exported. They cannot be used to import definitions at boot time").
 
 -spec apply_defs(Map :: #{atom() => any()}, ActingUser :: rabbit_types:username()) -> 'ok' | {error, term()}.
 
@@ -390,6 +485,20 @@ apply_defs(Map, ActingUser, VHost) when is_binary(VHost) ->
     apply_defs(Map, ActingUser, fun () -> ok end, VHost);
 apply_defs(Map, ActingUser, SuccessFun) when is_function(SuccessFun) ->
     Version = maps:get(rabbitmq_version, Map, maps:get(rabbit_version, Map, undefined)),
+
+    %% If any of the queues or exchanges do not have virtual hosts set,
+    %% this definition file was a virtual-host specific import. They cannot be applied
+    %% as "complete" definition imports, most notably, imported on boot.
+    AnyOrphaned = any_orphaned_in_doc(Map),
+
+    case AnyOrphaned of
+        true ->
+            log_an_error_about_orphaned_objects(),
+            throw({error, invalid_definitions_file});
+        false ->
+            ok
+    end,
+
     try
         concurrent_for_all(users, ActingUser, Map,
                 fun(User, _Username) ->
@@ -423,8 +532,8 @@ apply_defs(Map, ActingUser, SuccessFun) when is_function(SuccessFun) ->
 
         SuccessFun(),
         ok
-    catch {error, E} -> {error, E};
-          exit:E     -> {error, E}
+    catch {error, E} -> {error, format(E)};
+          exit:E     -> {error, format(E)}
     after
         rabbit_runtime:gc_all_processes()
     end.
@@ -553,8 +662,11 @@ do_concurrent_for_all(List, WorkPoolFun) ->
            fun() ->
                    _ = try
                        WorkPoolFun(M)
-                   catch {error, E} -> gatherer:in(Gatherer, {error, E});
-                         _:E        -> gatherer:in(Gatherer, {error, E})
+                   catch {error, E}     -> gatherer:in(Gatherer, {error, E});
+                         _:E:Stacktrace ->
+                             rabbit_log:debug("Definition import: a work pool operation has thrown an exception ~st, stacktrace: ~p",
+                                              [E, Stacktrace]),
+                             gatherer:in(Gatherer, {error, E})
                    end,
                    gatherer:finish(Gatherer)
            end)
@@ -593,6 +705,10 @@ format({no_such_vhost, VHost}) ->
                          [VHost]));
 format({vhost_limit_exceeded, ErrMsg}) ->
     rabbit_data_coercion:to_binary(ErrMsg);
+format({shutdown, _} = Error) ->
+    rabbit_log:debug("Metadata store is unavailable: ~p", [Error]),
+    rabbit_data_coercion:to_binary(
+      rabbit_misc:format("Metadata store is unavailable. Please try again.", []));
 format(E) ->
     rabbit_data_coercion:to_binary(rabbit_misc:format("~tp", [E])).
 
@@ -657,7 +773,7 @@ add_policy(VHost, Param, Username) ->
                              exit(rabbit_data_coercion:to_binary(rabbit_misc:escape_html_tags(E ++ S)))
     end.
 
--spec add_vhost(map(), rabbit_types:username()) -> ok.
+-spec add_vhost(map(), rabbit_types:username()) -> ok | no_return().
 
 add_vhost(VHost, ActingUser) ->
     Name             = maps:get(name, VHost, undefined),
@@ -667,7 +783,21 @@ add_vhost(VHost, ActingUser) ->
     Tags             = maps:get(tags, VHost, maps:get(tags, Metadata, [])),
     DefaultQueueType = maps:get(default_queue_type, Metadata, undefined),
 
-    rabbit_vhost:put_vhost(Name, Description, Tags, DefaultQueueType, IsTracingEnabled, ActingUser).
+    case rabbit_vhost:put_vhost(Name, Description, Tags, DefaultQueueType, IsTracingEnabled, ActingUser) of
+        ok ->
+            ok;
+        {error, _} = Err1 ->
+            throw(Err1)
+    end,
+
+    %% The newly created virtual host won't have all the metadata keys. Rather than
+    %% changing the functions above, simply update the metadata as a separate step.
+    case rabbit_vhost:update_metadata(Name, Metadata, ActingUser) of
+        ok ->
+            ok;
+        {error, _} = Err2 ->
+            throw(Err2)
+    end.
 
 add_permission(Permission, ActingUser) ->
     rabbit_auth_backend_internal:set_permissions(maps:get(user,      Permission, undefined),
@@ -697,6 +827,10 @@ add_queue_int(_Queue, R = #resource{kind = queue,
     Name = R#resource.name,
     rabbit_log:warning("Skipping import of a queue whose name begins with 'amq.', "
                        "name: ~ts, acting user: ~ts", [Name, ActingUser]);
+add_queue_int(_Queue, R = #resource{kind = queue, virtual_host = undefined}, ActingUser) ->
+    Name = R#resource.name,
+    rabbit_log:warning("Skipping import of a queue with an unset virtual host field, "
+    "name: ~ts, acting user: ~ts", [Name, ActingUser]);
 add_queue_int(Queue, Name = #resource{virtual_host = VHostName}, ActingUser) ->
     case rabbit_amqqueue:exists(Name) of
         true ->
@@ -743,13 +877,18 @@ add_exchange_int(Exchange, Name, ActingUser) ->
                            undefined -> false; %% =< 2.2.0
                            I         -> I
                        end,
-            rabbit_exchange:declare(Name,
-                                    rabbit_exchange:check_type(maps:get(type, Exchange, undefined)),
-                                    maps:get(durable,                         Exchange, undefined),
-                                    maps:get(auto_delete,                     Exchange, undefined),
-                                    Internal,
-                                    args(maps:get(arguments, Exchange, undefined)),
-                                    ActingUser)
+            case rabbit_exchange:declare(Name,
+                                         rabbit_exchange:check_type(maps:get(type, Exchange, undefined)),
+                                         maps:get(durable,                         Exchange, undefined),
+                                         maps:get(auto_delete,                     Exchange, undefined),
+                                         Internal,
+                                         args(maps:get(arguments, Exchange, undefined)),
+                                         ActingUser) of
+                {ok, _Exchange} ->
+                    ok;
+                {error, timeout} = Err ->
+                    throw(Err)
+            end
     end.
 
 add_binding(Binding, ActingUser) ->
@@ -763,12 +902,17 @@ add_binding(VHost, Binding, ActingUser) ->
                     rv(VHost, DestType, destination, Binding), ActingUser).
 
 add_binding_int(Binding, Source, Destination, ActingUser) ->
-    rabbit_binding:add(
-      #binding{source       = Source,
-               destination  = Destination,
-               key          = maps:get(routing_key, Binding, undefined),
-               args         = args(maps:get(arguments, Binding, undefined))},
-      ActingUser).
+    case rabbit_binding:add(
+           #binding{source       = Source,
+                    destination  = Destination,
+                    key          = maps:get(routing_key, Binding, undefined),
+                    args         = args(maps:get(arguments, Binding, undefined))},
+           ActingUser) of
+        ok ->
+            ok;
+        {error, _} = Err ->
+            throw(Err)
+    end.
 
 dest_type(Binding) ->
     rabbit_data_coercion:to_atom(maps:get(destination_type, Binding, undefined)).
@@ -790,6 +934,7 @@ validate_limits(All) ->
         undefined -> ok;
         Queues0 ->
             {ok, VHostMap} = filter_out_existing_queues(Queues0),
+            _ = rabbit_log:debug("Definition import. Virtual host map for validation: ~p", [VHostMap]),
             maps:fold(fun validate_vhost_limit/3, ok, VHostMap)
     end.
 
@@ -814,19 +959,30 @@ filter_out_existing_queues(VHost, Queues) ->
 
 build_queue_data(Queue) ->
     VHost = maps:get(<<"vhost">>, Queue, undefined),
-    Rec = rv(VHost, queue, <<"name">>, Queue),
-    {Rec, VHost}.
+    case VHost of
+        undefined -> undefined;
+        Value ->
+            Rec = rv(Value, queue, <<"name">>, Queue),
+            {Rec, VHost}
+    end.
 
 build_filtered_map([], AccMap) ->
     {ok, AccMap};
 build_filtered_map([Queue|Rest], AccMap0) ->
-    {Rec, VHost} = build_queue_data(Queue),
-    case rabbit_amqqueue:exists(Rec) of
-        false ->
-            AccMap1 = maps:update_with(VHost, fun(V) -> V + 1 end, 1, AccMap0),
-            build_filtered_map(Rest, AccMap1);
-        true ->
-            build_filtered_map(Rest, AccMap0)
+    %% If virtual host is not specified in a queue,
+    %% this definition file is likely virtual host-specific.
+    %%
+    %% Skip such queues.
+    case build_queue_data(Queue) of
+        undefined -> build_filtered_map(Rest, AccMap0);
+        {Rec, VHost} when VHost =/= undefined ->
+            case rabbit_amqqueue:exists(Rec) of
+                false ->
+                    AccMap1 = maps:update_with(VHost, fun(V) -> V + 1 end, 1, AccMap0),
+                    build_filtered_map(Rest, AccMap1);
+                true ->
+                    build_filtered_map(Rest, AccMap0)
+            end
     end.
 
 validate_vhost_limit(VHost, AddCount, ok) ->
@@ -924,10 +1080,13 @@ list_vhosts() ->
     [vhost_definition(V) || V <- rabbit_vhost:all()].
 
 vhost_definition(VHost) ->
+    Name = vhost:get_name(VHost),
+    DQT = rabbit_queue_type:short_alias_of(rabbit_vhost:default_queue_type(Name)),
     #{
-        <<"name">> => vhost:get_name(VHost),
+        <<"name">> => Name,
         <<"limits">> => vhost:get_limits(VHost),
-        <<"metadata">> => vhost:get_metadata(VHost)
+        <<"metadata">> => vhost:get_metadata(VHost),
+        <<"default_queue_type">> => DQT
     }.
 
 list_users() ->
@@ -949,8 +1108,19 @@ runtime_parameter_definition(Param) ->
         <<"vhost">> => pget(vhost, Param),
         <<"component">> => pget(component, Param),
         <<"name">> => pget(name, Param),
-        <<"value">> => maps:from_list(pget(value, Param))
+        <<"value">> => maybe_map(pget(value, Param))
     }.
+
+maybe_map(Value) ->
+    %% Not all definitions are maps. `federation-upstream-set` is
+    %% a list of maps, and it should be exported as it has been
+    %% imported
+    try
+        rabbit_data_coercion:to_map(Value)
+    catch
+        error:badarg ->
+            Value
+    end.
 
 list_global_runtime_parameters() ->
     [global_runtime_parameter_definition(P) || P <- rabbit_runtime_parameters:list_global(), not is_internal_parameter(P)].

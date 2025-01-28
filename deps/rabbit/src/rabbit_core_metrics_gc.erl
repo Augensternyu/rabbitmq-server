@@ -2,9 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbit_core_metrics_gc).
+
+-behaviour(gen_server).
 
 -record(state, {timer,
                 interval
@@ -17,7 +19,7 @@
 -spec start_link() -> rabbit_types:ok_pid_or_error().
 
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], [{hibernate_after, 0}]).
 
 init(_) ->
     Interval = rabbit_misc:get_env(rabbit, core_metrics_gc_interval, 120000),
@@ -92,14 +94,17 @@ gc_leader_data(Id, Table, GbSet) ->
 gc_global_queues() ->
     GbSet = gb_sets:from_list(rabbit_amqqueue:list_names()),
     gc_process_and_entity(channel_queue_metrics, GbSet),
+    gc_entity(queue_delivery_metrics, GbSet),
     gc_process_and_entity(consumer_created, GbSet),
     ExchangeGbSet = gb_sets:from_list(rabbit_exchange:list_names()),
-    gc_process_and_entities(channel_queue_exchange_metrics, GbSet, ExchangeGbSet).
+    gc_process_and_entities(channel_queue_exchange_metrics, GbSet, ExchangeGbSet),
+    gc_entities(queue_exchange_metrics, GbSet, ExchangeGbSet).
 
 gc_exchanges() ->
     Exchanges = rabbit_exchange:list_names(),
     GbSet = gb_sets:from_list(Exchanges),
-    gc_process_and_entity(channel_exchange_metrics, GbSet).
+    gc_process_and_entity(channel_exchange_metrics, GbSet),
+    gc_entity(exchange_metrics, GbSet).
 
 gc_nodes() ->
     Nodes = rabbit_nodes:list_members(),
@@ -153,6 +158,12 @@ gc_entity(Table, GbSet) ->
                  ({Id = Key, _, _}, none) ->
                       gc_entity(Id, Table, Key, GbSet);
                  ({Id = Key, _, _, _, _}, none) ->
+                      gc_entity(Id, Table, Key, GbSet);
+                 ({Id = Key, _, _, _, _, _}, none)
+                    when Table == exchange_metrics ->
+                      gc_entity(Id, Table, Key, GbSet);
+                 ({Id = Key, _, _, _, _, _, _, _, _}, none)
+                    when Table == queue_delivery_metrics ->
                       gc_entity(Id, Table, Key, GbSet)
               end, none, Table).
 
@@ -187,6 +198,13 @@ gc_process_and_entity(Id, Pid, Table, Key, GbSet) ->
             ets:delete(Table, Key),
             none
     end.
+
+gc_entities(Table, QueueGbSet, ExchangeGbSet) ->
+    ets:foldl(fun({{QueueId, ExchangeId} = Key, _, _}, none)
+                    when Table == queue_exchange_metrics ->
+                      gc_entity(QueueId, Table, Key, QueueGbSet),
+                      gc_entity(ExchangeId, Table, Key, ExchangeGbSet)
+             end, none, Table).
 
 gc_process_and_entities(Table, QueueGbSet, ExchangeGbSet) ->
     ets:foldl(fun({{Pid, {Q, X}} = Key, _, _}, none) ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 
 -module(command_SUITE).
@@ -11,21 +11,23 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("rabbit_mqtt.hrl").
--import(util, [connect/3]).
+-import(util, [connect/3, connect/4]).
 
 -define(COMMAND, 'Elixir.RabbitMQ.CLI.Ctl.Commands.ListMqttConnectionsCommand').
 
 all() ->
     [
-      {group, non_parallel_tests}
+     {group, unit},
+     {group, v4},
+     {group, v5}
     ].
 
 groups() ->
     [
-      {non_parallel_tests, [], [
-                                merge_defaults,
-                                run
-                               ]}
+     {unit, [], [merge_defaults]},
+     {v4, [], [run]},
+     {v5, [], [run,
+               user_property]}
     ].
 
 suite() ->
@@ -51,8 +53,10 @@ end_per_suite(Config) ->
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).
 
-init_per_group(_, Config) ->
-    Config.
+init_per_group(unit, Config) ->
+    Config;
+init_per_group(Group, Config) ->
+    rabbit_ct_helpers:set_config(Config, {mqtt_version, Group}).
 
 end_per_group(_, Config) ->
     Config.
@@ -81,6 +85,7 @@ run(Config) ->
     %% No connections
     [] = 'Elixir.Enum':to_list(?COMMAND:run([], Opts)),
 
+    %% Open a connection
     C1 = connect(<<"simpleClient">>, Config, [{ack_timeout, 1}]),
 
     timer:sleep(100),
@@ -124,8 +129,34 @@ run(Config) ->
     ?assertEqual(InfoItemsSorted, lists:sort(proplists:get_keys(AllInfos1Con1))),
     ?assertEqual(InfoItemsSorted, lists:sort(proplists:get_keys(AllInfos2Con1))),
 
+    %% CLI command should list MQTT connections from all nodes.
+    C3 = connect(<<"simpleClient2">>, Config, 1, [{ack_timeout, 1}]),
+    rabbit_ct_helpers:eventually(
+      ?_assertEqual(
+         [[{client_id, <<"simpleClient">>}],
+          [{client_id, <<"simpleClient1">>}],
+          [{client_id, <<"simpleClient2">>}]],
+         lists:sort('Elixir.Enum':to_list(?COMMAND:run([<<"client_id">>], Opts))))),
+
     ok = emqtt:disconnect(C1),
-    ok = emqtt:disconnect(C2).
+    ok = emqtt:disconnect(C2),
+    ok = emqtt:disconnect(C3).
+
+user_property(Config) ->
+    Node = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    Opts = #{node => Node, timeout => 10_000, verbose => false},
+    ClientId = <<"my-client">>,
+    UserProp = [{<<"name 1">>, <<"value 1">>},
+                {<<"name 2">>, <<"value 2">>},
+                %% "The same name is allowed to appear more than once." [v5 3.1.2.11.8]
+                {<<"name 2">>, <<"value 3">>}],
+    C = connect(ClientId, Config, 1, [{properties, #{'User-Property' => UserProp}}]),
+    rabbit_ct_helpers:eventually(
+      ?_assertEqual(
+         [[{client_id, ClientId},
+           {user_property, UserProp}]],
+         'Elixir.Enum':to_list(?COMMAND:run([<<"client_id">>, <<"user_property">>], Opts)))),
+    ok = emqtt:disconnect(C).
 
 start_amqp_connection(Type, Node, Port) ->
     amqp_connection:start(amqp_params(Type, Node, Port)).

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(proxy_protocol_SUITE).
@@ -21,8 +21,9 @@ all() ->
 groups() ->
     [
         {non_parallel_tests, [], [
-            proxy_protocol,
-            proxy_protocol_tls
+            proxy_protocol_v1,
+            proxy_protocol_v1_tls,
+            proxy_protocol_v2_local
         ]}
     ].
 
@@ -34,9 +35,9 @@ init_per_suite(Config) ->
         {rmq_certspwd, "bunnychow"},
         {rabbitmq_ct_tls_verify, verify_none}
     ]),
-    MqttConfig = stomp_config(),
+    StompConfig = stomp_config(),
     rabbit_ct_helpers:run_setup_steps(Config1,
-        [ fun(Conf) -> merge_app_env(MqttConfig, Conf) end ] ++
+        [ fun(Conf) -> merge_app_env(StompConfig, Conf) end ] ++
             rabbit_ct_broker_helpers:setup_steps() ++
             rabbit_ct_client_helpers:setup_steps()).
 
@@ -59,7 +60,7 @@ init_per_testcase(Testcase, Config) ->
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
-proxy_protocol(Config) ->
+proxy_protocol_v1(Config) ->
     Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_stomp),
     {ok, Socket} = gen_tcp:connect({127,0,0,1}, Port,
         [binary, {active, false}, {packet, raw}]),
@@ -72,7 +73,7 @@ proxy_protocol(Config) ->
     gen_tcp:close(Socket),
     ok.
 
-proxy_protocol_tls(Config) ->
+proxy_protocol_v1_tls(Config) ->
     app_utils:start_applications([asn1, crypto, public_key, ssl]),
     Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_stomp_tls),
     {ok, Socket} = gen_tcp:connect({127,0,0,1}, Port,
@@ -87,14 +88,31 @@ proxy_protocol_tls(Config) ->
     gen_tcp:close(Socket),
     ok.
 
+proxy_protocol_v2_local(Config) ->
+    ProxyInfo = #{
+        command => local,
+        version => 2
+    },
+    Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_stomp),
+    {ok, Socket} = gen_tcp:connect({127,0,0,1}, Port,
+        [binary, {active, false}, {packet, raw}]),
+    ok = inet:send(Socket, ranch_proxy_header:header(ProxyInfo)),
+    ok = inet:send(Socket, stomp_connect_frame()),
+    {ok, _Packet} = gen_tcp:recv(Socket, 0, ?TIMEOUT),
+    ConnectionName = rabbit_ct_broker_helpers:rpc(Config, 0,
+        ?MODULE, connection_name, []),
+    match = re:run(ConnectionName, <<"^127.0.0.1:\\d+ -> 127.0.0.1:\\d+$">>, [{capture, none}]),
+    gen_tcp:close(Socket),
+    ok.
+
 connection_name() ->
     Connections = ets:tab2list(connection_created),
     {_Key, Values} = lists:nth(1, Connections),
     {_, Name} = lists:keyfind(name, 1, Values),
     Name.
 
-merge_app_env(MqttConfig, Config) ->
-    rabbit_ct_helpers:merge_app_env(Config, MqttConfig).
+merge_app_env(StompConfig, Config) ->
+    rabbit_ct_helpers:merge_app_env(Config, StompConfig).
 
 stomp_connect_frame() ->
     <<"CONNECT\n",

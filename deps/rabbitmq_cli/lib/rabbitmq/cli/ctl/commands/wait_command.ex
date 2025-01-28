@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.WaitCommand do
   alias RabbitMQ.CLI.Core.{Helpers, Validators}
@@ -155,7 +155,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.WaitCommand do
   end
 
   defp wait_for_pid_funs(node_name, app_names, timeout, quiet) do
-    app_names_formatted = :io_lib.format('~p', [app_names])
+    app_names_formatted = :io_lib.format(~c"~p", [app_names])
 
     [
       log_param(
@@ -245,6 +245,9 @@ defmodule RabbitMQ.CLI.Ctl.Commands.WaitCommand do
       timeout,
       fn ->
         case :file.read_file(pid_file) do
+          {:ok, <<>>} ->
+            {:error, :loop}
+
           {:ok, bin} ->
             case Integer.parse(bin) do
               :error ->

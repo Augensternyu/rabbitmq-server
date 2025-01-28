@@ -28,6 +28,8 @@ a:hover { color: #F60; }
 #topnav input[type=submit] { padding: 3px 7px; display: inline; }
 #topnav li { text-align: right; padding: 2px 0; }
 
+#warnings p { text-align: center; padding: 1; margin: 1;}
+
 #menu ul { padding: 0; margin: 0; overflow: auto; }
 #menu li { float: left; list-style-type: none; padding: 0 0.1em 0 0; }
 #menu li a { display: block; padding: 0.7em 1.3em; margin-right: 5px; }
@@ -37,7 +39,9 @@ a:hover { color: #F60; }
 
 #main { padding-top: 10em; }
 #main.with-rhs { margin-right: 210px; }
+#main.with-warnings { padding-top: 18em; }
 #rhs { float: right; width: 200px; background-color: white; position: relative; padding-top: 10em; }
+#rhs.with-warnings { padding-top: 18em; }
 #rhs ul { padding: 0; margin: 10px 0 0 0; }
 #rhs li { list-style-type: none; padding: 0; margin-bottom: 5px; }
 #rhs a { display: block; padding: 0.7em; font-weight: bold; text-decoration: none; }
@@ -228,9 +232,9 @@ div.form-popup-help {
   width: 500px;
   z-index: 2;
 }
-p.warning, div.form-popup-warn { background: #FF9; }
+div.warning, p.warning, div.form-popup-warn { background: #FF9; }
 
-div.form-popup-options { z-index: 3; }
+div.form-popup-options { z-index: 3; overflow:auto; max-height:95%; }
 
 div.form-popup-warn span,
 div.form-popup-info span,
@@ -251,7 +255,14 @@ div.form-popup-options span:hover {
   cursor: pointer;
 }
 
-p.warning { padding: 15px; border-radius: 5px; -moz-border-radius: 5px; text-align: center; }
+div.warning, p.warning { padding: 15px; border-radius: 5px; -moz-border-radius: 5px; text-align: center; }
+div.warning {
+  margin: 15px 0;
+}
+
+div.warning button {
+  margin: auto;
+}
 
 .highlight { min-width: 120px; font-size: 120%; text-align:center; padding:10px; background-color: #ddd; margin: 0 20px 0 0; color: #888; border-radius: 5px; -moz-border-radius: 5px; }
 .highlight strong { font-size: 2em; display: block; color: #444; font-weight: normal; }
@@ -363,3 +374,57 @@ div.bindings-wrapper p.arrow { font-size: 200%; }
 }
 
 table.dynamic-shovels td label {width: 200px; margin-right:10px;padding: 4px 0px 5px 0px}
+
+input[type=checkbox].toggle {
+    display: none;
+}
+
+label.toggle {
+    cursor: pointer;
+    text-indent: -9999px;
+    width: 32px;
+    height: 16px;
+    background: #ff5630;
+    display: block;
+    border-radius: 16px;
+    position: relative;
+    margin: auto;
+}
+
+label.toggle:after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    background: #fff;
+    border-radius: 12px;
+    transition: 0.3s;
+}
+
+input.toggle:indeterminate + label.toggle {
+    background: #ffab00;
+}
+
+input.toggle:checked + label.toggle {
+    background: #36b37e;
+}
+
+input.toggle:indeterminate + label.toggle:after {
+    left: calc(50%);
+    transform: translateX(-50%);
+}
+
+input.toggle:checked + label.toggle:after {
+    left: calc(100% - 2px);
+    transform: translateX(-100%);
+}
+
+.grey-background {
+  background-color: #f0f0f0;
+}
+
+.yellow-background {
+  background-color: #ffff7b;
+}

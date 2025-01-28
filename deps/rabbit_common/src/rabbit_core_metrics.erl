@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_core_metrics).
@@ -111,19 +111,21 @@ create_table({Table, Type}) ->
     {read_concurrency, true}]).
 
 init() ->
-  _ = [create_table({Table, Type})
-         || {Table, Type} <- ?CORE_TABLES ++ ?CORE_EXTRA_TABLES],
+    Tables = ?CORE_TABLES ++ ?CORE_EXTRA_TABLES ++ ?CORE_NON_CHANNEL_TABLES,
+    _ = [create_table({Table, Type})
+        || {Table, Type} <- Tables],
     ok.
 
 terminate() ->
+    Tables = ?CORE_TABLES ++ ?CORE_EXTRA_TABLES ++ ?CORE_NON_CHANNEL_TABLES,
     [ets:delete(Table)
-     || {Table, _Type} <- ?CORE_TABLES ++ ?CORE_EXTRA_TABLES],
+        || {Table, _Type} <- Tables],
     ok.
 
 connection_created(Pid, Infos) ->
     ets:insert(connection_created, {Pid, Infos}),
-    ets:update_counter(connection_churn_metrics, node(), {2, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {2, 1},
+                           ?CONNECTION_CHURN_METRICS),
     ok.
 
 connection_closed(Pid) ->
@@ -131,31 +133,31 @@ connection_closed(Pid) ->
     ets:delete(connection_metrics, Pid),
     %% Delete marker
     ets:update_element(connection_coarse_metrics, Pid, {5, 1}),
-    ets:update_counter(connection_churn_metrics, node(), {3, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {3, 1},
+                           ?CONNECTION_CHURN_METRICS),
     ok.
 
 connection_stats(Pid, Infos) ->
     ets:insert(connection_metrics, {Pid, Infos}),
     ok.
 
-connection_stats(Pid, Recv_oct, Send_oct, Reductions) ->
+connection_stats(Pid, RecvOct, SendOct, Reductions) ->
     %% Includes delete marker
-    ets:insert(connection_coarse_metrics, {Pid, Recv_oct, Send_oct, Reductions, 0}),
+    ets:insert(connection_coarse_metrics, {Pid, RecvOct, SendOct, Reductions, 0}),
     ok.
 
 channel_created(Pid, Infos) ->
     ets:insert(channel_created, {Pid, Infos}),
-    ets:update_counter(connection_churn_metrics, node(), {4, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {4, 1},
+                           ?CONNECTION_CHURN_METRICS),
     ok.
 
 channel_closed(Pid) ->
     ets:delete(channel_created, Pid),
     ets:delete(channel_metrics, Pid),
     ets:delete(channel_process_metrics, Pid),
-    ets:update_counter(connection_churn_metrics, node(), {5, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {5, 1},
+                           ?CONNECTION_CHURN_METRICS),
     ok.
 
 channel_stats(Pid, Infos) ->
@@ -166,53 +168,65 @@ channel_stats(reductions, Id, Value) ->
     ets:insert(channel_process_metrics, {Id, Value}),
     ok.
 
-channel_stats(exchange_stats, publish, Id, Value) ->
+channel_stats(exchange_stats, publish, {_ChannelPid, XName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_exchange_metrics, Id, {2, Value}, {Id, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(exchange_metrics, XName, {2, Value}, {XName, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(exchange_stats, confirm, Id, Value) ->
+channel_stats(exchange_stats, confirm, {_ChannelPid, XName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_exchange_metrics, Id, {3, Value}, {Id, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(exchange_metrics, XName, {3, Value}, {XName, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(exchange_stats, return_unroutable, Id, Value) ->
+channel_stats(exchange_stats, return_unroutable, {_ChannelPid, XName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_exchange_metrics, Id, {4, Value}, {Id, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(exchange_metrics, XName, {4, Value}, {XName, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(exchange_stats, drop_unroutable, Id, Value) ->
+channel_stats(exchange_stats, drop_unroutable, {_ChannelPid, XName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_exchange_metrics, Id, {5, Value}, {Id, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(exchange_metrics, XName, {5, Value}, {XName, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_exchange_stats, publish, Id, Value) ->
+channel_stats(queue_exchange_stats, publish, {_ChannelPid, QueueExchange} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_exchange_metrics, Id, Value, {Id, 0, 0}),
+    _ = ets:update_counter(queue_exchange_metrics, QueueExchange, Value, {QueueExchange, 0, 0}),
     ok;
-channel_stats(queue_stats, get, Id, Value) ->
+channel_stats(queue_stats, get, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {2, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {2, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_stats, get_no_ack, Id, Value) ->
+channel_stats(queue_stats, get_no_ack, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {3, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {3, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_stats, deliver, Id, Value) ->
+channel_stats(queue_stats, deliver, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {4, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {4, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_stats, deliver_no_ack, Id, Value) ->
+channel_stats(queue_stats, deliver_no_ack, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {5, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {5, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_stats, redeliver, Id, Value) ->
+channel_stats(queue_stats, redeliver, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {6, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {6, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_stats, ack, Id, Value) ->
+channel_stats(queue_stats, ack, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {7, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {7, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok;
-channel_stats(queue_stats, get_empty, Id, Value) ->
+channel_stats(queue_stats, get_empty, {_ChannelPid, QName} = Id, Value) ->
     %% Includes delete marker
     _ = ets:update_counter(channel_queue_metrics, Id, {8, Value}, {Id, 0, 0, 0, 0, 0, 0, 0, 0}),
+    _ = ets:update_counter(queue_delivery_metrics, QName, {8, Value}, {QName, 0, 0, 0, 0, 0, 0, 0, 0}),
     ok.
 
 delete(Table, Key) ->
@@ -262,20 +276,20 @@ queue_stats(Name, MessagesReady, MessagesUnacknowledge, Messages, Reductions) ->
 
 queue_declared(_Name) ->
     %% Name is not needed, but might be useful in the future.
-    ets:update_counter(connection_churn_metrics, node(), {6, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {6, 1},
+                           ?CONNECTION_CHURN_METRICS),
     ok.
 
 queue_created(_Name) ->
     %% Name is not needed, but might be useful in the future.
-    ets:update_counter(connection_churn_metrics, node(), {7, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {7, 1},
+                           ?CONNECTION_CHURN_METRICS),
     ok.
 
 queue_deleted(Name) ->
     ets:delete(queue_coarse_metrics, Name),
-    ets:update_counter(connection_churn_metrics, node(), {8, 1},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {8, 1},
+                           ?CONNECTION_CHURN_METRICS),
     %% Delete markers
     ets:update_element(queue_metrics, Name, {3, 1}),
     CQX = ets:select(channel_queue_exchange_metrics, match_spec_cqx(Name)),
@@ -288,8 +302,8 @@ queue_deleted(Name) ->
                   end, CQ).
 
 queues_deleted(Queues) ->
-    ets:update_counter(connection_churn_metrics, node(), {8, length(Queues)},
-                       ?CONNECTION_CHURN_METRICS),
+    _ = ets:update_counter(connection_churn_metrics, node(), {8, length(Queues)},
+                           ?CONNECTION_CHURN_METRICS),
     [ delete_queue_metrics(Queue) || Queue <- Queues ],
     [
         begin

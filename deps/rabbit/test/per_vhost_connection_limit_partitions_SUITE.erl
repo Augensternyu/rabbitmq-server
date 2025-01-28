@@ -2,16 +2,15 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_vhost_connection_limit_partitions_SUITE).
 
--include_lib("common_test/include/ct.hrl").
--include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -import(rabbit_ct_client_helpers, [open_unmanaged_connection/2,
@@ -113,8 +112,15 @@ cluster_full_partition_with_autoheal(Config) ->
     rabbit_ct_broker_helpers:allow_traffic_between(B, C),
     timer:sleep(?DELAY),
 
-    %% during autoheal B's connections were dropped
-    ?awaitMatch(Connections when length(Connections) == 4,
+    %% During autoheal B's connections were dropped. Autoheal is not running
+    %% when Khepri is used.
+    KhepriEnabled = rabbit_ct_broker_helpers:is_feature_flag_enabled(
+                      Config, khepri_db),
+    ExpectedCount = case KhepriEnabled of
+                        true  -> 6;
+                        false -> 4
+                    end,
+    ?awaitMatch(Connections when length(Connections) == ExpectedCount,
                                  connections_in(Config, VHost),
                                  60000, 3000),
 

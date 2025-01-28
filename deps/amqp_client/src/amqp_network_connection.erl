@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @private
@@ -118,7 +118,6 @@ do_connect({Addr, Family},
                                              connection_timeout = Timeout,
                                              socket_options     = ExtraOpts},
            SIF, State) ->
-    ok = obtain(),
     case gen_tcp:connect(Addr, Port,
                          [Family | ?RABBIT_TCP_OPTS] ++ ExtraOpts,
                          Timeout) of
@@ -134,12 +133,11 @@ do_connect({Addr, Family},
            SIF, State) ->
     {ok, GlobalSslOpts} = application:get_env(amqp_client, ssl_options),
     app_utils:start_applications([asn1, crypto, public_key, ssl]),
-    ok = obtain(),
     case gen_tcp:connect(Addr, Port,
                          [Family | ?RABBIT_TCP_OPTS] ++ ExtraOpts,
                          Timeout) of
         {ok, Sock} ->
-            SslOpts = rabbit_ssl_options:fix(
+            SslOpts = rabbit_ssl_options:fix_client(
                         orddict:to_list(
                           orddict:merge(fun (_, _A, B) -> B end,
                                         orddict:from_list(GlobalSslOpts),
@@ -317,7 +315,7 @@ client_properties(UserProperties) ->
                {<<"version">>,   longstr, list_to_binary(Vsn)},
                {<<"platform">>,  longstr, <<"Erlang">>},
                {<<"copyright">>, longstr,
-                <<"Copyright (c) 2007-2023 VMware, Inc. or its affiliates.">>},
+                <<"Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.">>},
                {<<"information">>, longstr,
                 <<"Licensed under the MPL.  "
                   "See https://www.rabbitmq.com/">>},
@@ -377,12 +375,6 @@ handshake_recv(Expecting) ->
             _ ->
                 exit(handshake_receive_timed_out)
         end
-    end.
-
-obtain() ->
-    case code:is_loaded(file_handle_cache) of
-        false -> ok;
-        _     -> file_handle_cache:obtain()
     end.
 
 get_reason(#'connection.close'{reply_code = ErrCode}) ->

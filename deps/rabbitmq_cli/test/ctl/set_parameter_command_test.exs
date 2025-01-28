@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule SetParameterCommandTest do
   use ExUnit.Case, async: false
@@ -91,7 +91,7 @@ defmodule SetParameterCommandTest do
              context[:opts]
            ) ==
              {:error_string,
-              'Validation failed\n\ncomponent #{context[:component_name]} not found\n'}
+              ~c"Validation failed\n\ncomponent #{context[:component_name]} not found\n"}
 
     assert list_parameters(context[:vhost]) == []
   end
@@ -124,7 +124,8 @@ defmodule SetParameterCommandTest do
     assert @command.run(
              [context[:component_name], context[:key], context[:value]],
              context[:opts]
-           ) == {:error_string, 'Validation failed\n\nKey "uri" not found in reconnect-delay\n'}
+           ) ==
+             {:error_string, ~c"Validation failed\n\nKey \"uri\" not found in reconnect-delay\n"}
 
     assert list_parameters(context[:vhost]) == []
   end

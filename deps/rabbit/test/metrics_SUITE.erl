@@ -2,12 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(metrics_SUITE).
+-compile(nowarn_export_all).
 -compile(export_all).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
@@ -46,7 +46,8 @@ merge_app_env(Config) ->
     rabbit_ct_helpers:merge_app_env(Config,
                                     {rabbit, [
                                               {collect_statistics, fine},
-                                              {collect_statistics_interval, 500}
+                                              {collect_statistics_interval, 500},
+                                              {core_metrics_gc_interval, 5000}
                                              ]}).
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
@@ -142,7 +143,12 @@ connection_metric_idemp(Config, {N, R}) ->
                                5000),
     Table2 = [ Pid || {Pid, _} <- read_table_rpc(Config, connection_coarse_metrics)],
     % refresh stats 'R' times
-    [[Pid ! emit_stats || Pid <- Table] || _ <- lists:seq(1, R)],
+    [[begin
+          Pid ! emit_stats
+      end|| Pid <- Table] || _ <- lists:seq(1, R)],
+    [begin
+         _ = gen_server:call(Pid, {info, [pid]})
+     end|| Pid <- Table],
     force_metric_gc(Config),
     TableAfter = [ Pid || {Pid, _} <- read_table_rpc(Config, connection_metrics)],
     TableAfter2 = [ Pid || {Pid, _} <- read_table_rpc(Config, connection_coarse_metrics)],
@@ -159,6 +165,9 @@ channel_metric_idemp(Config, {N, R}) ->
     Table2 = [ Pid || {Pid, _} <- read_table_rpc(Config, channel_process_metrics)],
     % refresh stats 'R' times
     [[Pid ! emit_stats || Pid <- Table] || _ <- lists:seq(1, R)],
+    [begin
+         _ = gen_server:call(Pid, {info, [pid]})
+     end|| Pid <- Table],
     force_metric_gc(Config),
     TableAfter = [ Pid || {Pid, _} <- read_table_rpc(Config, channel_metrics)],
     TableAfter2 = [ Pid || {Pid, _} <- read_table_rpc(Config, channel_process_metrics)],
@@ -178,18 +187,29 @@ queue_metric_idemp(Config, {N, R}) ->
               Queue
           end || _ <- lists:seq(1, N)],
 
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_metrics)),
+                30000),
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_coarse_metrics)),
+                30000),
     Table = [ Pid || {Pid, _, _} <- read_table_rpc(Config, queue_metrics)],
     Table2 = [ Pid || {Pid, _, _} <- read_table_rpc(Config, queue_coarse_metrics)],
     % refresh stats 'R' times
     ChanTable = read_table_rpc(Config, channel_created),
-    [[Pid ! emit_stats || {Pid, _, _} <- ChanTable ] || _ <- lists:seq(1, R)],
+    [[begin
+          Pid ! emit_stats,
+         gen_server2:call(Pid, flush)
+      end|| {Pid, _, _} <- ChanTable ] || _ <- lists:seq(1, R)],
     force_metric_gc(Config),
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_metrics)),
+                30000),
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_coarse_metrics)),
+                30000),
     TableAfter = [ Pid || {Pid, _, _} <- read_table_rpc(Config,  queue_metrics)],
     TableAfter2 = [ Pid || {Pid, _, _} <- read_table_rpc(Config, queue_coarse_metrics)],
     [ delete_queue(Chan, Q) || Q <- Queues],
     rabbit_ct_client_helpers:close_connection(Conn),
-    (Table2 == TableAfter2) and (Table == TableAfter) and
-    (N == length(Table)) and (N == length(TableAfter)).
+    (lists:sort(Table2) == lists:sort(TableAfter2))
+        and (lists:sort(Table) == lists:sort(TableAfter)).
 
 connection_metric_count(Config, Ops) ->
     add_rem_counter(Config, Ops,
@@ -197,9 +217,11 @@ connection_metric_count(Config, Ops) ->
                      fun(Cfg) ->
                              rabbit_ct_client_helpers:close_connection(Cfg)
                      end},
-                   [ connection_created,
-                     connection_metrics,
-                     connection_coarse_metrics ]).
+                    %% connection_metrics are asynchronous,
+                    %% emitted on a timer. These have been removed
+                    %% from here as they're already tested on another
+                    %% testcases
+                    [ connection_created ]).
 
 channel_metric_count(Config, Ops) ->
     Conn =  rabbit_ct_client_helpers:open_unmanaged_connection(Config),
@@ -268,11 +290,13 @@ add_rem_counter(Config, {Initial, Ops}, {AddFun, RemFun}, Tables) ->
                     {Initial, Things},
                     Ops),
     force_metric_gc(Config),
-    TabLens = lists:map(fun(T) ->
-                                length(read_table_rpc(Config, T))
-                        end, Tables),
+    ?awaitMatch([FinalLen],
+                lists:usort(lists:map(fun(T) ->
+                                              length(read_table_rpc(Config, T))
+                                      end, Tables)),
+                45000),
     [RemFun(Thing) || Thing <- Things1],
-    [FinalLen] == lists:usort(TabLens).
+    true.
 
 
 connection(Config) ->
@@ -282,9 +306,12 @@ connection(Config) ->
     [_] = read_table_rpc(Config, connection_coarse_metrics),
     ok = rabbit_ct_client_helpers:close_connection(Conn),
     force_metric_gc(Config),
-    [] = read_table_rpc(Config, connection_created),
-    [] = read_table_rpc(Config, connection_metrics),
-    [] = read_table_rpc(Config, connection_coarse_metrics),
+    ?awaitMatch([], read_table_rpc(Config, connection_created),
+                30000),
+    ?awaitMatch([], read_table_rpc(Config, connection_metrics),
+                30000),
+    ?awaitMatch([], read_table_rpc(Config, connection_coarse_metrics),
+                30000),
     ok.
 
 channel(Config) ->
@@ -383,8 +410,13 @@ ensure_channel_queue_metrics_populated(Chan, Queue) ->
     {#'basic.get_ok'{}, #amqp_msg{}} = amqp_channel:call(Chan, Get).
 
 force_channel_stats(Config) ->
-    [ Pid ! emit_stats || {Pid, _} <- read_table_rpc(Config, channel_created) ],
-    timer:sleep(100).
+    [begin
+         Pid ! emit_stats,
+         gen_server2:call(Pid, flush)
+     end
+         || {Pid, _} <- read_table_rpc(Config, channel_created)
+         ],
+    ok.
 
 read_table_rpc(Config, Table) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, read_table, [Table]).
@@ -397,7 +429,6 @@ read_table(Table) ->
     ets:tab2list(Table).
 
 force_metric_gc(Config) ->
-    timer:sleep(300),
     rabbit_ct_broker_helpers:rpc(Config, 0, erlang, send,
                                  [rabbit_core_metrics_gc, start_gc]),
     rabbit_ct_broker_helpers:rpc(Config, 0, gen_server, call,

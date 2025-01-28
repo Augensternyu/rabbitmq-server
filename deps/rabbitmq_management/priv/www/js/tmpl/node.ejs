@@ -13,9 +13,19 @@
 <div class="hider">
   <div class="box">
   <table class="facts facts-l">
+<% if (node.being_drained) { %>
+    <tr>
+      <th>Status</th>
+      <td><abbr class="status-yellow" title="Maintenance mode is in effect">The node was <a href="https://rabbitmq.com/upgrade.html#maintenance-mode">put under maintenance</a></abbr></td>
+    </tr>
+<% } %>
     <tr>
       <th>Uptime</th>
       <td><%= fmt_uptime(node.uptime) %></td>
+    </tr>
+    <tr>
+      <th>Cores</th>
+      <td><%= fmt_string(node.processors) %></td>
     </tr>
 <% if (rabbit_versions_interesting) { %>
     <tr>
@@ -23,16 +33,6 @@
       <td><%= fmt_rabbit_version(node.applications) %></td>
     </tr>
 <% } %>
-    <tr>
-      <th>Type</th>
-      <td>
-       <% if (node.type == 'disc') { %>
-         <abbr title="Broker definitions are held on disc.">Disc</abbr>
-       <% } else { %>
-         <abbr title="Broker definitions are held in RAM. Messages will still be written to disc if necessary.">RAM</abbr>
-       <% } %>
-      </td>
-    </tr>
     <tr>
       <th>
         <a href="https://www.rabbitmq.com/configure.html" target="_blank">Config file</a>
@@ -90,14 +90,6 @@
         <p class="c">handle.exe missing <span class="help" id="handle-exe"></span><sub><%= node.fd_total %> available</sub></p>
 
 <% } %>
-      </td>
-    </tr>
-    <tr>
-      <th>
-        Socket descriptors <span class="help" id="socket-descriptors"></span>
-      </th>
-      <td>
-        <%= node_stat_count('sockets_used', 'sockets_total', node, FD_THRESHOLDS) %>
       </td>
     </tr>
     <tr>

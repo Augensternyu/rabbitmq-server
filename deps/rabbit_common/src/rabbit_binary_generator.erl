@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_binary_generator).
@@ -228,8 +228,5 @@ lookup_amqp_exception(Other, Protocol) ->
     {ShouldClose, Code, Text, none}.
 
 amqp_exception_explanation(Text, Expl) ->
-    ExplBin = list_to_binary(Expl),
-    CompleteTextBin = <<Text/binary, " - ", ExplBin/binary>>,
-    if size(CompleteTextBin) > 255 -> <<CompleteTextBin:252/binary, "...">>;
-       true                        -> CompleteTextBin
-    end.
+    LimitedText = io_lib:format("~ts - ~ts", [Text, Expl], [{chars_limit, 255}]),
+    unicode:characters_to_binary(LimitedText).

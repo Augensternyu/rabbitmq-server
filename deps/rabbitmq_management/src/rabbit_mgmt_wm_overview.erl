@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_overview).
@@ -47,10 +47,12 @@ to_json(ReqData, Context = #context{user = User = #user{tags = Tags}}) ->
                  {product_name,              list_to_binary(rabbit:product_name())},
                  {rabbitmq_version,          list_to_binary(rabbit:base_product_version())},
                  {cluster_name,              rabbit_nodes:cluster_name()},
+                 {cluster_tags,              cluster_tags()},
+                 {node_tags,                 node_tags()},
                  {erlang_version,            erlang_version()},
                  {erlang_full_version,       erlang_full_version()},
-                 {release_series_support_status, rabbit_release_series:readable_support_status()},
                  {disable_stats,                 rabbit_mgmt_util:disable_stats(ReqData)},
+                 {default_queue_type,            rabbit_queue_type:default_alias()},
                  {is_op_policy_updating_enabled, not rabbit_mgmt_features:is_op_policy_updating_disabled()},
                  {enable_queue_totals,           rabbit_mgmt_util:enable_queue_totals(ReqData)}],
     try
@@ -182,3 +184,15 @@ transform_retention_intervals([{MaxAgeInSeconds, _}|Rest], Acc) ->
                      0
              end,
     transform_retention_intervals(Rest, [AccVal|Acc]).
+
+cluster_tags() ->
+    Val = case rabbit_runtime_parameters:value_global(cluster_tags) of
+        not_found ->
+            [];
+        Tags -> Tags
+    end,
+    rabbit_data_coercion:to_map(Val).
+
+node_tags() ->
+    Val = application:get_env(rabbit, node_tags, []),
+    rabbit_data_coercion:to_map(Val).

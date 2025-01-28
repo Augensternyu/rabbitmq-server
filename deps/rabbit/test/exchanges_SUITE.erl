@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2022 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(exchanges_SUITE).
@@ -19,12 +19,18 @@ suite() ->
 
 all() ->
     [
-     {group, mnesia_store}
+     {group, mnesia_store},
+     {group, khepri_store},
+     {group, khepri_migration}
     ].
 
 groups() ->
     [
-     {mnesia_store, [], all_tests()}
+     {mnesia_store, [], all_tests()},
+     {khepri_store, [], all_tests()},
+     {khepri_migration, [], [
+                             from_mnesia_to_khepri
+                            ]}
     ].
 
 all_tests() ->
@@ -47,7 +53,14 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
-init_per_group(mnesia_store = Group, Config) ->
+init_per_group(mnesia_store = Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, mnesia}]),
+    init_per_group_common(Group, Config, 1);
+init_per_group(khepri_store = Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, khepri}]),
+    init_per_group_common(Group, Config, 1);
+init_per_group(khepri_migration = Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, mnesia}]),
     init_per_group_common(Group, Config, 1).
 
 init_per_group_common(Group, Config, Size) ->
@@ -87,7 +100,7 @@ end_per_testcase(Testcase, Config) ->
 %% -------------------------------------------------------------------
 direct_exchange(Config) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    
+
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
@@ -103,8 +116,8 @@ direct_exchange(Config) ->
                                                              routing_key = AltQ}),
     publish(Ch, Direct, Q, <<"msg1">>),
     publish(Ch, Direct, <<"anyotherkey">>, <<"msg2">>),
-    
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>],
+
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>],
                                                   [AltQ, <<"0">>, <<"0">>, <<"0">>]]),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg1">>}},
                  amqp_channel:call(Ch, #'basic.get'{queue = Q})),
@@ -116,12 +129,12 @@ direct_exchange(Config) ->
 
 topic_exchange(Config) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    
+
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
 
-    Topic = <<"amq.topic">>,    
+    Topic = <<"amq.topic">>,
     #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = Topic,
                                                              queue = Q,
                                                              routing_key = <<"this.*.rules">>}),
@@ -139,7 +152,7 @@ topic_exchange(Config) ->
     publish(Ch, Topic, <<"simplycarrots">>, <<"msg5">>),
     publish(Ch, Topic, <<"*.queue.rules">>, <<"msg6">>),
 
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"3">>, <<"3">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"3">>, <<"3">>, <<"0">>]]),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg1">>}},
                  amqp_channel:call(Ch, #'basic.get'{queue = Q})),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg2">>}},
@@ -153,21 +166,21 @@ topic_exchange(Config) ->
                                                              queue = Q,
                                                              routing_key = <<"#.noclue">>}),
     publish(Ch, Topic, <<"simplycarrots">>, <<"msg7">>),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"3">>, <<"0">>, <<"3">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"3">>, <<"0">>, <<"3">>]]),
     publish(Ch, Topic, <<"#.bla">>, <<"msg8">>),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"3">>, <<"0">>, <<"3">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"3">>, <<"0">>, <<"3">>]]),
     publish(Ch, Topic, <<"#.noclue">>, <<"msg9">>),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"4">>, <<"1">>, <<"3">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"4">>, <<"1">>, <<"3">>]]),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg9">>}},
                  amqp_channel:call(Ch, #'basic.get'{queue = Q})),
     ?assertMatch(#'basic.get_empty'{},
                  amqp_channel:call(Ch, #'basic.get'{queue = Q})),
-    
+
     #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = Topic,
                                                              queue = Q,
                                                              routing_key = <<"#">>}),
     publish(Ch, Topic, <<"simplycarrots">>, <<"msg10">>),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"5">>, <<"1">>, <<"4">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"5">>, <<"1">>, <<"4">>]]),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg10">>}},
                  amqp_channel:call(Ch, #'basic.get'{queue = Q})),
     ?assertMatch(#'basic.get_empty'{},
@@ -176,7 +189,7 @@ topic_exchange(Config) ->
 
 fanout_exchange(Config) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    
+
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
@@ -192,8 +205,8 @@ fanout_exchange(Config) ->
                                                              routing_key = AltQ}),
     publish(Ch, Fanout, Q, <<"msg1">>),
     publish(Ch, Fanout, <<"anyotherkey">>, <<"msg2">>),
-    
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>],
+
+    queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>],
                                                   [AltQ, <<"2">>, <<"2">>, <<"0">>]]),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg1">>}},
                  amqp_channel:call(Ch, #'basic.get'{queue = Q})),
@@ -241,7 +254,7 @@ headers_exchange(Config) ->
     publish(Ch, Headers, <<>>, <<"msg2">>, [{<<"foo">>, longstr, <<"bar">>}]),
     publish(Ch, Headers, <<>>, <<"msg3">>),
 
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>],
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>],
                                                   [AltQ, <<"2">>, <<"2">>, <<"0">>]]),
 
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg1">>}},
@@ -270,6 +283,56 @@ invalid_exchange(Config) ->
                                            queue = Q,
                                            routing_key = Q})).
 
+from_mnesia_to_khepri(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
+
+    %% Test transient exchanges
+    X = ?config(exchange_name, Config),
+    #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{exchange = X,
+                                                                         durable = false}),
+
+    %% Topic is the only exchange type that has its own mnesia/khepri tables.
+    %% Let's test that the exchange works as expected after migration
+    Topic = <<"amq.topic">>,
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = Topic,
+                                                             queue = Q,
+                                                             routing_key = <<"this.queue.rules">>}),
+
+    Exchanges = lists:sort([rabbit_misc:r(<<"/">>, exchange, <<>>),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.fanout">>),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.headers">>),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.match">>),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.rabbitmq.trace">>),
+                            rabbit_misc:r(<<"/">>, exchange, <<"amq.topic">>),
+                            rabbit_misc:r(<<"/">>, exchange, X)]),
+    ?assertEqual(
+       Exchanges,
+       lists:sort([X0#exchange.name ||
+                      X0 <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, list, [])])),
+
+    case rabbit_ct_broker_helpers:enable_feature_flag(Config, khepri_db) of
+        ok ->
+            rabbit_ct_helpers:await_condition(
+              fun() ->
+                      RecoveredExchanges =
+                          lists:sort([X0#exchange.name ||
+                                         X0 <- rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_exchange, list, [])]),
+                      Exchanges == RecoveredExchanges
+              end),
+            publish(Ch, Topic, <<"this.queue.rules">>, <<"msg1">>),
+            ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = <<"msg1">>}},
+                         amqp_channel:call(Ch, #'basic.get'{queue = Q})),
+            ?assertMatch(#'basic.get_empty'{},
+                         amqp_channel:call(Ch, #'basic.get'{queue = Q}));
+        Skip ->
+            Skip
+    end.
+
 %% Internal
 
 delete_queues() ->
@@ -277,7 +340,8 @@ delete_queues() ->
      || Q <- rabbit_amqqueue:list()].
 
 delete_exchange(Name) ->
-    _ = rabbit_exchange:delete(rabbit_misc:r(<<"/">>, exchange, Name), false, <<"dummy">>).
+    ok = rabbit_exchange:ensure_deleted(
+           rabbit_misc:r(<<"/">>, exchange, Name), false, <<"dummy">>).
 
 declare(Ch, Q, Args) ->
     declare(Ch, Q, Args, true).

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2019-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_env).
@@ -31,7 +31,8 @@
 
 -ifdef(TEST).
 -export([parse_conf_env_file_output2/2,
-         value_is_yes/1]).
+         value_is_yes/1,
+         parse_conf_env_file_output_win32/2]).
 -endif.
 
 %% Vary from OTP version to version.
@@ -64,7 +65,6 @@
          "RABBITMQ_KEEP_PID_FILE_ON_EXIT",
          "RABBITMQ_LOG",
          "RABBITMQ_LOG_BASE",
-         "RABBITMQ_LOG_FF_REGISTRY",
          "RABBITMQ_LOGS",
          "RABBITMQ_MNESIA_BASE",
          "RABBITMQ_MNESIA_DIR",
@@ -149,7 +149,6 @@ get_context_after_reloading_env(Context) ->
              fun keep_pid_file_on_exit/1,
              fun feature_flags_file/1,
              fun forced_feature_flags_on_init/1,
-             fun log_feature_flags_registry/1,
              fun plugins_path/1,
              fun plugins_expand_dir/1,
              fun enabled_plugins_file/1,
@@ -193,7 +192,7 @@ context_base(TakeFromRemoteNode) ->
                Timeout >= 0 ->
             update_context(Context,
                            from_remote_node,
-                           {TakeFromRemoteNode, Timeout})
+                           TakeFromRemoteNode)
     end.
 
 -ifdef(TEST).
@@ -998,24 +997,15 @@ forced_feature_flags_on_init(Context) ->
     case Value of
         false ->
             %% get_prefixed_env_var() considers an empty string
-            %% is the same as an undefined environment variable.
-            update_context(Context,
-                           forced_feature_flags_on_init, undefined, default);
+            %% as an undefined environment variable.
+            update_context(
+              Context,
+              forced_feature_flags_on_init, undefined, default);
         _ ->
-            Flags = [list_to_atom(V) || V <- string:lexemes(Value, ",")],
-            update_context(Context,
-                           forced_feature_flags_on_init, Flags, environment)
-    end.
-
-log_feature_flags_registry(Context) ->
-    case get_prefixed_env_var("RABBITMQ_LOG_FF_REGISTRY") of
-        false ->
-            update_context(Context,
-                           log_feature_flags_registry, false, default);
-        Value ->
-            Log = value_is_yes(Value),
-            update_context(Context,
-                           log_feature_flags_registry, Log, environment)
+            FeatureNames = string:lexemes(Value, ","),
+            update_context(
+              Context,
+              forced_feature_flags_on_init, FeatureNames, environment)
     end.
 
 %% -------------------------------------------------------------------
@@ -1673,7 +1663,10 @@ do_load_conf_env_file(#{os_type := {win32, _}} = Context, Cmd, ConfEnvFile0) ->
 
     TempBatchFileContent = [<<"@echo off\r\n">>,
                             <<"chcp 65001 >nul\r\n">>,
-                            <<"call \"">>, ConfEnvFile3, <<"\" && echo ">>, Marker, <<" && set\r\n">>],
+                            <<"call \"">>, ConfEnvFile3, <<"\"\r\n">>,
+                            <<"if ERRORLEVEL 1 exit /B 1\r\n">>,
+                            <<"echo ">>, Marker, <<"\r\n">>,
+                            <<"set\r\n">>],
     TempPath = get_temp_path_win32(),
     TempBatchFileName = rabbit_misc:format("rabbitmq-env-conf-runner-~ts.bat", [os:getpid()]),
     TempBatchFilePath = normalize_path(TempPath, TempBatchFileName),
@@ -1759,8 +1752,13 @@ parse_conf_env_file_output(Context, Marker, [Marker | Lines]) ->
 parse_conf_env_file_output(Context, Marker, [_ | Lines]) ->
     parse_conf_env_file_output(Context, Marker, Lines).
 
-parse_conf_env_file_output1(Context, Lines) ->
-    Vars = parse_conf_env_file_output2(Lines, #{}),
+parse_conf_env_file_output1(#{os_type := {OSType, _}} = Context, Lines) ->
+    Vars = case OSType of
+               win32 ->
+                   parse_conf_env_file_output_win32(Lines, #{});
+               _ ->
+                   parse_conf_env_file_output2(Lines, #{})
+           end,
     %% Re-export variables.
     lists:foreach(
       fun(Var) ->
@@ -1778,6 +1776,24 @@ parse_conf_env_file_output1(Context, Lines) ->
               end
       end, lists:sort(maps:keys(Vars))),
     Context.
+
+parse_conf_env_file_output_win32([], Vars) ->
+    Vars;
+parse_conf_env_file_output_win32([Line | Lines], Vars) ->
+    case string:split(Line, "=") of
+        [Var, Val0] ->
+            Val1 = string:trim(Val0),
+            Val2 = string:trim(Val1, both, [$"]),
+            Vars1 = Vars#{Var => Val2},
+            parse_conf_env_file_output_win32(Lines, Vars1);
+        _ ->
+            %% Parsing failed somehow.
+            ?LOG_WARNING(
+               "Failed to parse $RABBITMQ_CONF_ENV_FILE output line: ~tp",
+               [Line],
+               #{domain => ?RMQLOG_DOMAIN_PRELAUNCH}),
+            parse_conf_env_file_output_win32(Lines, Vars)
+    end.
 
 parse_conf_env_file_output2([], Vars) ->
     Vars;
@@ -2119,7 +2135,8 @@ maybe_stop_dist_for_remote_query(
 maybe_stop_dist_for_remote_query(Context) ->
     Context.
 
-query_remote({RemoteNode, Timeout}, Mod, Func, Args) ->
+query_remote({RemoteNode, Timeout}, Mod, Func, Args)
+  when is_atom(RemoteNode) ->
     Ret = rpc:call(RemoteNode, Mod, Func, Args, Timeout),
     case Ret of
         {badrpc, nodedown} = Error -> Error;

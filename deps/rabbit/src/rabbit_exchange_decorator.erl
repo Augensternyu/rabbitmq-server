@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_exchange_decorator).
@@ -25,6 +25,11 @@
 %% able to manipulate messages as they are published.
 
 -type(serial() :: pos_integer() | 'none').
+
+%% Callbacks on Khepri are always executed outside of a transaction, thus
+%% this implementation has been updated to reflect this. The 'transaction'
+%% parameter disappears, even for mnesia, callbacks run only once
+%% and their implementation must ensure any transaction required.
 
 -callback description() -> [proplists:property()].
 
@@ -54,7 +59,7 @@
                           [rabbit_types:binding()]) -> 'ok'.
 
 %% Allows additional destinations to be added to the routing decision.
--callback route(rabbit_types:exchange(), rabbit_types:delivery()) ->
+-callback route(rabbit_types:exchange(), rabbit_types:message()) ->
     [rabbit_amqqueue:name() | rabbit_exchange:name()].
 
 %% Whether the decorator wishes to receive callbacks for the exchange
@@ -109,6 +114,7 @@ maybe_recover(X = #exchange{name       = Name,
     case New of
         Old -> ok;
         _   -> %% TODO create a tx here for non-federation decorators
-               _ = [M:create(none, X) || M <- New -- Old],
+               Serial = rabbit_exchange:serial(X),
+               _ = [M:create(Serial, X) || M <- New -- Old],
                rabbit_exchange:update_decorators(Name, Decs1)
     end.

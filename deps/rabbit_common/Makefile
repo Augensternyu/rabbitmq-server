@@ -25,10 +25,8 @@ define HEX_TARBALL_EXTRA_METADATA
 }
 endef
 
-LOCAL_DEPS = compiler crypto public_key sasl ssl syntax_tools tools xmerl
-DEPS = thoas recon credentials_obfuscation
-
-dep_credentials_obfuscation = hex 3.2.0
+LOCAL_DEPS = compiler crypto public_key sasl ssl syntax_tools tools xmerl os_mon runtime_tools
+DEPS = thoas ranch recon credentials_obfuscation
 
 # Variables and recipes in development.*.mk are meant to be used from
 # any Git clone. They are excluded from the files published to Hex.pm.
@@ -40,12 +38,10 @@ dep_credentials_obfuscation = hex 3.2.0
 
 -include development.pre.mk
 
-DEP_EARLY_PLUGINS = $(PROJECT)/mk/rabbitmq-early-test.mk
+DEP_EARLY_PLUGINS = $(PROJECT)/mk/rabbitmq-early-plugin.mk
+# We do not depend on rabbit therefore can't run the broker.
 DEP_PLUGINS = $(PROJECT)/mk/rabbitmq-build.mk \
-	      $(PROJECT)/mk/rabbitmq-hexpm.mk \
-	      $(PROJECT)/mk/rabbitmq-dist.mk \
-	      $(PROJECT)/mk/rabbitmq-test.mk \
-	      $(PROJECT)/mk/rabbitmq-tools.mk
+	      $(PROJECT)/mk/rabbitmq-hexpm.mk
 
 PLT_APPS += mnesia crypto ssl
 
@@ -56,10 +52,7 @@ HEX_TARBALL_FILES += rabbitmq-components.mk \
 		     git-revisions.txt \
 		     mk/rabbitmq-build.mk \
 		     mk/rabbitmq-dist.mk \
-		     mk/rabbitmq-early-test.mk \
-		     mk/rabbitmq-hexpm.mk \
-		     mk/rabbitmq-macros.mk \
-		     mk/rabbitmq-test.mk \
-		     mk/rabbitmq-tools.mk
+		     mk/rabbitmq-early-plugin.mk \
+		     mk/rabbitmq-hexpm.mk
 
 -include development.post.mk

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(unit_SUITE).
@@ -43,10 +43,11 @@ groups() ->
             deep_pget,
             encrypt_decrypt,
             encrypt_decrypt_term,
-            version_equivalence,
             pid_decompose_compose,
             platform_and_version,
             frame_encoding_does_not_fail_with_empty_binary_payload,
+            map_exception_does_not_fail_with_unicode_explaination_case1,
+            map_exception_does_not_fail_with_unicode_explaination_case2,
             amqp_table_conversion,
             name_type,
             get_erl_path,
@@ -401,38 +402,6 @@ encrypt_decrypt_term(_Config) ->
          end || H <- Hashes, C <- Ciphers, Data <- DataSet],
     ok.
 
-version_equivalence(_Config) ->
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.0"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.1"),
-    true = rabbit_misc:version_minor_equivalent("%%VSN%%", "%%VSN%%"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.0.1"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0.1", "3.0.0.3"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0.1", "3.0.1.3"),
-    true = rabbit_misc:version_minor_equivalent("3.0.0", "3.0.foo"),
-    false = rabbit_misc:version_minor_equivalent("3.0.0", "3.1.0"),
-    false = rabbit_misc:version_minor_equivalent("3.0.0.1", "3.1.0.1"),
-
-    false = rabbit_misc:version_minor_equivalent("3.5.7", "3.6.7"),
-    false = rabbit_misc:version_minor_equivalent("3.6.5", "3.6.6"),
-    false = rabbit_misc:version_minor_equivalent("3.6.6", "3.7.0"),
-    true = rabbit_misc:version_minor_equivalent("3.6.7", "3.6.6"),
-
-    %% Starting with RabbitMQ 3.7.x and feature flags introduced in
-    %% RabbitMQ 3.8.x, versions are considered equivalent and the actual
-    %% check is deferred to the feature flags module.
-    false = rabbit_misc:version_minor_equivalent("3.6.0", "3.8.0"),
-    true = rabbit_misc:version_minor_equivalent("3.7.0", "3.8.0"),
-    true = rabbit_misc:version_minor_equivalent("3.7.0", "3.10.0"),
-
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0.0">>),
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0.1">>),
-    true = rabbit_misc:version_minor_equivalent(<<"%%VSN%%">>, <<"%%VSN%%">>),
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0">>),
-    true = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.0.0.1">>),
-    false = rabbit_misc:version_minor_equivalent(<<"3.0.0">>, <<"3.1.0">>),
-    false = rabbit_misc:version_minor_equivalent(<<"3.0.0.1">>, <<"3.1.0.1">>).
-
 frame_encoding_does_not_fail_with_empty_binary_payload(_Config) ->
     [begin
          Content = #content{
@@ -446,6 +415,20 @@ frame_encoding_does_not_fail_with_empty_binary_payload(_Config) ->
                     {[<<"payload">>], [[<<2,0,1,0,0,0,14>>,[<<0,60,0,0,0,0,0,0,0,0,0,7>>,<<0,0>>],206],
                                        [<<3,0,1,0,0,0,7>>,[<<"payload">>],206]]}
                     ]],
+    ok.
+
+map_exception_does_not_fail_with_unicode_explaination_case1(_Config) ->
+    NonAsciiExplaination = "no queue 'non_ascii_name_😍_你好' in vhost '/'",
+    rabbit_binary_generator:map_exception(0,
+        #amqp_error{name = not_found, explanation = NonAsciiExplaination, method = 'queue.declare'},
+        rabbit_framing_amqp_0_9_1),
+    ok.
+
+map_exception_does_not_fail_with_unicode_explaination_case2(_Config) ->
+    NonAsciiExplaination = "no queue 'кролик 🐰' in vhost '/'",
+    rabbit_binary_generator:map_exception(0,
+        #amqp_error{name = not_found, explanation = NonAsciiExplaination, method = 'queue.declare'},
+        rabbit_framing_amqp_0_9_1),
     ok.
 
 amqp_table_conversion(_Config) ->

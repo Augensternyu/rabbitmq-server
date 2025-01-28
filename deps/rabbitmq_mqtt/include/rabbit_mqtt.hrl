@@ -2,16 +2,23 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -define(APP_NAME, rabbitmq_mqtt).
 -define(PG_SCOPE, pg_scope_rabbitmq_mqtt_clientid).
 -define(QUEUE_TYPE_QOS_0, rabbit_mqtt_qos0_queue).
 -define(PERSISTENT_TERM_MAILBOX_SOFT_LIMIT, mqtt_mailbox_soft_limit).
--define(MQTT_GUIDE_URL, <<"https://rabbitmq.com/mqtt.html">>).
+-define(PERSISTENT_TERM_EXCHANGE, mqtt_exchange).
+-define(DEFAULT_MQTT_EXCHANGE, <<"amq.topic">>).
+-define(MQTT_GUIDE_URL, <<"https://rabbitmq.com/docs/mqtt/">>).
+
+-define(MQTT_TCP_PROTOCOL, 'mqtt').
+-define(MQTT_TLS_PROTOCOL, 'mqtt/ssl').
 -define(MQTT_PROTO_V3, mqtt310).
 -define(MQTT_PROTO_V4, mqtt311).
+-define(MQTT_PROTO_V5, mqtt50).
+-type protocol_version_atom() :: ?MQTT_PROTO_V3 | ?MQTT_PROTO_V4 | ?MQTT_PROTO_V5.
 
 -define(ITEMS,
         [pid,
@@ -34,6 +41,7 @@
         [
          client_id,
          conn_name,
+         user_property,
          connection_state,
          ssl_login_name,
          recv_cnt,
@@ -50,7 +58,8 @@
          messages_unacknowledged
         ]).
 
--define(CREATION_EVENT_KEYS,
+%% Connection opened or closed.
+-define(EVENT_KEYS,
         ?ITEMS ++
         [name,
          client_properties,

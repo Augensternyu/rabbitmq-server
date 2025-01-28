@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_vhost_connection_limit_SUITE).
@@ -12,14 +12,13 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 all() ->
     [
-     {group, cluster_size_1_network},
-     {group, cluster_size_2_network},
-     {group, cluster_size_1_direct},
-     {group, cluster_size_2_direct}
+     {group, tests},
+     {group, khepri_migration}
     ].
 
 groups() ->
@@ -33,7 +32,9 @@ groups() ->
         single_node_multiple_vhosts_limit,
         single_node_multiple_vhosts_zero_limit
     ],
-    ClusterSize2Tests = [
+    %% Use a cluster size of 3 so the khepri metadata store can keep
+    %% making progress even if one node is down/stopped
+    ClusterSize3Tests = [
         most_basic_cluster_connection_count,
         cluster_single_vhost_connection_count,
         cluster_multiple_vhosts_connection_count,
@@ -45,13 +46,13 @@ groups() ->
         cluster_multiple_vhosts_zero_limit
     ],
     [
-      {cluster_size_1_network, [], ClusterSize1Tests},
-      {cluster_size_2_network, [], ClusterSize2Tests},
-      {cluster_size_1_direct, [], ClusterSize1Tests},
-      {cluster_size_2_direct, [], ClusterSize2Tests},
-      {cluster_rename, [], [
-          vhost_limit_after_node_renamed
-        ]}
+     {tests, [], [
+                  {cluster_size_1_network, [], ClusterSize1Tests},
+                  {cluster_size_3_network, [], ClusterSize3Tests},
+                  {cluster_size_1_direct, [], ClusterSize1Tests},
+                  {cluster_size_3_direct, [], ClusterSize3Tests}
+                 ]},
+     {khepri_migration, [], [from_mnesia_to_khepri]}
     ].
 
 suite() ->
@@ -61,7 +62,6 @@ suite() ->
     ].
 
 %% see partitions_SUITE
--define(DELAY, 9000).
 -define(AWAIT, 1000).
 -define(INTERVAL, 250).
 
@@ -76,61 +76,47 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(khepri_migration, Config) ->
+    Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network},
+                                                    {metadata_store, mnesia}]),
+    init_per_multinode_group(cluster_size_1_network, Config1, 1);
 init_per_group(cluster_size_1_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
     init_per_multinode_group(cluster_size_1_network, Config1, 1);
-init_per_group(cluster_size_2_network, Config) ->
+init_per_group(cluster_size_3_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
-    init_per_multinode_group(cluster_size_2_network, Config1, 2);
+    init_per_multinode_group(cluster_size_3_network, Config1, 3);
 init_per_group(cluster_size_1_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
     init_per_multinode_group(cluster_size_1_direct, Config1, 1);
-init_per_group(cluster_size_2_direct, Config) ->
+init_per_group(cluster_size_3_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
-    init_per_multinode_group(cluster_size_2_direct, Config1, 2);
+    init_per_multinode_group(cluster_size_3_direct, Config1, 3);
+init_per_group(tests, Config) ->
+    Config.
 
-init_per_group(cluster_rename, Config) ->
-    init_per_multinode_group(cluster_rename, Config, 2).
-
-init_per_multinode_group(Group, Config, NodeCount) ->
+init_per_multinode_group(_Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
     Config1 = rabbit_ct_helpers:set_config(Config, [
                                                     {rmq_nodes_count, NodeCount},
                                                     {rmq_nodename_suffix, Suffix}
       ]),
-    case Group of
-        cluster_rename ->
-            % The broker is managed by {init,end}_per_testcase().
-            Config1;
-        _ ->
-            rabbit_ct_helpers:run_steps(Config1,
-              rabbit_ct_broker_helpers:setup_steps() ++
-              rabbit_ct_client_helpers:setup_steps())
-    end.
+    rabbit_ct_helpers:run_steps(Config1,
+    rabbit_ct_broker_helpers:setup_steps() ++
+    rabbit_ct_client_helpers:setup_steps()).
 
-end_per_group(cluster_rename, Config) ->
-    % The broker is managed by {init,end}_per_testcase().
+end_per_group(Group, Config) when Group == tests ->
+    % The broker is managed by sub-groups.
     Config;
 end_per_group(_Group, Config) ->
     rabbit_ct_helpers:run_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
       rabbit_ct_broker_helpers:teardown_steps()).
 
-init_per_testcase(vhost_limit_after_node_renamed = Testcase, Config) ->
-    rabbit_ct_helpers:testcase_started(Config, Testcase),
-    rabbit_ct_helpers:run_steps(Config,
-      rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps());
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase),
     Config.
 
-end_per_testcase(vhost_limit_after_node_renamed = Testcase, Config) ->
-    Config1 = ?config(save_config, Config),
-    rabbit_ct_helpers:run_steps(Config1,
-      rabbit_ct_client_helpers:teardown_steps() ++
-      rabbit_ct_broker_helpers:teardown_steps()),
-    rabbit_ct_helpers:testcase_finished(Config1, Testcase);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
@@ -376,7 +362,7 @@ cluster_node_restart_connection_count(Config) ->
     ?awaitMatch(0, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL).
 
 cluster_node_list_on_node(Config) ->
-    [A, B] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    [A, B, _C] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
     ?assertEqual(0, length(all_connections(Config))),
     ?assertEqual(0, length(connections_on_node(Config, 0))),
@@ -407,8 +393,8 @@ cluster_node_list_on_node(Config) ->
 
     rabbit_ct_broker_helpers:stop_broker(Config, 1),
 
-    ?awaitMatch(2, length(all_connections(Config)), 1000),
-    ?assertEqual(0, length(connections_on_node(Config, 0, B))),
+    ?awaitMatch(2, length(all_connections(Config)), ?AWAIT, ?INTERVAL),
+    ?awaitMatch(0, length(connections_on_node(Config, 0, B)), ?AWAIT, ?INTERVAL),
 
     close_connections([Conn3, Conn5]),
     ?awaitMatch(0, length(all_connections(Config, 0)), ?AWAIT, ?INTERVAL),
@@ -654,34 +640,18 @@ cluster_multiple_vhosts_zero_limit(Config) ->
     set_vhost_connection_limit(Config, VHost1, -1),
     set_vhost_connection_limit(Config, VHost2, -1).
 
-vhost_limit_after_node_renamed(Config) ->
-    A = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-
-    VHost = <<"/renaming_node">>,
-    set_up_vhost(Config, VHost),
-    set_vhost_connection_limit(Config, VHost, 2),
-
+from_mnesia_to_khepri(Config) ->
+    VHost = <<"/">>,
     ?assertEqual(0, count_connections_in(Config, VHost)),
+    [_Conn] = open_connections(Config, [{0, VHost}]),
+    ?awaitMatch(1, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
+    case rabbit_ct_broker_helpers:enable_feature_flag(Config, khepri_db) of
+        ok ->
+            ?awaitMatch(1, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL);
+        Skip ->
+            Skip
+    end.
 
-    [Conn1, Conn2, {error, not_allowed}] = open_connections(Config,
-      [{0, VHost}, {1, VHost}, {0, VHost}]),
-    ?awaitMatch(2, count_connections_in(Config, VHost), ?AWAIT, ?INTERVAL),
-    close_connections([Conn1, Conn2]),
-
-    Config1 = cluster_rename_SUITE:stop_rename_start(Config, A, [A, 'new-A']),
-
-    ?awaitMatch(0, count_connections_in(Config1, VHost), ?AWAIT, ?INTERVAL),
-
-    [Conn3, Conn4, {error, not_allowed}] = open_connections(Config1,
-      [{0, VHost}, {1, VHost}, {0, VHost}]),
-    ?awaitMatch(2, count_connections_in(Config1, VHost), ?AWAIT, ?INTERVAL),
-    close_connections([Conn3, Conn4]),
-
-    set_vhost_connection_limit(Config1, VHost,  -1),
-    {save_config, Config1}.
-
-%% -------------------------------------------------------------------
-%% Helpers
 %% -------------------------------------------------------------------
 
 open_connections(Config, NodesAndVHosts) ->
@@ -714,7 +684,6 @@ kill_connections(Conns) ->
 count_connections_in(Config, VHost) ->
     count_connections_in(Config, VHost, 0).
 count_connections_in(Config, VHost, NodeIndex) ->
-    timer:sleep(200),
     rabbit_ct_broker_helpers:rpc(Config, NodeIndex,
                                  rabbit_connection_tracking,
                                  count_tracked_items_in, [{vhost, VHost}]).

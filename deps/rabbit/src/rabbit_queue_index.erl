@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_queue_index).
@@ -313,7 +313,9 @@ init_for_conversion(#resource{ virtual_host = VHost } = Name, OnSyncFun, OnSyncM
                          'undefined' | non_neg_integer(), qistate()}.
 
 recover(#resource{ virtual_host = VHost } = Name, Terms, MsgStoreRecovered,
-        ContainsCheckFun, OnSyncFun, OnSyncMsgFun, Context) ->
+        ContainsCheckFun, OnSyncFun, OnSyncMsgFun,
+        %% We only allow using this module when converting to v2.
+        convert) ->
     #{segment_entry_count := SegmentEntryCount} = rabbit_vhost:read_config(VHost),
     put(segment_entry_count, SegmentEntryCount),
     VHostDir = rabbit_vhost:msg_store_dir_path(VHost),
@@ -323,10 +325,10 @@ recover(#resource{ virtual_host = VHost } = Name, Terms, MsgStoreRecovered,
     CleanShutdown = Terms /= non_clean_shutdown,
     case CleanShutdown andalso MsgStoreRecovered of
         true  -> case proplists:get_value(segments, Terms, non_clean_shutdown) of
-                     non_clean_shutdown -> init_dirty(false, ContainsCheckFun, State1, Context);
+                     non_clean_shutdown -> init_dirty(false, ContainsCheckFun, State1);
                      RecoveredCounts    -> init_clean(RecoveredCounts, State1)
                  end;
-        false -> init_dirty(CleanShutdown, ContainsCheckFun, State1, Context)
+        false -> init_dirty(CleanShutdown, ContainsCheckFun, State1)
     end.
 
 -spec terminate(rabbit_types:vhost(), [any()], qistate()) -> qistate().
@@ -428,8 +430,9 @@ maybe_needs_confirming(MsgProps, MsgOrId,
         State = #qistate{unconfirmed     = UC,
                          unconfirmed_msg = UCM}) ->
     MsgId = case MsgOrId of
-                #basic_message{id = Id} -> Id;
-                Id when is_binary(Id)   -> Id
+                Id when is_binary(Id)   -> Id;
+                Msg ->
+                    mc:get_annotation(id, Msg)
             end,
     ?MSG_ID_BYTES = size(MsgId),
     case {MsgProps#message_properties.needs_confirming, MsgOrId} of
@@ -643,7 +646,7 @@ init_clean(RecoveredCounts, State) ->
 -define(RECOVER_BYTES, 2).
 -define(RECOVER_COUNTER_SIZE, 2).
 
-init_dirty(CleanShutdown, ContainsCheckFun, State, Context) ->
+init_dirty(CleanShutdown, ContainsCheckFun, State) ->
     %% Recover the journal completely. This will also load segments
     %% which have entries in the journal and remove duplicates. The
     %% counts will correctly reflect the combination of the segment
@@ -678,84 +681,7 @@ init_dirty(CleanShutdown, ContainsCheckFun, State, Context) ->
     %% recovery fails with a crash.
     State2 = flush_journal(State1 #qistate { segments = Segments1,
                                              dirty_count = DirtyCount }),
-    case Context of
-        convert ->
-            {Count, Bytes, State2};
-        main ->
-            %% We try to see if there are segment files from the v2 index.
-            case rabbit_file:wildcard(".*\\.qi", Dir) of
-                %% We are recovering a dirty queue that was using the v2 index or in
-                %% the process of converting from v2 to v1.
-                [_|_] ->
-                    #resource{virtual_host = VHost, name = QName} = State2#qistate.queue_name,
-                    rabbit_log:info("Queue ~ts in vhost ~ts recovered ~b total messages before resuming convert",
-                                    [QName, VHost, Count]),
-                    CountersRef = counters:new(?RECOVER_COUNTER_SIZE, []),
-                    State3 = recover_index_v2_dirty(State2, ContainsCheckFun, CountersRef),
-                    {Count + counters:get(CountersRef, ?RECOVER_COUNT),
-                     Bytes + counters:get(CountersRef, ?RECOVER_BYTES),
-                     State3};
-                %% Otherwise keep default values.
-                [] ->
-                    {Count, Bytes, State2}
-            end
-    end.
-
-recover_index_v2_dirty(State0 = #qistate { queue_name = Name,
-                                           on_sync = OnSyncFun,
-                                           on_sync_msg = OnSyncMsgFun },
-                       ContainsCheckFun, CountersRef) ->
-    #resource{virtual_host = VHost, name = QName} = Name,
-    rabbit_log:info("Converting queue ~ts in vhost ~ts from v2 to v1 after unclean shutdown", [QName, VHost]),
-    %% We cannot use the counts/bytes because some messages may be in both
-    %% the v1 and v2 indexes after a crash.
-    {_, _, V2State} = rabbit_classic_queue_index_v2:recover(Name, non_clean_shutdown, true,
-                                                            ContainsCheckFun, OnSyncFun, OnSyncMsgFun,
-                                                            convert),
-    State = recover_index_v2_common(State0, V2State, CountersRef),
-    rabbit_log:info("Queue ~ts in vhost ~ts converted ~b total messages from v2 to v1",
-                    [QName, VHost, counters:get(CountersRef, ?RECOVER_COUNT)]),
-    State.
-
-%% At this point all messages are persistent because transient messages
-%% were dropped during the v2 index recovery.
-recover_index_v2_common(State0 = #qistate { queue_name = Name, dir = Dir },
-                        V2State, CountersRef) ->
-    %% Use a temporary per-queue store state to read embedded messages.
-    StoreState0 = rabbit_classic_queue_store_v2:init(Name),
-    %% Go through the v2 index and publish messages to v1 index.
-    {LoSeqId, HiSeqId, _} = rabbit_classic_queue_index_v2:bounds(V2State),
-    %% When resuming after a crash we need to double check the messages that are both
-    %% in the v1 and v2 index (effectively the messages below the upper bound of the
-    %% v1 index that are about to be written to it).
-    {_, V1HiSeqId, _} = bounds(State0),
-    SkipFun = fun
-        (SeqId, FunState0) when SeqId < V1HiSeqId ->
-            case read(SeqId, SeqId + 1, FunState0) of
-                %% Message already exists, skip.
-                {[_], FunState} ->
-                    {skip, FunState};
-                %% Message doesn't exist, write.
-                {[], FunState} ->
-                    {write, FunState}
-            end;
-        %% Message is out of bounds of the v1 index.
-        (_, FunState) ->
-            {write, FunState}
-    end,
-    %% We use a common function also used with conversion on policy change.
-    {State1, _StoreState} = rabbit_variable_queue:convert_from_v2_to_v1_loop(Name, State0, V2State, StoreState0,
-                                                                            {CountersRef, ?RECOVER_COUNT, ?RECOVER_BYTES},
-                                                                            LoSeqId, HiSeqId, SkipFun),
-    %% Delete any remaining v2 index files.
-    OldFiles = rabbit_file:wildcard(".*\\.qi", Dir)
-            ++ rabbit_file:wildcard(".*\\.qs", Dir),
-    _ = [rabbit_file:delete(filename:join(Dir, F)) || F <- OldFiles],
-    %% Ensure that everything in the v1 index is written to disk.
-    State = flush(State1),
-    %% Clean up all the garbage that we have surely been creating.
-    garbage_collect(),
-    State.
+    {Count, Bytes, State2}.
 
 terminate(State = #qistate { journal_handle = JournalHdl,
                              segments = Segments }) ->
@@ -797,7 +723,7 @@ recover_message( true, false,    del, _RelSeq, SegmentAndDirtyCount, _MaxJournal
     SegmentAndDirtyCount;
 recover_message( true, false, no_del,  RelSeq, {Segment, _DirtyCount}, MaxJournal) ->
     %% force to flush the segment
-    {add_to_journal(RelSeq, del, Segment), MaxJournal + 1}; 
+    {add_to_journal(RelSeq, del, Segment), MaxJournal + 1};
 recover_message(false,     _,    del,  RelSeq, {Segment, DirtyCount}, _MaxJournal) ->
     {add_to_journal(RelSeq, ack, Segment), DirtyCount + 1};
 recover_message(false,     _, no_del,  RelSeq, {Segment, DirtyCount}, _MaxJournal) ->
@@ -874,7 +800,8 @@ create_pub_record_body(MsgOrId, #message_properties { expiry = Expiry,
     case MsgOrId of
         MsgId when is_binary(MsgId) ->
             {<<MsgId/binary, ExpiryBin/binary, Size:?SIZE_BITS>>, <<>>};
-        #basic_message{id = MsgId} ->
+        Msg ->
+            MsgId = mc:get_annotation(id, Msg),
             MsgBin = term_to_binary(MsgOrId),
             {<<MsgId/binary, ExpiryBin/binary, Size:?SIZE_BITS>>, MsgBin}
     end.
@@ -894,8 +821,11 @@ parse_pub_record_body(<<MsgIdNum:?MSG_ID_BITS, Expiry:?EXPIRY_BITS,
                                 size   = Size},
     case MsgBin of
         <<>> -> {MsgId, Props};
-        _    -> Msg = #basic_message{id = MsgId} = binary_to_term(MsgBin),
-                {Msg, Props}
+        _  ->
+            Msg = binary_to_term(MsgBin),
+            %% assertion
+            MsgId = mc:get_annotation(id, Msg),
+            {Msg, Props}
     end.
 
 %%----------------------------------------------------------------------------
@@ -952,6 +882,10 @@ action_to_entry(RelSeq, Action, JEntries) ->
         ({no_pub,    del, no_ack}) when Action == ack ->
             {set, {no_pub, del,    ack}};
         ({?PUB,      del, no_ack}) when Action == ack ->
+            {reset, none};
+        %% Special case, missing del
+        %% See journal_minus_segment1/2
+        ({?PUB,   no_del, no_ack}) when Action == ack ->
             {reset, none}
     end.
 
@@ -988,8 +922,6 @@ append_journal_to_segment(#segment { journal_entries = JEntries,
     case array:sparse_size(JEntries) of
         0 -> Segment;
         _ ->
-            file_handle_cache_stats:update(queue_index_write),
-
             {ok, Hdl} = file_handle_cache:open_with_absolute_path(
                           Path, ?WRITE_MODE,
                           [{write_buffer, infinity}]),
@@ -1238,7 +1170,6 @@ load_segment(KeepAcked, #segment { path = Path }) ->
     case rabbit_file:is_file(Path) of
         false -> Empty;
         true  -> Size = rabbit_file:file_size(Path),
-                 file_handle_cache_stats:update(queue_index_read),
                  {ok, Hdl} = file_handle_cache:open_with_absolute_path(
                                Path, ?READ_MODE, []),
                  {ok, 0} = file_handle_cache:position(Hdl, bof),
@@ -1342,6 +1273,11 @@ segment_plus_journal1({?PUB = Pub, no_del, no_ack}, {no_pub, del, no_ack}) ->
 segment_plus_journal1({?PUB, no_del, no_ack},       {no_pub, del, ack}) ->
     {undefined, -1};
 segment_plus_journal1({?PUB, del, no_ack},          {no_pub, no_del, ack}) ->
+    {undefined, -1};
+
+%% Special case, missing del
+%% See journal_minus_segment1/2
+segment_plus_journal1({?PUB, no_del, no_ack},          {no_pub, no_del, ack}) ->
     {undefined, -1}.
 
 %% Remove from the journal entries for a segment, items that are
@@ -1412,6 +1348,16 @@ journal_minus_segment1({no_pub, no_del, ack},      {?PUB, del, no_ack}) ->
     {keep, 0};
 journal_minus_segment1({no_pub, no_del, ack},      {?PUB, del, ack}) ->
     {undefined, -1};
+
+%% Just ack in journal, missing del
+%% Since 3.10 message delivery is tracked per-queue, not per-message,
+%% but to keep queue index v1 format messages are always marked as
+%% delivered on publish. But for a message that was published before
+%% 3.10 this is not the case and the delivery marker can be missing.
+%% As a workaround we add the del marker because if a message is acked
+%% it must have been delivered as well.
+journal_minus_segment1({no_pub, no_del, ack},         {?PUB, no_del, no_ack}) ->
+    {{no_pub, del, ack}, 0};
 
 %% Deliver and ack in journal
 journal_minus_segment1({no_pub, del, ack},         {?PUB, no_del, no_ack}) ->

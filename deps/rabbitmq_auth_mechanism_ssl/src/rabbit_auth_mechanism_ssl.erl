@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 
@@ -12,7 +12,6 @@
 
 -export([description/0, should_offer/1, init/1, handle_response/2]).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
 -rabbit_boot_step({?MODULE,
@@ -24,7 +23,9 @@
                     {cleanup,     {rabbit_registry, unregister,
                                    [auth_mechanism, <<"EXTERNAL">>]}}]}).
 
--record(state, {username = undefined}).
+-record(state, {
+          username = undefined :: undefined | rabbit_types:username() | {refused, none, string(), [term()]}
+         }).
 
 description() ->
     [{description, <<"TLS peer verification-based authentication plugin. Used in combination with the EXTERNAL SASL mechanism.">>}].

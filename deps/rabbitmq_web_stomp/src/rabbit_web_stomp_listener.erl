@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_web_stomp_listener).
@@ -16,8 +16,6 @@
 
 %% for testing purposes
 -export([get_binding_address/1, get_tcp_port/1, get_tcp_conf/2]).
-
--include_lib("rabbitmq_stomp/include/rabbit_stomp.hrl").
 
 -import(rabbit_misc, [pget/2]).
 
@@ -60,7 +58,7 @@ stop(State) ->
 list_connections() ->
     PlainPids = connection_pids_of_protocol(?TCP_PROTOCOL),
     TLSPids   = connection_pids_of_protocol(?TLS_PROTOCOL),
-    
+
     PlainPids ++ TLSPids.
 
 -spec close_all_client_connections(string()) -> {'ok', non_neg_integer()}.
@@ -68,7 +66,7 @@ close_all_client_connections(Reason) ->
     Connections = list_connections(),
     [rabbit_web_stomp_handler:close_connection(Pid, Reason) || Pid <- Connections],
     {ok, length(Connections)}.
-    
+
 
 %%
 %% Implementation
@@ -165,10 +163,20 @@ start_tls_listener(TLSConf0, CowboyOpts0, Routes) ->
 
 listener_started(Protocol, Listener) ->
     Port = rabbit_misc:pget(port, Listener),
-    [rabbit_networking:tcp_listener_started(Protocol, Listener,
-                                            IPAddress, Port)
-     || {IPAddress, _Port, _Family}
-        <- rabbit_networking:tcp_listener_addresses(Port)],
+    _ = case rabbit_misc:pget(ip, Listener) of
+            undefined ->
+                [rabbit_networking:tcp_listener_started(Protocol, Listener,
+                                                        IPAddress, Port)
+                 || {IPAddress, _Port, _Family}
+                        <- rabbit_networking:tcp_listener_addresses(Port)];
+            IP when is_tuple(IP) ->
+                rabbit_networking:tcp_listener_started(Protocol, Listener,
+                                                       IP, Port);
+            IP when is_list(IP) ->
+                {ok, ParsedIP} = inet_parse:address(IP),
+                rabbit_networking:tcp_listener_started(Protocol, Listener,
+                                                       ParsedIP, Port)
+        end,
     ok.
 
 get_env(Key, Default) ->

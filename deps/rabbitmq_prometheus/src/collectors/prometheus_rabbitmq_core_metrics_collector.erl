@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(prometheus_rabbitmq_core_metrics_collector).
 -export([register/0,
@@ -16,7 +16,8 @@
                                    counter_metric/2,
                                    untyped_metric/2]).
 
--include_lib("prometheus/include/prometheus.hrl").
+-import(prometheus_text_format, [escape_label_value/1]).
+
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -behaviour(prometheus_collector).
@@ -56,7 +57,7 @@
 
 -define(METRICS_RAW, [
 
-%%% Those are global, i.e. they contain no reference to queue/vhost/channel
+    %% Global metrics, as in, they contain no references to queues, virtual hosts or channel
     {connection_churn_metrics, [
         {2, undefined, connections_opened_total, counter, "Total number of connections opened"},
         {3, undefined, connections_closed_total, counter, "Total number of connections closed or terminated"},
@@ -68,7 +69,6 @@
     ]},
     {node_coarse_metrics, [
         {2, undefined, process_open_fds, gauge, "Open file descriptors", fd_used},
-        {2, undefined, process_open_tcp_sockets, gauge, "Open TCP sockets", sockets_used},
         {2, undefined, process_resident_memory_bytes, gauge, "Memory used in bytes", mem_used},
         {2, undefined, disk_space_available_bytes, gauge, "Disk space available in bytes", disk_free},
         {2, undefined, erlang_processes_used, gauge, "Erlang processes used", proc_used},
@@ -78,7 +78,6 @@
     ]},
     {node_metrics, [
         {2, undefined, process_max_fds, gauge, "Open file descriptors limit", fd_total},
-        {2, undefined, process_max_tcp_sockets, gauge, "Open TCP sockets limit", sockets_total},
         {2, undefined, resident_memory_limit_bytes, gauge, "Memory high watermark in bytes", mem_limit},
         {2, undefined, disk_space_available_limit_bytes, gauge, "Free disk space low watermark in bytes", disk_free_limit},
         {2, undefined, erlang_processes_limit, gauge, "Erlang processes limit", proc_total},
@@ -128,7 +127,7 @@
         {4, undefined, auth_attempts_detailed_failed_total, counter, "Total number of failed authentication attempts with source info"}
     ]},
 
-%%% Those metrics have reference only to a queue name. This is the only group where filtering (e.g. by vhost) makes sense.
+    %%% These metrics only reference a queue name. This is the only group where filtering (e.g. by vhost) makes sense.
     {queue_coarse_metrics, [
         {2, undefined, queue_messages_ready, gauge, "Messages ready to be delivered to consumers"},
         {3, undefined, queue_messages_unacked, gauge, "Messages delivered to consumers but not yet acknowledged"},
@@ -158,9 +157,9 @@
         {2, undefined, queue_messages_paged_out_bytes, gauge, "Size in bytes of messages paged out to disk", message_bytes_paged_out},
         {2, undefined, queue_head_message_timestamp, gauge, "Timestamp of the first message in the queue, if any", head_message_timestamp},
         {2, undefined, queue_disk_reads_total, counter, "Total number of times queue read messages from disk", disk_reads},
-        {2, undefined, queue_disk_writes_total, counter, "Total number of times queue wrote messages to disk", disk_writes}
+        {2, undefined, queue_disk_writes_total, counter, "Total number of times queue wrote messages to disk", disk_writes},
+        {2, undefined, stream_segments, counter, "Total number of stream segment files", segments}
     ]},
-
 %%% Metrics that contain reference to a channel. Some of them also have
 %%% a queue name, but in this case filtering on it doesn't make any
 %%% sense, as the queue is not an object of interest here.
@@ -171,7 +170,7 @@
         {2, undefined, channel_messages_uncommitted, gauge, "Messages received in a transaction but not yet committed", messages_uncommitted},
         {2, undefined, channel_acks_uncommitted, gauge, "Message acknowledgements in a transaction not yet committed", acks_uncommitted},
         {2, undefined, consumer_prefetch, gauge, "Limit of unacknowledged messages for each consumer", prefetch_count},
-        {2, undefined, channel_prefetch, gauge, "Total limit of unacknowledged messages for all consumers on a channel", global_prefetch_count}
+        {2, undefined, channel_prefetch, gauge, "Deprecated and will be removed in a future version", global_prefetch_count}
     ]},
 
     {channel_exchange_metrics, [
@@ -201,6 +200,11 @@
         {4, undefined, connection_process_reductions_total, counter, "Total number of connection process reductions"}
     ]},
 
+    %% the family name for this metric is stream_consumer_metrics but the real table used for data is rabbit_stream_consumer_created.
+    {stream_consumer_metrics, [
+        {2, undefined, stream_consumer_max_offset_lag, gauge, "Current maximum of offset lag of consumers"}
+    ]},
+
     {connection_metrics, [
         {2, undefined, connection_incoming_packets_total, counter, "Total number of packets received on a connection", recv_cnt},
         {2, undefined, connection_outgoing_packets_total, counter, "Total number of packets sent on a connection", send_cnt},
@@ -209,9 +213,32 @@
     ]},
 
     {channel_queue_exchange_metrics, [
-        {2, undefined, queue_messages_published_total, counter, "Total number of messages published to queues"}
-    ]}
-]).
+        {2, undefined, queue_messages_published_total, counter, "Total number of messages published into a queue through an exchange on a channel"}
+    ]},
+
+%%% Metrics in the following 3 groups reference a queue and/or exchange.
+%%% They each have a corresponding group in the above per-channel
+%%% section but here the channel is not an object of interest.
+    {exchange_metrics, [
+        {2, undefined, exchange_messages_published_total, counter, "Total number of messages published into an exchange"},
+        {3, undefined, exchange_messages_confirmed_total, counter, "Total number of messages published into an exchange and confirmed"},
+        {4, undefined, exchange_messages_unroutable_returned_total, counter, "Total number of messages published as mandatory into an exchange and returned to the publisher as unroutable"},
+        {5, undefined, exchange_messages_unroutable_dropped_total, counter, "Total number of messages published as non-mandatory into an exchange and dropped as unroutable"}
+    ]},
+
+    {queue_delivery_metrics, [
+        {2, undefined, queue_get_ack_total, counter, "Total number of messages fetched from a queue with basic.get in manual acknowledgement mode"},
+        {3, undefined, queue_get_total, counter, "Total number of messages fetched from a queue with basic.get in automatic acknowledgement mode"},
+        {4, undefined, queue_messages_delivered_ack_total, counter, "Total number of messages delivered from a queue to consumers in manual acknowledgement mode"},
+        {5, undefined, queue_messages_delivered_total, counter, "Total number of messages delivered from a queue to consumers in automatic acknowledgement mode"},
+        {6, undefined, queue_messages_redelivered_total, counter, "Total number of messages redelivered from a queue to consumers"},
+        {7, undefined, queue_messages_acked_total, counter, "Total number of messages acknowledged by consumers on a queue"},
+        {8, undefined, queue_get_empty_total, counter, "Total number of times basic.get operations fetched no message on a queue"}
+    ]},
+
+    {queue_exchange_metrics, [
+        {2, undefined, queue_exchange_messages_published_total, counter, "Total number of messages published into a queue through an exchange"}
+    ]}]).
 
 %% Metrics that can be only requested through `/metrics/detailed`
 -define(METRICS_CLUSTER,[
@@ -225,6 +252,36 @@
         {2, undefined, exchange_name, gauge, "Enumerates exchanges without any additional info. This value is cluster-wide. A cheaper alternative to `exchange_bindings`"}
     ]}
 ]).
+
+-define(METRICS_MEMORY_BREAKDOWN, [
+    {node_memory, [
+        {2, undefined, memory_code_module_bytes, gauge, "Code module memory footprint", code},
+        {2, undefined, memory_client_connection_reader_bytes, gauge, "Client connection reader processes footprint in bytes", connection_readers},
+        {2, undefined, memory_client_connection_writer_bytes, gauge, "Client connection writer processes footprint in bytes", connection_writers},
+        {2, undefined, memory_client_connection_channel_bytes, gauge, "Client connection channel processes footprint in bytes", connection_channels},
+        {2, undefined, memory_client_connection_other_bytes, gauge, "Client connection other processes footprint in bytes", connection_other},
+        {2, undefined, memory_classic_queue_erlang_process_bytes, gauge, "Classic queue processes footprint in bytes", queue_procs},
+        {2, undefined, memory_quorum_queue_erlang_process_bytes, gauge, "Quorum queue processes footprint in bytes", quorum_queue_procs},
+        {2, undefined, memory_quorum_queue_dlx_erlang_process_bytes, gauge, "Quorum queue DLX worker processes footprint in bytes", quorum_queue_dlx_procs},
+        {2, undefined, memory_stream_erlang_process_bytes, gauge, "Stream processes footprint in bytes", stream_queue_procs},
+        {2, undefined, memory_stream_replica_reader_erlang_process_bytes, gauge, "Stream replica reader processes footprint in bytes", stream_queue_replica_reader_procs},
+        {2, undefined, memory_stream_coordinator_erlang_process_bytes, gauge, "Stream coordinator processes footprint in bytes", stream_queue_coordinator_procs},
+        {2, undefined, memory_plugin_bytes, gauge, "Total plugin footprint in bytes", plugins},
+        {2, undefined, memory_modern_metadata_store_bytes, gauge, "Modern metadata store footprint in bytes", metadata_store},
+        {2, undefined, memory_other_erlang_process_bytes, gauge, "Other processes footprint in bytes", other_proc},
+        {2, undefined, memory_metrics_bytes, gauge, "Metric table footprint in bytes", metrics},
+        {2, undefined, memory_management_stats_db_bytes, gauge, "Management stats database footprint in bytes", mgmt_db},
+        {2, undefined, memory_classic_metadata_store_bytes, gauge, "Classic metadata store footprint in bytes", mnesia},
+        {2, undefined, memory_quorum_queue_ets_table_bytes, gauge, "Quorum queue ETS tables footprint in bytes", quorum_ets},
+        {2, undefined, memory_modern_metadata_store_ets_table_bytes, gauge, "Modern metadata store ETS tables footprint in bytes", metadata_store_ets},
+        {2, undefined, memory_other_ets_table_bytes, gauge, "Other ETS tables footprint in bytes", other_ets},
+        {2, undefined, memory_binary_heap_bytes, gauge, "Binary heap size in bytes", binary},
+        {2, undefined, memory_message_index_bytes, gauge, "Message index footprint in bytes", msg_index},
+        {2, undefined, memory_atom_table_bytes, gauge, "Atom table size in bytes", atom},
+        {2, undefined, memory_other_system_bytes, gauge, "Other runtime footprint in bytes", other_system},
+        {2, undefined, memory_runtime_allocated_unused_bytes, gauge, "Runtime allocated but unused blocks size in bytes", allocated_unused},
+        {2, undefined, memory_runtime_reserved_unallocated_bytes, gauge, "Runtime reserved but unallocated blocks size in bytes", reserved_unallocated}
+    ]}]).
 
 -define(TOTALS, [
     %% ordering differs from metrics above, refer to list comprehension
@@ -244,26 +301,30 @@ register() ->
 deregister_cleanup(_) -> ok.
 
 collect_mf('detailed', Callback) ->
-    collect(true, ?DETAILED_METRIC_NAME_PREFIX, vhosts_filter_from_pdict(), queues_filter_from_pdict(), enabled_mfs_from_pdict(?METRICS_RAW), Callback),
-    collect(true, ?CLUSTER_METRIC_NAME_PREFIX, vhosts_filter_from_pdict(), queues_filter_from_pdict(),  enabled_mfs_from_pdict(?METRICS_CLUSTER), Callback),
+    collect(true, ?DETAILED_METRIC_NAME_PREFIX, vhosts_filter_from_pdict(), enabled_mfs_from_pdict(?METRICS_RAW), Callback),
+    collect(true, ?CLUSTER_METRIC_NAME_PREFIX, vhosts_filter_from_pdict(), enabled_mfs_from_pdict(?METRICS_CLUSTER), Callback),
     %% identity is here to enable filtering on a cluster name (as already happens in existing dashboards)
     emit_identity_info(Callback),
     ok;
 collect_mf('per-object', Callback) ->
-    collect(true, ?METRIC_NAME_PREFIX, false, queues_filter_from_pdict(), ?METRICS_RAW, Callback),
+    collect(true, ?METRIC_NAME_PREFIX, false, ?METRICS_RAW, Callback),
     totals(Callback),
+    emit_identity_info(Callback),
+    ok;
+collect_mf('memory-breakdown', Callback) ->
+    collect(false, ?METRIC_NAME_PREFIX, false, ?METRICS_MEMORY_BREAKDOWN, Callback),
     emit_identity_info(Callback),
     ok;
 collect_mf(_Registry, Callback) ->
     PerObjectMetrics = application:get_env(rabbitmq_prometheus, return_per_object_metrics, false),
-    collect(PerObjectMetrics, ?METRIC_NAME_PREFIX, false, queues_filter_from_pdict(), ?METRICS_RAW, Callback),
+    collect(PerObjectMetrics, ?METRIC_NAME_PREFIX, false, ?METRICS_RAW, Callback),
     totals(Callback),
     emit_identity_info(Callback),
     ok.
 
-collect(PerObjectMetrics, Prefix, VHostsFilter, QueuesFilter, IncludedMFs, Callback) ->
+collect(PerObjectMetrics, Prefix, VHostsFilter, IncludedMFs, Callback) ->
     _ = [begin
-         Data = get_data(Table, PerObjectMetrics, VHostsFilter, QueuesFilter),
+         Data = get_data(Table, PerObjectMetrics, VHostsFilter),
          mf(Callback, Prefix, Contents, Data)
      end || {Table, Contents} <- IncludedMFs, not mutually_exclusive_mf(PerObjectMetrics, Table, IncludedMFs)],
     ok.
@@ -391,8 +452,15 @@ mf_totals(Callback, Name, Type, Help, Size) ->
         )
     ).
 
+has_value_p('NaN') ->
+    false;
+has_value_p(undefined) ->
+    false;
+has_value_p(_) ->
+    true.
+
 collect_metrics(_, {Type, Fun, Items}) ->
-    [metric(Type, labels(Item), Fun(Item)) || Item <- Items].
+    [metric(Type, labels(Item), V) || {Item, V} <- [{Item, Fun(Item)} || Item <- Items], has_value_p(V)].
 
 labels(Item) ->
     label(element(1, Item)).
@@ -401,22 +469,24 @@ label(L) when is_binary(L) ->
     L;
 label(M) when is_map(M) ->
     maps:fold(fun (K, V, Acc = <<>>) ->
-                      <<Acc/binary, K/binary, "=\"", V/binary, "\"">>;
+                      <<Acc/binary, K/binary, "=\"", (escape_label_value(V))/binary, "\"">>;
                   (K, V, Acc) ->
-                      <<Acc/binary, ",", K/binary, "=\"", V/binary, "\"">>
+                      <<Acc/binary, ",", K/binary, "=\"", (escape_label_value(V))/binary, "\"">>
               end, <<>>, M);
 label(#resource{virtual_host = VHost, kind = exchange, name = Name}) ->
-    <<"vhost=\"", VHost/binary, "\",exchange=\"", Name/binary, "\"">>;
+    <<"vhost=\"", (escape_label_value(VHost))/binary, "\",",
+      "exchange=\"", (escape_label_value(Name))/binary, "\"">>;
 label(#resource{virtual_host = VHost, kind = queue, name = Name}) ->
-    <<"vhost=\"", VHost/binary, "\",queue=\"", Name/binary, "\"">>;
+    <<"vhost=\"", (escape_label_value(VHost))/binary, "\",",
+      "queue=\"", (escape_label_value(Name))/binary, "\"">>;
 label({P, {#resource{virtual_host = QVHost, kind = queue, name = QName},
             #resource{virtual_host = EVHost, kind = exchange, name = EName}}}) when is_pid(P) ->
     %% channel_queue_exchange_metrics {channel_id, {queue_id, exchange_id}}
     <<"channel=\"", (iolist_to_binary(pid_to_list(P)))/binary, "\",",
-      "queue_vhost=\"", QVHost/binary, "\",",
-      "queue=\"", QName/binary, "\",",
-      "exchange_vhost=\"", EVHost/binary, "\",",
-      "exchange=\"", EName/binary, "\""
+      "queue_vhost=\"", (escape_label_value(QVHost))/binary, "\",",
+      "queue=\"", (escape_label_value(QName))/binary, "\",",
+      "exchange_vhost=\"", (escape_label_value(EVHost))/binary, "\",",
+      "exchange=\"", (escape_label_value(EName))/binary, "\""
     >>;
 label({RemoteAddress, Username, Protocol}) when is_binary(RemoteAddress), is_binary(Username),
                                                 is_atom(Protocol) ->
@@ -424,6 +494,14 @@ label({RemoteAddress, Username, Protocol}) when is_binary(RemoteAddress), is_bin
                          V =/= <<>>
                  end, [{remote_address, RemoteAddress}, {username, Username},
                        {protocol, atom_to_binary(Protocol, utf8)}]);
+label({
+    #resource{kind=queue, virtual_host=VHost, name=QName},
+    #resource{kind=exchange, name=ExName}
+ }) ->
+    %% queue_exchange_metrics {queue_id, exchange_id}
+    <<"vhost=\"", (escape_label_value(VHost))/binary, "\",",
+      "exchange=\"", (escape_label_value(ExName))/binary, "\",",
+      "queue=\"", (escape_label_value(QName))/binary, "\"">>;
 label({I1, I2}) ->
     case {label(I1), label(I2)} of
         {<<>>, L} -> L;
@@ -481,7 +559,7 @@ emit_gauge_metric_if_defined(Labels, Value) ->
       gauge_metric(Labels, Value)
   end.
 
-get_data(connection_metrics = Table, false, _, _) ->
+get_data(connection_metrics = Table, false, _) ->
     {Table, A1, A2, A3, A4} = ets:foldl(fun({_, Props}, {T, A1, A2, A3, A4}) ->
                                             {T,
                                              sum(proplists:get_value(recv_cnt, Props), A1),
@@ -490,7 +568,7 @@ get_data(connection_metrics = Table, false, _, _) ->
                                              sum(proplists:get_value(channels, Props), A4)}
                                     end, empty(Table), Table),
     [{Table, [{recv_cnt, A1}, {send_cnt, A2}, {send_pend, A3}, {channels, A4}]}];
-get_data(channel_metrics = Table, false, _, _) ->
+get_data(channel_metrics = Table, false, _) ->
     {Table, A1, A2, A3, A4, A5, A6, A7} =
         ets:foldl(fun({_, Props}, {T, A1, A2, A3, A4, A5, A6, A7}) ->
                           {T,
@@ -505,40 +583,33 @@ get_data(channel_metrics = Table, false, _, _) ->
      [{Table, [{consumer_count, A1}, {messages_unacknowledged, A2}, {messages_unconfirmed, A3},
                {messages_uncommitted, A4}, {acks_uncommitted, A5}, {prefetch_count, A6},
                {global_prefetch_count, A7}]}];
-get_data(queue_consumer_count = MF, false, VHostsFilter, QueuesFilter) ->
+get_data(stream_consumer_metrics = MF, false, _) ->
+    Table = rabbit_stream_consumer_created, %% real table name
+    try ets:foldl(fun({_, Props}, OldMax) ->
+                          erlang:max(proplists:get_value(offset_lag, Props, 0), OldMax)
+                  end, 0, Table) of
+        MaxOffsetLag ->
+            [{MF, MaxOffsetLag}]
+    catch error:badarg ->
+            %% rabbitmq_stream plugin is not enabled
+            []
+    end;
+get_data(queue_consumer_count = MF, false, VHostsFilter) ->
     Table = queue_metrics, %% Real table name
     {_, A1} = ets:foldl(fun
-                              ({#resource{kind = queue, virtual_host = VHost}, _, _}, Acc) when is_map(VHostsFilter), map_get(VHost, VHostsFilter) == false ->
+                            ({#resource{kind = queue, virtual_host = VHost}, _, _}, Acc) when is_map(VHostsFilter), map_get(VHost, VHostsFilter) == false ->
                                  Acc;
-                            ({#resource{kind = queue, name = Name}, Props, _}, {T, A1} = Acc)
-                              when is_list(QueuesFilter) ->
-                                case re:run(Name, QueuesFilter, [{capture, none}]) of
-                                    match ->
-                                        Acc;
-                                    nomatch ->
-                                        {T,
-                                         sum(proplists:get_value(consumers, Props), A1)
-                                        }
-                                end;
                              ({_, Props, _}, {T, A1}) ->
                                  {T,
                                   sum(proplists:get_value(consumers, Props), A1)
                                  }
                          end, empty(MF), Table),
     [{Table, [{consumers, A1}]}];
-get_data(queue_metrics = Table, false, VHostsFilter, QueuesFilter) ->
-    {Table, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16} =
+get_data(queue_metrics = Table, false, VHostsFilter) ->
+    {Table, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17} =
         ets:foldl(fun
                       ({#resource{kind = queue, virtual_host = VHost}, _, _}, Acc) when is_map(VHostsFilter), map_get(VHost, VHostsFilter) == false ->
                           Acc;
-                      ({#resource{kind = queue, name = Name}, Props, _}, Acc)
-                        when is_list(QueuesFilter) ->
-                          case re:run(Name, QueuesFilter, [{capture, none}]) of
-                              match ->
-                                  Acc;
-                              nomatch ->
-                                  sum_queue_metrics(Props, Acc)
-                          end;
                       ({_, Props, _}, Acc) ->
                           sum_queue_metrics(Props, Acc)
                   end, empty(Table), Table),
@@ -548,11 +619,14 @@ get_data(queue_metrics = Table, false, VHostsFilter, QueuesFilter) ->
                {messages_bytes_persistent, A9}, {message_bytes, A10},
                {message_bytes_ready, A11}, {message_bytes_unacknowledged, A12},
                {messages_paged_out, A13}, {message_bytes_paged_out, A14},
-               {disk_reads, A15}, {disk_writes, A16}]}];
-get_data(Table, false, VHostsFilter, QueuesFilter) when Table == channel_exchange_metrics;
+               {disk_reads, A15}, {disk_writes, A16}, {segments, A17}]}];
+get_data(Table, false, VHostsFilter) when Table == channel_exchange_metrics;
                            Table == queue_coarse_metrics;
+                           Table == queue_delivery_metrics;
                            Table == channel_queue_metrics;
                            Table == connection_coarse_metrics;
+                           Table == exchange_metrics;
+                           Table == queue_exchange_metrics;
                            Table == channel_queue_exchange_metrics;
                            Table == ra_metrics;
                            Table == channel_process_metrics ->
@@ -560,14 +634,10 @@ get_data(Table, false, VHostsFilter, QueuesFilter) when Table == channel_exchang
                   %% For queue_coarse_metrics
                   ({#resource{kind = queue, virtual_host = VHost}, _, _, _, _}, Acc) when is_map(VHostsFilter), map_get(VHost, VHostsFilter) == false ->
                                Acc;
-                  ({#resource{kind = queue, name = Name}, V1, V2, V3, V4}, {T, A1, A2, A3, A4} = Acc)
-                             when is_list(QueuesFilter) ->
-                               case re:run(Name, QueuesFilter, [{capture, none}]) of
-                                   match ->
-                                       Acc;
-                                   nomatch ->
-                                       {T, V1 + A1, V2 + A2, V3 + A3, V4 + A4}
-                               end;
+                  ({#resource{kind = queue, virtual_host = VHost}, _, _, _, _, _, _, _, _}, Acc) when is_map(VHostsFilter), map_get(VHost, VHostsFilter) == false ->
+                               Acc;
+                  ({{#resource{kind = queue, virtual_host = VHost}, #resource{kind = exchange}}, _, _}, Acc) when is_map(VHostsFilter), map_get(VHost, VHostsFilter) == false ->
+                               Acc;
                   ({_, V1}, {T, A1}) ->
                        {T, V1 + A1};
                   ({_, V1, _}, {T, A1}) ->
@@ -594,14 +664,57 @@ get_data(Table, false, VHostsFilter, QueuesFilter) when Table == channel_exchang
         _ ->
             [Result]
     end;
-get_data(queue_coarse_metrics = Table, true, VHostsFilter, _) when is_map(VHostsFilter) ->
+get_data(ra_metrics = Table, true, _) ->
+    ets:foldl(
+      fun ({#resource{kind = queue}, _, _, _, _, _, _} = Row, Acc) ->
+              %% Metrics for QQ records use the queue resource as the table
+              %% key. The queue name and vhost will be rendered as tags.
+              [Row | Acc];
+          ({ClusterName, _, _, _, _, _, _} = Row, Acc) when is_atom(ClusterName) ->
+              %% Other Ra clusters like Khepri and the stream coordinator use
+              %% the cluster name as the metrics key. Transform this into a
+              %% value that can be rendered as a "raft_cluster" tag.
+              Row1 = setelement(1, Row, #{<<"raft_cluster">> => atom_to_binary(ClusterName, utf8)}),
+              [Row1 | Acc]
+      end, [], Table);
+get_data(exchange_metrics = Table, true, VHostsFilter) when is_map(VHostsFilter)->
+    ets:foldl(fun
+        ({#resource{kind = exchange, virtual_host = VHost}, _, _, _, _, _} = Row, Acc) when
+            map_get(VHost, VHostsFilter)
+        ->
+            [Row | Acc];
+        (_Row, Acc) ->
+            Acc
+    end, [], Table);
+get_data(queue_delivery_metrics = Table, true, VHostsFilter) when is_map(VHostsFilter) ->
+    ets:foldl(fun
+        ({#resource{kind = queue, virtual_host = VHost}, _, _, _, _, _, _, _, _} = Row, Acc) when
+            map_get(VHost, VHostsFilter)
+        ->
+            [Row | Acc];
+        (_Row, Acc) ->
+            Acc
+    end, [], Table);
+get_data(queue_exchange_metrics = Table, true, VHostsFilter) when is_map(VHostsFilter) ->
+    ets:foldl(fun
+        ({{
+            #resource{kind = queue, virtual_host = VHost},
+            #resource{kind = exchange, virtual_host = VHost}
+         }, _, _} = Row, Acc) when
+            map_get(VHost, VHostsFilter)
+        ->
+            [Row | Acc];
+        (_Row, Acc) ->
+            Acc
+    end, [], Table);
+get_data(queue_coarse_metrics = Table, true, VHostsFilter) when is_map(VHostsFilter) ->
     ets:foldl(fun
                   ({#resource{kind = queue, virtual_host = VHost}, _, _, _, _} = Row, Acc) when map_get(VHost, VHostsFilter) ->
                       [Row|Acc];
                   (_, Acc) ->
                       Acc
               end, [], Table);
-get_data(MF, true, VHostsFilter, _) when is_map(VHostsFilter), MF == queue_metrics orelse MF == queue_consumer_count ->
+get_data(MF, true, VHostsFilter) when is_map(VHostsFilter), MF == queue_metrics orelse MF == queue_consumer_count ->
     Table = queue_metrics,
     ets:foldl(fun
                   ({#resource{kind = queue, virtual_host = VHost}, _, _} = Row, Acc) when map_get(VHost, VHostsFilter) ->
@@ -609,16 +722,64 @@ get_data(MF, true, VHostsFilter, _) when is_map(VHostsFilter), MF == queue_metri
                   (_, Acc) ->
                       Acc
               end, [], Table);
-get_data(queue_consumer_count, true, _, _) ->
+get_data(queue_consumer_count, true, _) ->
     ets:tab2list(queue_metrics);
-get_data(vhost_status, _, _, _) ->
+get_data(stream_consumer_metrics, true, _) ->
+    Table = rabbit_stream_consumer_created, %% real table name
+    try ets:foldl(fun({{QueueName, _Pid, _SubId}, Props}, Map0) ->
+                          Value = proplists:get_value(offset_lag, Props, 0),
+                          maps:update_with(
+                            QueueName,
+                            fun(OldMax) -> erlang:max(Value, OldMax) end,
+                            Value,
+                            Map0)
+                  end, #{}, Table) of
+        Map1 ->
+            maps:to_list(Map1)
+    catch error:badarg ->
+            %% rabbitmq_stream plugin is not enabled
+            []
+    end;
+get_data(vhost_status, _, _) ->
     [ { #{<<"vhost">> => VHost},
         case rabbit_vhost_sup_sup:is_vhost_alive(VHost) of
             true -> 1;
             false -> 0
         end}
       || VHost <- rabbit_vhost:list()  ];
-get_data(exchange_bindings, _, _, _) ->
+get_data(node_memory, _, _) ->
+    BreakdownPL = rabbit_vm:memory(),
+    KeysOfInterest = [
+        code,
+        connection_readers,
+        connection_writers,
+        connection_channels,
+        connection_other,
+        queue_procs,
+        quorum_queue_procs,
+        quorum_queue_dlx_procs,
+        stream_queue_procs,
+        stream_queue_replica_reader_procs,
+        stream_queue_coordinator_procs,
+        plugins,
+        metadata_store,
+        other_proc,
+        metrics,
+        mgmt_db,
+        mnesia,
+        quorum_ets,
+        metadata_store_ets,
+        other_ets,
+        binary,
+        msg_index,
+        atom,
+        other_system,
+        allocated_unused,
+        reserved_unallocated
+    ],
+    Data = maps:to_list(maps:with(KeysOfInterest, maps:from_list(BreakdownPL))),
+    [{node_memory, Data}];
+get_data(exchange_bindings, _, _) ->
     Exchanges = lists:foldl(fun
                                 (#exchange{internal = true}, Acc) ->
                                     Acc;
@@ -627,21 +788,22 @@ get_data(exchange_bindings, _, _, _) ->
                                 (#exchange{name = EName, type = EType}, Acc) ->
                                     maps:put(EName, #{type => atom_to_binary(EType), binding_count => 0}, Acc)
                             end, #{}, rabbit_exchange:list()),
-    WithCount = ets:foldl(
-                  fun (#route{binding = #binding{source = EName}}, Acc) ->
+    WithCount = rabbit_db_binding:fold(
+                  fun (#binding{source = EName}, Acc) ->
                           case maps:is_key(EName, Acc) of
                               false -> Acc;
                               true ->
-                                  maps:update_with(EName, fun (R = #{binding_count := Cnt}) ->
-                                                                  R#{binding_count => Cnt + 1}
-                                                          end, Acc)
+                                  maps:update_with(EName,
+                                                   fun (R = #{binding_count := Cnt}) ->
+                                                           R#{binding_count => Cnt + 1}
+                                                   end, Acc)
                           end
-                  end, Exchanges, rabbit_route),
+                  end, Exchanges),
     maps:fold(fun(#resource{virtual_host = VHost, name = Name}, #{type := Type, binding_count := Bindings}, Acc) ->
                       [{<<"vhost=\"", VHost/binary, "\",exchange=\"", Name/binary, "\",type=\"", Type/binary, "\"">>,
                         Bindings}|Acc]
               end, [], WithCount);
-get_data(exchange_names, _, _, _) ->
+get_data(exchange_names, _, _) ->
     lists:foldl(fun
                     (#exchange{internal = true}, Acc) ->
                         Acc;
@@ -651,12 +813,12 @@ get_data(exchange_names, _, _, _) ->
                         Label = <<"vhost=\"", VHost/binary, "\",exchange=\"", Name/binary, "\",type=\"", (atom_to_binary(EType))/binary, "\"">>,
                         [{Label, 1}|Acc]
                 end, [], rabbit_exchange:list());
-get_data(Table, _, _, _) ->
+get_data(Table, _, _) ->
     ets:tab2list(Table).
 
 
 sum_queue_metrics(Props, {T, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11,
-                          A12, A13, A14, A15, A16}) ->
+                          A12, A13, A14, A15, A16, A17}) ->
     {T,
      sum(proplists:get_value(consumers, Props), A1),
      sum(proplists:get_value(consumer_utilisation, Props), A2),
@@ -673,7 +835,8 @@ sum_queue_metrics(Props, {T, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11,
      sum(proplists:get_value(messages_paged_out, Props), A13),
      sum(proplists:get_value(message_bytes_paged_out, Props), A14),
      sum(proplists:get_value(disk_reads, Props), A15),
-     sum(proplists:get_value(disk_writes, Props), A16)
+     sum(proplists:get_value(disk_writes, Props), A16),
+     sum(proplists:get_value(segments, Props), A17)
     }.
 
 division(0, 0) ->
@@ -684,18 +847,18 @@ division(A, B) ->
 accumulate_count_and_sum(Value, {Count, Sum}) ->
     {Count + 1, Sum + Value}.
 
-empty(T) when T == channel_queue_exchange_metrics; T == channel_process_metrics; T == queue_consumer_count ->
+empty(T) when T == channel_queue_exchange_metrics; T == queue_exchange_metrics; T == channel_process_metrics; T == queue_consumer_count ->
     {T, 0};
 empty(T) when T == connection_coarse_metrics; T == auth_attempt_metrics; T == auth_attempt_detailed_metrics ->
     {T, 0, 0, 0};
-empty(T) when T == channel_exchange_metrics; T == queue_coarse_metrics; T == connection_metrics ->
+empty(T) when T == channel_exchange_metrics; T == exchange_metrics; T == queue_coarse_metrics; T == connection_metrics ->
     {T, 0, 0, 0, 0};
 empty(T) when T == ra_metrics ->
     {T, 0, 0, 0, 0, 0, {0, 0}};
-empty(T) when T == channel_queue_metrics; T == channel_metrics ->
+empty(T) when T == channel_queue_metrics; T == queue_delivery_metrics; T == channel_metrics ->
     {T, 0, 0, 0, 0, 0, 0, 0};
 empty(queue_metrics = T) ->
-    {T, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}.
+    {T, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}.
 
 sum(undefined, B) ->
     B;
@@ -724,10 +887,3 @@ vhosts_filter_from_pdict() ->
             maps:merge(All, Enabled)
     end.
 
-queues_filter_from_pdict() ->
-    case get(prometheus_queue_filter) of
-        undefined ->
-            false;
-        Pattern ->
-            Pattern
-    end.

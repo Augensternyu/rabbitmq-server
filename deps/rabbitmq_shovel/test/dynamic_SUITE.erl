@@ -2,12 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(dynamic_SUITE).
 
--include_lib("common_test/include/ct.hrl").
+-include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 -compile(export_all).
@@ -17,6 +17,7 @@
 all() ->
     [
       {group, core_tests},
+      {group, core_tests_with_preclared_topology},
       {group, quorum_queue_tests},
       {group, stream_queue_tests}
     ].
@@ -31,6 +32,7 @@ groups() ->
           set_empty_properties_using_map,
           headers,
           exchange,
+          missing_dest_exchange,
           restart,
           change_definition,
           autodelete,
@@ -40,16 +42,22 @@ groups() ->
           credit_flow,
           dest_resource_alarm_on_confirm,
           dest_resource_alarm_on_publish,
-          dest_resource_alarm_no_ack
+          dest_resource_alarm_no_ack,
+          missing_src_queue_with_src_predeclared,
+          missing_dest_queue_with_dest_predeclared
         ]},
-
-        {quorum_queue_tests, [], [
+    {core_tests_with_preclared_topology, [], [
+          missing_src_queue_without_src_predeclared,
+          missing_dest_queue_without_dest_predeclared,
+          missing_src_and_dest_queue_with_false_src_and_dest_predeclared
+    ]},
+    {quorum_queue_tests, [], [
           quorum_queues
-        ]},
+    ]},
 
-        {stream_queue_tests, [], [
+    {stream_queue_tests, [], [
           stream_queues
-        ]}
+    ]}
     ].
 
 %% -------------------------------------------------------------------
@@ -59,7 +67,11 @@ groups() ->
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
     Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodename_suffix, ?MODULE}
+        {rmq_nodename_suffix, ?MODULE},
+        {ignored_crashes, [
+            "server_initiated_close,404",
+            "writer,send_failed,closed"
+        ]}
       ]),
     rabbit_ct_helpers:run_setup_steps(Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
@@ -80,9 +92,18 @@ init_per_group(stream_queue_tests, Config) ->
         false -> Config;
         _     -> {skip, "stream queue tests are skipped in mixed mode"}
     end;
+init_per_group(core_tests_with_preclared_topology, Config) ->
+    ok = rabbit_ct_broker_helpers:rpc(Config, 0, application, set_env,
+        [rabbitmq_shovel, topology, [{predeclared, true}]]),
+    Config;
+
 init_per_group(_, Config) ->
     Config.
 
+end_per_group(core_tests_with_preclared_topology, Config) ->
+     ok = rabbit_ct_broker_helpers:rpc(Config, 0, application, unset_env,
+        [rabbitmq_shovel, topology]),
+    Config;
 end_per_group(_, Config) ->
     Config.
 
@@ -188,8 +209,9 @@ headers(Config) ->
                 <<"test">>,
                 [{<<"src-queue">>,            <<"src">>},
                  {<<"dest-queue">>,           <<"dest">>}]),
-            #amqp_msg{props = #'P_basic'{headers = undefined}} =
-                  publish_expect(Ch, <<>>, <<"src">>, <<"dest">>, <<"hi1">>),
+            ?assertMatch(#amqp_msg{props = #'P_basic'{headers = H0}}
+                           when H0 == undefined orelse H0 == [],
+                                publish_expect(Ch, <<>>, <<"src">>, <<"dest">>, <<"hi1">>)),
 
             shovel_test_utils:set_param(Config,
                 <<"test">>,
@@ -261,6 +283,185 @@ exchange(Config) ->
               publish_expect(Ch, <<"amq.direct">>, <<"test-key">>,
                              <<"queue">>, <<"hello">>)
       end).
+
+missing_src_queue_with_src_predeclared(Config) ->
+    with_ch(Config,
+        fun (Ch) ->
+            amqp_channel:call(
+              Ch, #'queue.declare'{queue = <<"dest">>,
+                                   durable = true}),
+            amqp_channel:call(
+              Ch, #'exchange.declare'{exchange = <<"dest-ex">>}),
+            amqp_channel:call(
+              Ch, #'queue.bind'{queue = <<"dest">>,
+                                exchange = <<"dest-ex">>,
+                                routing_key = <<"dest-key">>}),
+
+            shovel_test_utils:set_param_nowait(Config,
+                        <<"test">>, [{<<"src-queue">>, <<"src">>},
+                                        {<<"src-predeclared">>, true},
+                                        {<<"dest-exchange">>, <<"dest-ex">>},
+                                        {<<"dest-exchange-key">>, <<"dest-key">>},
+                                        {<<"src-prefetch-count">>, 1}]),
+            shovel_test_utils:await_shovel(Config, 0, <<"test">>, terminated),
+            expect_missing_queue(Ch, <<"src">>),
+
+            with_newch(Config,
+                fun(Ch2) ->
+                    amqp_channel:call(
+                        Ch2, #'queue.declare'{queue = <<"src">>,
+                                        durable = true}),
+                    amqp_channel:call(
+                        Ch2, #'queue.bind'{queue = <<"src">>,
+                                        exchange = <<"amq.direct">>,
+                                        routing_key = <<"src-key">>}),
+                    shovel_test_utils:await_shovel(Config, 0, <<"test">>, running),
+
+                    publish_expect(Ch2, <<"amq.direct">>, <<"src-key">>, <<"dest">>, <<"hello!">>)
+                end)
+    end).
+
+
+missing_src_and_dest_queue_with_false_src_and_dest_predeclared(Config) ->
+    with_ch(Config,
+        fun (Ch) ->
+
+            shovel_test_utils:set_param(
+                Config,
+                <<"test">>, [{<<"src-queue">>,  <<"src">>},
+                             {<<"src-predeclared">>, false},
+                             {<<"dest-predeclared">>, false},
+                             {<<"dest-queue">>, <<"dest">>}]),
+              publish_expect(Ch, <<>>, <<"src">>, <<"dest">>, <<"hello">>)
+
+    end).
+
+missing_dest_queue_with_dest_predeclared(Config) ->
+    with_ch(Config,
+        fun (Ch) ->
+            amqp_channel:call(
+                Ch, #'queue.declare'{queue = <<"src">>,
+                                 durable = true}),
+            amqp_channel:call(
+                Ch, #'queue.bind'{queue = <<"src">>,
+                                exchange = <<"amq.direct">>,
+                                routing_key = <<"src-key">>}),
+
+            shovel_test_utils:set_param_nowait(Config,
+                        <<"test">>, [{<<"src-queue">>, <<"src">>},
+                                        {<<"dest-predeclared">>, true},
+                                        {<<"dest-queue">>, <<"dest">>},
+                                        {<<"src-prefetch-count">>, 1}]),
+            shovel_test_utils:await_shovel(Config, 0, <<"test">>, terminated),
+            expect_missing_queue(Ch, <<"dest">>),
+
+            with_newch(Config,
+                fun(Ch2) ->
+                    amqp_channel:call(
+                        Ch2, #'queue.declare'{queue = <<"dest">>,
+                                            durable = true}),
+
+                    shovel_test_utils:await_shovel(Config, 0, <<"test">>, running),
+
+                    publish_expect(Ch2, <<"amq.direct">>, <<"src-key">>, <<"dest">>, <<"hello!">>)
+                end)
+    end).
+
+missing_src_queue_without_src_predeclared(Config) ->
+    with_ch(Config,
+        fun (Ch) ->
+            amqp_channel:call(
+              Ch, #'queue.declare'{queue = <<"dest">>,
+                                   durable = true}),
+            amqp_channel:call(
+              Ch, #'exchange.declare'{exchange = <<"dest-ex">>}),
+            amqp_channel:call(
+              Ch, #'queue.bind'{queue = <<"dest">>,
+                                exchange = <<"dest-ex">>,
+                                routing_key = <<"dest-key">>}),
+
+            shovel_test_utils:set_param_nowait(Config,
+                        <<"test">>, [{<<"src-queue">>, <<"src">>},
+                                        {<<"dest-exchange">>, <<"dest-ex">>},
+                                        {<<"dest-exchange-key">>, <<"dest-key">>},
+                                        {<<"src-prefetch-count">>, 1}]),
+            shovel_test_utils:await_shovel(Config, 0, <<"test">>, terminated),
+            expect_missing_queue(Ch, <<"src">>),
+
+            with_newch(Config,
+                fun(Ch2) ->
+                    amqp_channel:call(
+                        Ch2, #'queue.declare'{queue = <<"src">>,
+                                        durable = true}),
+                    amqp_channel:call(
+                        Ch2, #'queue.bind'{queue = <<"src">>,
+                                        exchange = <<"amq.direct">>,
+                                        routing_key = <<"src-key">>}),
+                    shovel_test_utils:await_shovel(Config, 0, <<"test">>, running),
+
+                    publish_expect(Ch2, <<"amq.direct">>, <<"src-key">>, <<"dest">>, <<"hello!">>)
+                end)
+    end).
+
+
+missing_dest_queue_without_dest_predeclared(Config) ->
+    with_ch(Config,
+        fun (Ch) ->
+            amqp_channel:call(
+                Ch, #'queue.declare'{queue = <<"src">>,
+                                 durable = true}),
+            amqp_channel:call(
+                Ch, #'queue.bind'{queue = <<"src">>,
+                                exchange = <<"amq.direct">>,
+                                routing_key = <<"src-key">>}),
+
+            shovel_test_utils:set_param_nowait(Config,
+                        <<"test">>, [{<<"src-queue">>, <<"src">>},
+                                        {<<"dest-queue">>, <<"dest">>},
+                                        {<<"src-prefetch-count">>, 1}]),
+            shovel_test_utils:await_shovel(Config, 0, <<"test">>, terminated),
+            expect_missing_queue(Ch, <<"dest">>),
+
+            with_newch(Config,
+                fun(Ch2) ->
+                    amqp_channel:call(
+                        Ch2, #'queue.declare'{queue = <<"dest">>,
+                                            durable = true}),
+
+                    shovel_test_utils:await_shovel(Config, 0, <<"test">>, running),
+
+                    publish_expect(Ch2, <<"amq.direct">>, <<"src-key">>, <<"dest">>, <<"hello!">>)
+                end)
+    end).
+
+missing_dest_exchange(Config) ->
+    with_ch(Config,
+        fun (Ch) ->
+            amqp_channel:call(
+            Ch, #'queue.declare'{queue = <<"src">>,
+                                 durable = true}),
+            amqp_channel:call(
+              Ch, #'queue.declare'{queue = <<"dest">>,
+                                   durable = true}),
+            amqp_channel:call(
+              Ch, #'queue.bind'{queue = <<"src">>,
+                                exchange = <<"amq.direct">>,
+                                routing_key = <<"src-key">>}),
+            shovel_test_utils:set_param(Config,
+                        <<"test">>, [{<<"src-queue">>, <<"src">>},
+                                        {<<"dest-exchange">>, <<"dest-ex">>},
+                                        {<<"dest-exchange-key">>, <<"dest-key">>},
+                                        {<<"src-prefetch-count">>, 1}]),
+            publish(Ch, <<"amq.direct">>, <<"src-key">>, <<"hello">>),
+            expect_empty(Ch, <<"src">>),
+            amqp_channel:call(
+              Ch, #'exchange.declare'{exchange = <<"dest-ex">>}),
+            amqp_channel:call(
+              Ch, #'queue.bind'{queue = <<"dest">>,
+                                exchange = <<"dest-ex">>,
+                                routing_key = <<"dest-key">>}),
+            publish_expect(Ch, <<"amq.direct">>, <<"src-key">>, <<"dest">>, <<"hello!">>)
+end).
 
 restart(Config) ->
     with_ch(Config,
@@ -664,6 +865,12 @@ with_ch(Config, Fun) ->
     cleanup(Config),
     ok.
 
+with_newch(Config, Fun) ->
+     Ch = rabbit_ct_client_helpers:open_channel(Config, 0),
+    Fun(Ch),
+    rabbit_ct_client_helpers:close_channel(Ch),
+    ok.
+
 publish(Ch, X, Key, Payload) when is_binary(Payload) ->
     publish(Ch, X, Key, #amqp_msg{payload = Payload});
 
@@ -692,6 +899,23 @@ expect(Ch, Q, Payload) ->
 
 expect_empty(Ch, Q) ->
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{ queue = Q }).
+
+expect_missing_queue(Ch, Q) ->
+    try
+        amqp_channel:call(Ch, #'queue.declare'{queue   = Q,
+                                               passive = true}),
+        ct:fail(queue_still_exists)
+    catch exit:{{shutdown, {server_initiated_close, ?NOT_FOUND, _Text}}, _} ->
+        ok
+    end.
+expect_missing_exchange(Ch, X) ->
+    try
+        amqp_channel:call(Ch, #'exchange.declare'{exchange   = X,
+                                                 passive = true}),
+        ct:fail(exchange_still_exists)
+    catch exit:{{shutdown, {server_initiated_close, ?NOT_FOUND, _Text}}, _} ->
+        ok
+    end.
 
 publish_count(Ch, X, Key, M, Count) ->
     [begin
@@ -758,12 +982,9 @@ shovels_from_parameters() ->
     [rabbit_misc:pget(name, Shovel) || Shovel <- L].
 
 set_default_credit(Config, Value) ->
-    {ok, OrigValue} =
-        rabbit_ct_broker_helpers:rpc(
-          Config, 0, application, get_env, [rabbit, credit_flow_default_credit]),
-    ok =
-        rabbit_ct_broker_helpers:rpc(
-          Config, 0, application, set_env, [rabbit, credit_flow_default_credit, Value]),
+    Key = credit_flow_default_credit,
+    OrigValue = rabbit_ct_broker_helpers:rpc(Config, persistent_term, get, [Key]),
+    ok = rabbit_ct_broker_helpers:rpc(Config, persistent_term, put, [Key, Value]),
     OrigValue.
 
 set_vm_memory_high_watermark(Config, Limit) ->

@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQCtl.MixfileBase do
   use Mix.Project
@@ -10,11 +10,16 @@ defmodule RabbitMQCtl.MixfileBase do
   def project do
     [
       app: :rabbitmqctl,
-      version: "3.12.0-dev",
-      elixir: ">= 1.13.4 and < 1.15.0",
+      version: "4.0.0-dev",
+      elixir: ">= 1.13.4 and < 1.19.0",
       build_embedded: Mix.env() == :prod,
       start_permanent: Mix.env() == :prod,
-      escript: [main_module: RabbitMQCtl, emu_args: "-hidden", path: "escript/rabbitmqctl"],
+      escript: [
+        main_module: RabbitMQCtl,
+        emu_args: "-hidden",
+        path: "escript/rabbitmqctl"
+      ],
+      prune_code_paths: false,
       deps: deps(Mix.env()),
       aliases: aliases(),
       xref: [
@@ -30,6 +35,7 @@ defmodule RabbitMQCtl.MixfileBase do
           :rabbit,
           :rabbit_control_misc,
           :rabbit_data_coercion,
+          :rabbit_db_cluster,
           :rabbit_env,
           :rabbit_event,
           :rabbit_file,
@@ -37,7 +43,6 @@ defmodule RabbitMQCtl.MixfileBase do
           :rabbit_log,
           :rabbit_misc,
           :rabbit_mnesia,
-          :rabbit_mnesia_rename,
           :rabbit_nodes_common,
           :rabbit_pbe,
           :rabbit_plugins,
@@ -135,6 +140,7 @@ defmodule RabbitMQCtl.MixfileBase do
     end
 
     make_cmd = System.get_env("MAKE", "make")
+    fake_cmd = "true"
     is_bazel = System.get_env("IS_BAZEL") != nil
 
     [
@@ -147,23 +153,19 @@ defmodule RabbitMQCtl.MixfileBase do
         path: Path.join(deps_dir, "csv")
       },
       {
-        :parallel_stream,
-        path: Path.join(deps_dir, "parallel_stream"), override: true
-      },
-      {
         :stdout_formatter,
         path: Path.join(deps_dir, "stdout_formatter"),
-        compile: if(is_bazel, do: false, else: make_cmd)
+        compile: if(is_bazel, do: fake_cmd, else: make_cmd)
       },
       {
         :observer_cli,
         path: Path.join(deps_dir, "observer_cli"),
-        compile: if(is_bazel, do: false, else: make_cmd)
+        compile: if(is_bazel, do: fake_cmd, else: make_cmd)
       },
       {
         :rabbit_common,
         path: Path.join(deps_dir, "rabbit_common"),
-        compile: if(is_bazel, do: false, else: make_cmd),
+        compile: if(is_bazel, do: fake_cmd, else: make_cmd),
         override: true
       }
     ] ++
@@ -175,8 +177,10 @@ defmodule RabbitMQCtl.MixfileBase do
               path: Path.join(deps_dir, "amqp")
             },
             {
-              :dialyxir,
-              path: Path.join(deps_dir, "dialyxir"), runtime: false
+              :rabbit,
+              path: Path.join(deps_dir, "rabbit"),
+              compile: if(is_bazel, do: fake_cmd, else: make_cmd),
+              override: true
             },
             {
               :temp,
@@ -189,7 +193,7 @@ defmodule RabbitMQCtl.MixfileBase do
             {
               :amqp_client,
               path: Path.join(deps_dir, "amqp_client"),
-              compile: if(is_bazel, do: false, else: make_cmd),
+              compile: if(is_bazel, do: fake_cmd, else: make_cmd),
               override: true
             }
           ]
@@ -206,21 +210,18 @@ defmodule RabbitMQCtl.MixfileBase do
         "deps.compile"
       ],
       make_app: [
-        "format --check-formatted",
         "compile",
         "escript.build"
       ],
       make_all: [
         "deps.get",
         "deps.compile",
-        "format --check-formatted",
         "compile",
         "escript.build"
       ],
       make_all_in_src_archive: [
         "deps.get --only prod",
         "deps.compile",
-        "format --check-formatted",
         "compile",
         "escript.build"
       ]

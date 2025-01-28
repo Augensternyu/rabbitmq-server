@@ -2,14 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt_internal_event_handler).
 
 -behaviour(gen_event).
 
--export([init/1, handle_event/2, handle_call/2]).
+-export([init/1, handle_event/2, handle_call/2, handle_info/2]).
 
 -import(rabbit_misc, [pget/2]).
 
@@ -27,12 +27,14 @@ handle_event({event, vhost_deleted, Info, _, _}, ?STATE) ->
     rabbit_mqtt_retainer_sup:delete_child_for_vhost(Name),
     {ok, ?STATE};
 handle_event({event, maintenance_connections_closed, _Info, _, _}, ?STATE) ->
-    %% we should close our connections
-    {ok, NConnections} = rabbit_mqtt:close_local_client_connections("node is being put into maintenance mode"),
-    rabbit_log:warning("Closed ~b local MQTT client connections", [NConnections]),
+    {ok, NConnections} = rabbit_mqtt:close_local_client_connections(maintenance),
+    rabbit_log:warning("Closed ~b local (Web) MQTT client connections", [NConnections]),
     {ok, ?STATE};
 handle_event(_Event, ?STATE) ->
     {ok, ?STATE}.
 
 handle_call(_Request, ?STATE) ->
     {ok, ok, ?STATE}.
+
+handle_info(_Info, State) ->
+    {ok, State}.

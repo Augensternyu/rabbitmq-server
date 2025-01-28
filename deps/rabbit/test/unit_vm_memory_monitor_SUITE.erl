@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(unit_vm_memory_monitor_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -compile(export_all).
@@ -119,4 +118,4 @@ set_and_verify_vm_memory_high_watermark_absolute(MemLimit0) ->
         _           ->
             ct:fail("Expected memory high watermark to be ~tp but it was ~tp", [Interpreted, MemLimit])
     end,
-    vm_memory_monitor:set_vm_memory_high_watermark(0.4).
+    vm_memory_monitor:set_vm_memory_high_watermark(0.6).

@@ -2,12 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_ssl_options).
 
 -export([fix/1]).
+-export([fix_client/1]).
 
 
 -define(BAD_SSL_PROTOCOL_VERSIONS, [
@@ -18,7 +19,30 @@
 -spec fix(rabbit_types:infos()) -> rabbit_types:infos().
 
 fix(Config) ->
-    fix_verify_fun(fix_ssl_protocol_versions(Config)).
+    fix_verify_fun(
+      fix_ssl_protocol_versions(
+        hibernate_after(Config))).
+
+-spec fix_client(rabbit_types:infos()) -> rabbit_types:infos().
+fix_client(Config) ->
+    fix_cacerts(
+        fix(Config)).
+
+fix_cacerts(SslOptsConfig) ->
+    CACerts = proplists:get_value(cacerts, SslOptsConfig, undefined),
+    CACertfile = proplists:get_value(cacertfile, SslOptsConfig, undefined),
+    case {CACerts, CACertfile} of
+        {undefined, undefined} ->
+            try public_key:cacerts_get() of
+                CaCerts ->
+                    [{cacerts, CaCerts} | SslOptsConfig]
+            catch
+                _ ->
+                    SslOptsConfig
+            end;
+        _CaCerts ->
+            SslOptsConfig
+    end.
 
 fix_verify_fun(SslOptsConfig) ->
     %% Starting with ssl 4.0.1 in Erlang R14B, the verify_fun function
@@ -83,4 +107,13 @@ fix_ssl_protocol_versions(Config) ->
                              Vs        -> Vs
                          end,
             rabbit_misc:pset(versions, Configured -- ?BAD_SSL_PROTOCOL_VERSIONS, Config)
+    end.
+
+hibernate_after(Config) ->
+    Key = hibernate_after,
+    case proplists:is_defined(Key, Config) of
+        true ->
+            Config;
+        false ->
+            [{Key, 6_000} | Config]
     end.

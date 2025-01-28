@@ -2,14 +2,13 @@
 
 -compile(export_all).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
 
 -define(ITERATIONS_TO_RUN_UNTIL_CONFIDENT, 10000).
 
 all() ->
     [
-     decode_reply_to_v2
+     decode_reply_to
     ].
 
 init_per_suite(Config) ->
@@ -33,7 +32,7 @@ end_per_testcase(_TestCase, _Config) ->
 %%% Tests %%%
 
 
-decode_reply_to_v2(Config) ->
+decode_reply_to(Config) ->
     rabbit_ct_proper_helpers:run_proper(
       fun() -> prop_decode_reply_to(Config) end,
       [],
@@ -62,9 +61,9 @@ prop_decode_reply_to(_) ->
             NonB64 = <<0, Random/binary>>, 
 
             {ok, pid_recomposition:recompose(PidParts), Key} =:=
-                rabbit_direct_reply_to:decode_reply_to_v2(IxBin, NodeMap)
+                rabbit_direct_reply_to:decode_reply_to(IxBin, NodeMap)
             andalso {error, target_node_not_found} =:=
-                rabbit_direct_reply_to:decode_reply_to_v2(IxBin, NoNodeMap)
+                rabbit_direct_reply_to:decode_reply_to(IxBin, NoNodeMap)
             andalso {error, unrecognized_format} =:=
-                rabbit_direct_reply_to:decode_reply_to_v2(NonB64, NodeMap)
+                rabbit_direct_reply_to:decode_reply_to(NonB64, NodeMap)
         end).

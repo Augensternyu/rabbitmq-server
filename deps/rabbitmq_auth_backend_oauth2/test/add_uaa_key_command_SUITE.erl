@@ -2,13 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(add_uaa_key_command_SUITE).
 
 -compile(export_all).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("common_test/include/ct.hrl").
 
 -define(COMMAND, 'Elixir.RabbitMQ.CLI.Ctl.Commands.AddUaaKeyCommand').
@@ -72,4 +71,3 @@ validate_pem_file_key(Config) ->
     CertsDir = ?config(rmq_certsdir, Config),
     Keyfile = filename:join([CertsDir, <<"client">>, <<"key.pem">>]),
     ok = ?COMMAND:validate([<<"foo">>], #{pem_file => Keyfile}).
-

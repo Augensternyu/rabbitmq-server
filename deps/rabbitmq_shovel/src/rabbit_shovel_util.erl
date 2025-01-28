@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_shovel_util).
@@ -39,8 +39,13 @@ add_timestamp_header(Props = #'P_basic'{headers = Headers}) ->
 delete_shovel(VHost, Name, ActingUser) ->
     case rabbit_shovel_status:lookup({VHost, Name}) of
         not_found ->
+            %% Follow the user's obvious intent and delete the runtime parameter just in case the Shovel is in
+            %% a starting-failing-restarting loop. MK.
+            rabbit_log:info("Will delete runtime parameters of shovel '~ts' in virtual host '~ts'", [Name, VHost]),
+            ok = rabbit_runtime_parameters:clear(VHost, <<"shovel">>, Name, ActingUser),
             {error, not_found};
         _Obj ->
+            rabbit_log:info("Will delete runtime parameters of shovel '~ts' in virtual host '~ts'", [Name, VHost]),
             ok = rabbit_runtime_parameters:clear(VHost, <<"shovel">>, Name, ActingUser)
     end.
 

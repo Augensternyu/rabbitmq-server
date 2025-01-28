@@ -84,7 +84,7 @@ ring partitions, and thus queues according to their binding weights.
 #### One Binding Per Queue
 
 This exchange type **assumes a single binding between a queue and an exchange**.
-Starting with RabbitMQ `3.10.6` and `3.9.21` this will be enforced in the code:
+This will be enforced in the code:
 when multiple bindings are created, only the first one will actually update the ring.
 
 This limitation makes most semantic sense: the purpose is to achieve
@@ -376,7 +376,7 @@ exchange to route based on a named header instead. To do this, declare the
 exchange with a string argument called "hash-header" naming the header to
 be used.
 
-When a `"hash-header"` is specified, the chosen header **must be provided**.
+When a `"hash-header"` is specified, the chosen header should be provided.
 If published messages do not contain the header, they will all get
 routed to the same **arbitrarily chosen** queue.
 
@@ -573,12 +573,13 @@ ok.
 
 ### Routing on a Message Property
 
-In addition to a value in the header property, you can also route on the
+Instead of a value in the header property, you can route on the
 ``message_id``, ``correlation_id``, or ``timestamp`` message properties. To do so,
 declare the exchange with a string argument called ``"hash-property"`` naming the
 property to be used.
+The `"hash-header"` and `"hash-property"` are mutually exclusive.
 
-When a `"hash-property"` is specified, the chosen property **must be provided**.
+When a `"hash-property"` is specified, the chosen property should be provided.
 If published messages do not contain the property, they will all get
 routed to the same **arbitrarily chosen** queue.
 
@@ -744,7 +745,7 @@ test() ->
     amqp_channel:call(Chan,
                   #'exchange.declare'{
                     exchange = <<"e">>, type = <<"x-consistent-hash">>,
-                    arguments = {<<"hash-property">>, longstr, <<"message_id">>}                    
+                    arguments = {<<"hash-property">>, longstr, <<"message_id">>}
                   }),
     [amqp_channel:call(Chan, #'queue.declare'{queue = Q}) || Q <- Queues],
     [amqp_channel:call(Chan, #'queue.bind'{queue = Q,
@@ -829,13 +830,9 @@ queue weight can be provided at the time of binding.
 The state of the hash space is distributed across all cluster nodes.
 
 
-## Continuous Integration
-
-[![Build Status](https://travis-ci.org/rabbitmq/rabbitmq-consistent-hash-exchange.svg?branch=master)](https://travis-ci.org/rabbitmq/rabbitmq-consistent-hash-exchange)
-
 ## Copyright and License
 
-(c) 2013-2020 VMware, Inc. or its affiliates.
+(c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 Released under the Mozilla Public License 2.0, same as RabbitMQ.
 See [LICENSE](./LICENSE) for details.

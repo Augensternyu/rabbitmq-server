@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_data).
@@ -10,14 +10,13 @@
 -include("rabbit_mgmt_records.hrl").
 -include("rabbit_mgmt_metrics.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("rabbit_common/include/rabbit_core_metrics.hrl").
-
 -export([empty/2, pick_range/2]).
 
 % delegate api
 -export([overview_data/4,
          consumer_data/2,
          all_list_queue_data/3,
+         all_list_basic_queue_data/3,
          all_detail_queue_data/3,
          all_exchange_data/3,
          all_connection_data/3,
@@ -63,6 +62,12 @@ all_detail_queue_data(_Pid, Ids, Ranges) ->
 all_list_queue_data(_Pid, Ids, Ranges) ->
     lists:foldl(fun (Id, Acc) ->
                         Data = list_queue_data(Ranges, Id),
+                        maps:put(Id, Data, Acc)
+                end, #{}, Ids).
+
+all_list_basic_queue_data(_Pid, Ids, Ranges) ->
+    lists:foldl(fun (Id, Acc) ->
+                        Data = list_basic_queue_data(Ranges, Id),
                         maps:put(Id, Data, Acc)
                 end, #{}, Ids).
 
@@ -204,6 +209,11 @@ list_queue_data(Ranges, Id) ->
                    queue_raw_deliver_stats_data(Ranges, Id) ++
                    [{queue_stats, lookup_element(queue_stats, Id)}]).
 
+list_basic_queue_data(Ranges, Id) ->
+    maps:from_list(queue_raw_message_data(Ranges, Id) ++
+                   queue_raw_deliver_stats_data(Ranges, Id) ++
+                   [{queue_stats, lookup_element(queue_basic_stats, Id)}]).
+
 detail_channel_data(Ranges, Id) ->
     maps:from_list(channel_raw_message_data(Ranges, Id) ++
                    channel_raw_detail_stats_data(Ranges, Id) ++
@@ -252,7 +262,31 @@ augment_consumer({{Q, Ch, CTag}, Props}) ->
     [{queue, format_resource(Q)},
      {channel_details, augment_channel_pid(Ch)},
      {channel_pid, Ch},
-     {consumer_tag, CTag} | Props].
+     {consumer_tag, CTag},
+     {consumer_timeout, consumer_timeout(Props, Q)} | Props].
+
+consumer_timeout(_Props, Q) ->
+    get_queue_consumer_timeout(Q, get_global_consumer_timeout()).
+
+get_queue_consumer_timeout(QName, GCT) ->
+    case rabbit_amqqueue:lookup(QName) of
+	{ok, Q} -> %% should we account for different queue states here?
+	    case rabbit_queue_type_util:args_policy_lookup(<<"consumer-timeout">>,
+							   fun (X, Y) -> erlang:min(X, Y) end, Q) of
+		    undefined -> GCT;
+		    Val -> Val
+	    end;
+	_ ->
+	    GCT
+    end.
+
+get_global_consumer_timeout() ->
+    case application:get_env(rabbit, consumer_timeout) of
+        {ok, MS} when is_integer(MS) ->
+            MS;
+        _ ->
+            undefined
+    end.
 
 consumers_by_vhost(VHost) ->
     ets:select(consumer_stats,
@@ -343,12 +377,11 @@ match_consumer_spec(Id) ->
 match_queue_consumer_spec(Id) ->
     [{{{'$1', '_', '_'}, '_'}, [{'==', {Id}, '$1'}], ['$_']}].
 
-lookup_element(Table, Key) -> lookup_element(Table, Key, 2).
+lookup_element(Table, Key) ->
+    lookup_element(Table, Key, 2).
 
 lookup_element(Table, Key, Pos) ->
-    try ets:lookup_element(Table, Key, Pos)
-    catch error:badarg -> []
-    end.
+    ets:lookup_element(Table, Key, Pos, []).
 
 -spec lookup_smaller_sample(atom(), any()) -> maybe_slide().
 lookup_smaller_sample(Table, Id) ->

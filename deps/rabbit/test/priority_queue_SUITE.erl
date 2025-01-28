@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(priority_queue_SUITE).
@@ -11,6 +11,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 all() ->
@@ -27,6 +28,8 @@ groups() ->
                          {overflow_reject_publish_dlx, [], [reject]},
                          dropwhile_fetchwhile,
                          info_head_message_timestamp,
+                         info_backing_queue_version,
+                         info_oldest_message_received_timestamp,
                          unknown_info_key,
                          matching,
                          purge,
@@ -37,7 +40,8 @@ groups() ->
                          invoke,
                          gen_server2_stats,
                          negative_max_priorities,
-                         max_priorities_above_hard_limit
+                         max_priorities_above_hard_limit,
+                         update_rates
                         ]}
     ].
 
@@ -54,11 +58,11 @@ end_per_suite(Config) ->
 
 init_per_group(single_node, Config) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
-    Config1 = rabbit_ct_helpers:set_config(Config, [
-        {rmq_nodes_count, 1},
-        {rmq_nodename_suffix, Suffix}
-    ]),
-    rabbit_ct_helpers:run_steps(Config1,
+    Config1 = rabbit_ct_helpers:set_config(
+                Config, [{rmq_nodes_count, 1},
+                         {rmq_nodename_suffix, Suffix}]),
+    rabbit_ct_helpers:run_steps(
+      Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps());
 init_per_group(overflow_reject_publish, Config) ->
@@ -117,7 +121,7 @@ end_per_testcase(Testcase, Config) ->
 %% * len/1, is_empty/1      - info items
 %% * handle_pre_hibernate/1 - hibernation
 %%
-%% * set_ram_duration_target/2, ram_duration/1, status/1
+%% * status/1
 %%   - maybe need unit testing?
 %%
 %% [0] publish enough to get credit flow from msg store
@@ -351,6 +355,7 @@ info_head_message_timestamp(Config) ->
 info_head_message_timestamp1(_Config) ->
     QName = rabbit_misc:r(<<"/">>, queue,
       <<"info_head_message_timestamp-queue">>),
+    ExName = rabbit_misc:r(<<"/">>, exchange, <<>>),
     Q0 = rabbit_amqqueue:pseudo_queue(QName, self()),
     Q1 = amqqueue:set_arguments(Q0, [{<<"x-max-priority">>, long, 2}]),
     PQ = rabbit_priority_queue,
@@ -359,29 +364,17 @@ info_head_message_timestamp1(_Config) ->
     true = PQ:is_empty(BQS1),
     '' = PQ:info(head_message_timestamp, BQS1),
     %% Publish one message with timestamp 1000.
-    Msg1 = #basic_message{
-      id = <<"msg1">>,
-      content = #content{
-        properties = #'P_basic'{
-          priority = 1,
-          timestamp = 1000
-        }},
-      is_persistent = false
-    },
-    BQS2 = PQ:publish(Msg1, #message_properties{size = 0}, false, self(),
-      noflow, BQS1),
+    Content1 = #content{properties = #'P_basic'{priority = 1,
+                                                timestamp = 1000},
+                        payload_fragments_rev = []},
+    {ok, Msg1} = mc_amqpl:message(ExName, <<>>, Content1, #{id => <<"msg1">>}),
+    BQS2 = PQ:publish(Msg1, #message_properties{size = 0}, false, self(), BQS1),
     1000 = PQ:info(head_message_timestamp, BQS2),
     %% Publish a higher priority message with no timestamp.
-    Msg2 = #basic_message{
-      id = <<"msg2">>,
-      content = #content{
-        properties = #'P_basic'{
-          priority = 2
-        }},
-      is_persistent = false
-    },
-    BQS3 = PQ:publish(Msg2, #message_properties{size = 0}, false, self(),
-      noflow, BQS2),
+    Content2 = #content{properties = #'P_basic'{priority = 2},
+                        payload_fragments_rev = []},
+    {ok, Msg2} = mc_amqpl:message(ExName, <<>>, Content2, #{id => <<"msg2">>}),
+    BQS3 = PQ:publish(Msg2, #message_properties{size = 0}, false, self(), BQS2),
     '' = PQ:info(head_message_timestamp, BQS3),
     %% Consume message with no timestamp.
     {{Msg2, _, _}, BQS4} = PQ:fetch(false, BQS3),
@@ -398,12 +391,82 @@ info_head_message_timestamp1(_Config) ->
     PQ:delete_and_terminate(a_whim, BQS6),
     passed.
 
+%% Because queue version is now ignored, this test is expected
+%% to always get a queue version 2.
+info_backing_queue_version(Config) ->
+    {Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    Q1 = <<"info-priority-queue-v1">>,
+    Q2 = <<"info-priority-queue-v2">>,
+    declare(Ch, Q1, [{<<"x-max-priority">>, byte, 3},
+                    {<<"x-queue-version">>, byte, 1}]),
+    declare(Ch, Q2, [{<<"x-max-priority">>, byte, 3},
+                    {<<"x-queue-version">>, byte, 2}]),
+    try
+        {ok, [{backing_queue_status, BQS1}]} = info(Config, Q1, [backing_queue_status]),
+        2 = proplists:get_value(version, BQS1),
+        {ok, [{backing_queue_status, BQS2}]} = info(Config, Q2, [backing_queue_status]),
+        2 = proplists:get_value(version, BQS2)
+    after
+        delete(Ch, Q1),
+        delete(Ch, Q2),
+        rabbit_ct_client_helpers:close_channel(Ch),
+        rabbit_ct_client_helpers:close_connection(Conn),
+        passed
+    end.
+
+info_oldest_message_received_timestamp(Config) ->
+    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
+      ?MODULE, info_oldest_message_received_timestamp1, [Config]).
+
+info_oldest_message_received_timestamp1(_Config) ->
+    QName = rabbit_misc:r(<<"/">>, queue,
+      <<"info_oldest_message_received_timestamp-queue">>),
+    ExName = rabbit_misc:r(<<"/">>, exchange, <<>>),
+    Q0 = rabbit_amqqueue:pseudo_queue(QName, self()),
+    Q1 = amqqueue:set_arguments(Q0, [{<<"x-max-priority">>, long, 2}]),
+    PQ = rabbit_priority_queue,
+    BQS1 = PQ:init(Q1, new, fun(_, _) -> ok end),
+    %% The queue is empty: no timestamp.
+    true = PQ:is_empty(BQS1),
+    '' = PQ:info(oldest_message_received_timestamp, BQS1),
+    %% Publish one message.
+    Content1 = #content{properties = #'P_basic'{priority = 1},
+                        payload_fragments_rev = []},
+    {ok, Msg1} = mc_amqpl:message(ExName, <<>>, Content1, #{id => <<"msg1">>}),
+    BQS2 = PQ:publish(Msg1, #message_properties{size = 0}, false, self(),
+                      BQS1),
+    Ts1 = PQ:info(oldest_message_received_timestamp, BQS2),
+    ?assert(is_integer(Ts1)),
+    %% Publish a higher priority message.
+    Content2 = #content{properties = #'P_basic'{priority = 2},
+                        payload_fragments_rev = []},
+    {ok, Msg2} = mc_amqpl:message(ExName, <<>>, Content2, #{id => <<"msg2">>}),
+    BQS3 = PQ:publish(Msg2, #message_properties{size = 0}, false, self(),
+                      BQS2),
+    %% Even though is highest priority, the lower priority message is older.
+    %% Timestamp hasn't changed.
+    ?assertEqual(Ts1, PQ:info(oldest_message_received_timestamp, BQS3)),
+    %% Consume message.
+    {{Msg2, _, _}, BQS4} = PQ:fetch(false, BQS3),
+    ?assertEqual(Ts1, PQ:info(oldest_message_received_timestamp, BQS4)),
+    %% Consume the first message, but do not acknowledge it
+    %% yet. The goal is to verify that the unacknowledged message's
+    %% timestamp is returned.
+    {{Msg1, _, AckTag}, BQS5} = PQ:fetch(true, BQS4),
+    ?assertEqual(Ts1, PQ:info(oldest_message_received_timestamp, BQS5)),
+    %% Ack message. The queue is empty now.
+    {[<<"msg1">>], BQS6} = PQ:ack([AckTag], BQS5),
+    true = PQ:is_empty(BQS6),
+    ?assertEqual('', PQ:info(oldest_message_received_timestamp, BQS6)),
+    PQ:delete_and_terminate(a_whim, BQS6),
+    passed.
+
 unknown_info_key(Config) ->
     {Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
     Q = <<"info-priority-queue">>,
     declare(Ch, Q, 3),
     publish(Ch, Q, [1, 2, 3]),
-    
+
     {ok, [{pid, _Pid}, {unknown_key, ''}]} = info(Config, Q, [pid, unknown_key]),
 
     delete(Ch, Q),
@@ -411,18 +474,23 @@ unknown_info_key(Config) ->
     rabbit_ct_client_helpers:close_connection(Conn),
     passed.
 
-ram_duration(_Config) ->
-    QName = rabbit_misc:r(<<"/">>, queue, <<"ram_duration-queue">>),
-    Q0 = rabbit_amqqueue:pseudo_queue(QName, self()),
-    Q1 = amqqueue:set_arguments(Q0, [{<<"x-max-priority">>, long, 5}]),
-    PQ = rabbit_priority_queue,
-    BQS1 = PQ:init(Q1, new, fun(_, _) -> ok end),
-    {_Duration1, BQS2} = PQ:ram_duration(BQS1),
-    BQS3 = PQ:set_ram_duration_target(infinity, BQS2),
-    BQS4 = PQ:set_ram_duration_target(1, BQS3),
-    {_Duration2, BQS5} = PQ:ram_duration(BQS4),
-    PQ:delete_and_terminate(a_whim, BQS5),
-    passed.
+update_rates(Config) ->
+    Node = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    {Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    Q = <<"update_rates-queue">>,
+    declare(Ch, Q, [{<<"x-max-priority">>, byte, 3}]),
+    QPid = queue_pid(Config, Node, rabbit_misc:r(<<"/">>, queue, Q)),
+    try
+        publish1(Ch, Q, 1),
+        QPid ! update_rates,
+        State = get_state(Config, Q),
+        ?assertEqual(live, State),
+        delete(Ch, Q)
+    after
+        rabbit_ct_client_helpers:close_channel(Ch),
+        rabbit_ct_client_helpers:close_connection(Conn),
+        passed
+    end.
 
 %%----------------------------------------------------------------------------
 
@@ -532,7 +600,7 @@ queue_pid(Config, Nodename, Q) ->
     [Pid] = [P || [{name, Q1}, {pid, P}] <- Info, Q =:= Q1],
     Pid.
 
-info(Config, Q, InfoKeys) -> 
+info(Config, Q, InfoKeys) ->
     Nodename = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
     {ok, Amq} = rabbit_ct_broker_helpers:rpc(
             Config, Nodename,
@@ -541,4 +609,14 @@ info(Config, Q, InfoKeys) ->
              Config, Nodename,
              rabbit_classic_queue, info, [Amq, InfoKeys]),
     {ok, Info}.
+
+get_state(Config, Q) ->
+    Nodename = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+    {ok, Amq} = rabbit_ct_broker_helpers:rpc(
+                  Config, Nodename,
+                  rabbit_amqqueue, lookup, [rabbit_misc:r(<<"/">>, queue, Q)]),
+    rabbit_ct_broker_helpers:rpc(
+      Config, Nodename,
+      amqqueue, get_state, [Amq]).
+
 %%----------------------------------------------------------------------------

@@ -3,7 +3,10 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 -compile(export_all).
+
+-define(TIMEOUT, 30_000).
 
 all() ->
     [
@@ -131,7 +134,7 @@ dead_queue_rejects(Config) ->
 
     receive
         {'basic.ack',_,_} -> ok
-    after 10000 ->
+    after ?TIMEOUT ->
         error(timeout_waiting_for_initial_ack)
     end,
 
@@ -190,7 +193,7 @@ kill_queue_expect_nack(Config, Ch, QueueName, BasicPublish, AmqpMsg, Tries) ->
                 ok;
             {'basic.ack',_,_} ->
                 retry
-        after 10000 ->
+        after ?TIMEOUT ->
                   error({timeout_waiting_for_nack, process_info(self(), messages)})
         end,
     case R of
@@ -278,7 +281,7 @@ policy_resets_to_default(Config) ->
         QueueName, QueueName, <<"queues">>,
         [{<<"max-length">>, MaxLength}, {<<"overflow">>, XOverflow}]),
 
-    timer:sleep(1000),
+    ?awaitMatch([_, _], get_policy_definition(Config, QueueName), 30000),
 
     [amqp_channel:call(Ch, #'basic.publish'{routing_key = QueueName},
                            #amqp_msg{payload = <<"HI">>})
@@ -301,6 +304,8 @@ policy_resets_to_default(Config) ->
         QueueName, QueueName, <<"queues">>,
         [{<<"max-length">>, MaxLength}]),
 
+    ?awaitMatch([_], get_policy_definition(Config, QueueName), 30000),
+
     NotRejectedMessage = <<"HI-not-rejected">>,
     amqp_channel:call(Ch, #'basic.publish'{routing_key = QueueName},
                           #amqp_msg{payload = NotRejectedMessage}),
@@ -318,6 +323,16 @@ policy_resets_to_default(Config) ->
         _ -> ok
     end.
 
+get_policy_definition(Config, QueueName) ->
+    {ok, Q} = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue, lookup,
+                                           [rabbit_misc:r(<<"/">>, queue, QueueName)]),
+    case amqqueue:get_policy(Q) of
+        undefined ->
+            undefined;
+        Policy ->
+            proplists:get_value(definition, Policy, [])
+    end.
+
 consume_all_messages(Ch, QueueName) ->
     consume_all_messages(Ch, QueueName, []).
 
@@ -330,19 +345,19 @@ consume_all_messages(Ch, QueueName, Msgs) ->
 
 assert_ack() ->
     receive {'basic.ack', _, _} -> ok
-    after 10000 -> error(timeout_waiting_for_ack)
+    after ?TIMEOUT -> error(timeout_waiting_for_ack)
     end,
     clean_acks_mailbox().
 
 assert_nack() ->
     receive {'basic.nack', _, _, _} -> ok
-    after 10000 -> error(timeout_waiting_for_nack)
+    after ?TIMEOUT -> error(timeout_waiting_for_nack)
     end,
     clean_acks_mailbox().
 
 assert_acks(N) ->
     receive {'basic.ack', N, _} -> ok
-    after 10000 -> error({timeout_waiting_for_ack, N})
+    after ?TIMEOUT -> error({timeout_waiting_for_ack, N})
     end,
     clean_acks_mailbox().
 

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -define(HEADER_ACCEPT_VERSION, "accept-version").
@@ -27,7 +27,10 @@
 -define(HEADER_PERSISTENT, "persistent").
 -define(HEADER_PREFETCH_COUNT, "prefetch-count").
 -define(HEADER_X_STREAM_OFFSET, "x-stream-offset").
+-define(HEADER_X_STREAM_FILTER, "x-stream-filter").
+-define(HEADER_X_STREAM_MATCH_UNFILTERED, "x-stream-match-unfiltered").
 -define(HEADER_PRIORITY, "priority").
+-define(HEADER_X_PRIORITY, "x-priority").
 -define(HEADER_RECEIPT, "receipt").
 -define(HEADER_REDELIVERED, "redelivered").
 -define(HEADER_REPLY_TO, "reply-to").
@@ -50,6 +53,7 @@
 -define(HEADER_X_MESSAGE_TTL, "x-message-ttl").
 -define(HEADER_X_QUEUE_NAME, "x-queue-name").
 -define(HEADER_X_QUEUE_TYPE, "x-queue-type").
+-define(HEADER_X_STREAM_FILTER_SIZE_BYTES, "x-stream-filter-size-bytes").
 
 -define(MESSAGE_ID_SEPARATOR, "@@").
 
@@ -67,7 +71,8 @@
                            ?HEADER_X_MAX_LENGTH_BYTES,
                            ?HEADER_X_MAX_PRIORITY,
                            ?HEADER_X_MESSAGE_TTL,
-                           ?HEADER_X_QUEUE_TYPE
+                           ?HEADER_X_QUEUE_TYPE,
+                           ?HEADER_X_STREAM_FILTER_SIZE_BYTES
                           ]).
 
 -define(HEADER_PARAMS, [

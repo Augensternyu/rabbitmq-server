@@ -4,13 +4,12 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_k8s).
 -behaviour(rabbit_peer_discovery_backend).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbitmq_peer_discovery_common/include/rabbit_peer_discovery.hrl").
 -include("rabbit_peer_discovery_k8s.hrl").
 
@@ -68,33 +67,29 @@ register() ->
 unregister() ->
     ok.
 
--spec lock(Node :: node()) -> {ok, {{ResourceId :: string(), LockRequesterId :: node()}, Nodes :: [node()]}} |
-                              {error, Reason :: string()}.
+-spec lock(Nodes :: [node()]) ->
+    {ok, {{ResourceId :: string(), LockRequesterId :: node()}, Nodes :: [node()]}} |
+    {error, Reason :: string()}.
 
-lock(Node) ->
-  %% call list_nodes/0 externally such that meck can mock the function
-  case ?MODULE:list_nodes() of
-    {ok, {Nodes, disc}} ->
-      case lists:member(Node, Nodes) of
+lock(Nodes) ->
+    Node = node(),
+    case lists:member(Node, Nodes) of
         true ->
-          rabbit_log:info("Will try to lock connecting to nodes ~tp", [Nodes]),
-          LockId = rabbit_nodes:lock_id(Node),
-          Retries = rabbit_nodes:lock_retries(),
-          case global:set_lock(LockId, Nodes, Retries) of
-            true ->
-              {ok, {LockId, Nodes}};
-            false ->
-              {error, io_lib:format("Acquiring lock taking too long, bailing out after ~b retries", [Retries])}
-          end;
+            rabbit_log:info("Will try to lock connecting to nodes ~tp", [Nodes]),
+            LockId = rabbit_nodes:lock_id(Node),
+            Retries = rabbit_nodes:lock_retries(),
+            case global:set_lock(LockId, Nodes, Retries) of
+                true ->
+                    {ok, {LockId, Nodes}};
+                false ->
+                    {error, io_lib:format("Acquiring lock taking too long, bailing out after ~b retries", [Retries])}
+            end;
         false ->
-          %% Don't try to acquire the global lock when local node is not discoverable by peers.
-          %% This branch is just an additional safety check. We should never run into this branch
-          %% because the local Pod is in state 'Running' and we listed both ready and not-ready addresses.
-          {error, lists:flatten(io_lib:format("Local node ~ts is not part of discovered nodes ~tp", [Node, Nodes]))}
-      end;
-    {error, _} = Error ->
-      Error
-  end.
+            %% Don't try to acquire the global lock when local node is not discoverable by peers.
+            %% This branch is just an additional safety check. We should never run into this branch
+            %% because the local Pod is in state 'Running' and we listed both ready and not-ready addresses.
+            {error, lists:flatten(io_lib:format("Local node ~ts is not part of discovered nodes ~tp", [Node, Nodes]))}
+    end.
 
 -spec unlock({{ResourceId :: string(), LockRequestedId :: atom()}, Nodes :: [atom()]}) -> 'ok'.
 unlock({LockId, Nodes}) ->
@@ -120,14 +115,29 @@ make_request() ->
     M = ?CONFIG_MODULE:config_map(?BACKEND_CONFIG_KEY),
     {ok, Token} = rabbit_misc:raw_read_file(get_config_key(k8s_token_path, M)),
     Token1 = binary:replace(Token, <<"\n">>, <<>>),
+
+    rabbit_log:debug("Will issue a Kubernetes API request client with the following settings: ~tp", [M]),
+
+    TLSClientOpts0 = maps:get(ssl_options, M, []),
+    LegacyCACertfilePath = get_config_key(k8s_cert_path, M),
+    %% merge legacy CA certificate file argument if TLSClientOpts does not have its modern counterpart set
+    TLSClientOpts = case proplists:get_value(cacertfile, TLSClientOpts0, undefined) of
+        undefined ->
+            [{cacertfile, LegacyCACertfilePath} | TLSClientOpts0];
+        _Other ->
+            TLSClientOpts0
+    end,
+
+    rabbit_log:debug("Will issue a Kubernetes API request client with the following TLS options: ~tp", [TLSClientOpts]),
+
     ?HTTPC_MODULE:get(
       get_config_key(k8s_scheme, M),
       get_config_key(k8s_host, M),
       get_config_key(k8s_port, M),
-      base_path(endpoints,get_config_key(k8s_service_name, M)),
+      base_path(endpoints, get_config_key(k8s_service_name, M)),
       [],
       [{"Authorization", "Bearer " ++ binary_to_list(Token1)}],
-      [{ssl, [{cacertfile, get_config_key(k8s_cert_path, M)}]}]).
+      [{ssl, TLSClientOpts}]).
 
 %% @spec node_name(k8s_endpoint) -> list()
 %% @doc Return a full rabbit node name, appending hostname suffix

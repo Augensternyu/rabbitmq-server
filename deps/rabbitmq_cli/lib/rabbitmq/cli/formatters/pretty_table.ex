@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Formatters.PrettyTable do
   @behaviour RabbitMQ.CLI.FormatterBehaviour
@@ -11,6 +11,10 @@ defmodule RabbitMQ.CLI.Formatters.PrettyTable do
 
   require Record
   import Record
+
+  # Elixir 1.15 compiler optimizations require that we explicitly
+  # add the stdout_formatter code path
+  true = Code.append_path(Path.join([System.get_env("DEPS_DIR"), "stdout_formatter", "ebin"]))
 
   defrecord :table,
             extract(:table,

@@ -2,12 +2,19 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_maintenance).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
+
+%% FIXME: Ra consistent queries are currently fragile in the sense that the
+%% query function may run on a remote node and the function reference or MFA
+%% may not be valid on that node. That's why consistent queries in this module
+%% are in fact local queries when Khepri is enabled.
+%%
+%% See `rabbit_db_maintenance:get_consistent_in_khepri/1'.
 
 -export([
     is_enabled/0,
@@ -27,8 +34,7 @@
     primary_replica_transfer_candidate_nodes/0,
     random_primary_replica_transfer_candidate_node/2,
     transfer_leadership_of_quorum_queues/1,
-    transfer_leadership_of_classic_mirrored_queues/1,
-    boot/0
+    table_definitions/0
 ]).
 
 -define(DEFAULT_STATUS,  regular).
@@ -44,13 +50,8 @@
 %% Boot
 %%
 
--rabbit_boot_step({rabbit_maintenance_mode_state,
-    [{description, "initializes maintenance mode state"},
-        {mfa,         {?MODULE, boot, []}},
-        {requires,    networking}]}).
-
-boot() ->
-    rabbit_db_maintenance:setup_schema().
+table_definitions() ->
+    rabbit_db_maintenance:table_definitions().
 
 %%
 %% API
@@ -84,6 +85,8 @@ drain() ->
         undefined -> ok;
         _Pid -> transfer_leadership_of_stream_coordinator(TransferCandidates)
     end,
+
+    transfer_leadership_of_metadata_store(TransferCandidates),
 
     %% allow plugins to react
     rabbit_event:notify(maintenance_draining, #{
@@ -209,43 +212,17 @@ transfer_leadership_of_quorum_queues(_TransferCandidates) ->
      end || Q <- Queues],
     rabbit_log:info("Leadership transfer for quorum queues hosted on this node has been initiated").
 
--spec transfer_leadership_of_classic_mirrored_queues([node()]) -> ok.
-%% This function is no longer used by maintanence mode. We retain it in case
-%% classic mirrored queue leadership transfer would be reconsidered.
-%%
-%% With a lot of CMQs in a cluster, the transfer procedure can take prohibitively long
-%% for a pre-upgrade task.
-transfer_leadership_of_classic_mirrored_queues([]) ->
-    rabbit_log:warning("Skipping leadership transfer of classic mirrored queues: no candidate "
-                       "(online, not under maintenance) nodes to transfer to!");
-transfer_leadership_of_classic_mirrored_queues(TransferCandidates) ->
-    Queues = rabbit_amqqueue:list_local_mirrored_classic_queues(),
-    ReadableCandidates = readable_candidate_list(TransferCandidates),
-    rabbit_log:info("Will transfer leadership of ~b classic mirrored queues hosted on this node to these peer nodes: ~ts",
-                    [length(Queues), ReadableCandidates]),
-    [begin
-         Name = amqqueue:get_name(Q),
-         ExistingReplicaNodes = [node(Pid) || Pid <- amqqueue:get_sync_slave_pids(Q)],
-         rabbit_log:debug("Local ~ts has replicas on nodes ~ts",
-                          [rabbit_misc:rs(Name), readable_candidate_list(ExistingReplicaNodes)]),
-         case random_primary_replica_transfer_candidate_node(TransferCandidates, ExistingReplicaNodes) of
-             {ok, Pick} ->
-                 rabbit_log:debug("Will transfer leadership of local ~ts. Planned target node: ~ts",
-                          [rabbit_misc:rs(Name), Pick]),
-                 case rabbit_mirror_queue_misc:migrate_leadership_to_existing_replica(Q, Pick) of
-                     {migrated, NewPrimary} ->
-                         rabbit_log:debug("Successfully transferred leadership of queue ~ts to node ~ts",
-                                          [rabbit_misc:rs(Name), NewPrimary]);
-                     Other ->
-                         rabbit_log:warning("Could not transfer leadership of queue ~ts: ~tp",
-                                            [rabbit_misc:rs(Name), Other])
-                 end;
-             undefined ->
-                 rabbit_log:warning("Could not transfer leadership of queue ~ts: no suitable candidates?",
-                                    [Name])
-         end
-     end || Q <- Queues],
-    rabbit_log:info("Leadership transfer for local classic mirrored queues is complete").
+transfer_leadership_of_metadata_store(TransferCandidates) ->
+    rabbit_log:info("Will transfer leadership of metadata store with current leader on this node",
+                    []),
+    case rabbit_khepri:transfer_leadership(TransferCandidates) of
+        {ok, Node} when Node == node(); Node == undefined ->
+            rabbit_log:info("Skipping leadership transfer of metadata store: current leader is not on this node");
+        {ok, Node} ->
+            rabbit_log:info("Leadership transfer for metadata store on this node has been done. The new leader is ~p", [Node]);
+        Error ->
+            rabbit_log:warning("Skipping leadership transfer of metadata store: ~p", [Error])
+    end.
 
 -spec transfer_leadership_of_stream_coordinator([node()]) -> ok.
 transfer_leadership_of_stream_coordinator([]) ->
@@ -314,24 +291,21 @@ random_nth(Nodes) ->
 
 revive_local_quorum_queue_replicas() ->
     Queues = rabbit_amqqueue:list_local_followers(),
-    [begin
-        Name = amqqueue:get_name(Q),
-        rabbit_log:debug("Will trigger a leader election for local quorum queue ~ts",
-                         [rabbit_misc:rs(Name)]),
-        %% start local QQ replica (Ra server) of this queue
-        {Prefix, _Node} = amqqueue:get_pid(Q),
-        RaServer = {Prefix, node()},
-        rabbit_log:debug("Will start Ra server ~tp", [RaServer]),
-        case rabbit_quorum_queue:restart_server(RaServer) of
-            ok     ->
-                rabbit_log:debug("Successfully restarted Ra server ~tp", [RaServer]);
-            {error, {already_started, _Pid}} ->
-                rabbit_log:debug("Ra server ~tp is already running", [RaServer]);
-            {error, nodedown} ->
-                rabbit_log:error("Failed to restart Ra server ~tp: target node was reported as down")
-        end
-     end || Q <- Queues],
-    rabbit_log:info("Restart of local quorum queue replicas is complete").
+    %% NB: this function ignores the first argument so we can just pass the
+    %% empty binary as the vhost name.
+    {Recovered, Failed} = rabbit_quorum_queue:recover(<<>>, Queues),
+    rabbit_log:debug("Successfully revived ~b quorum queue replicas",
+                     [length(Recovered)]),
+    case length(Failed) of
+        0 ->
+            ok;
+        NumFailed ->
+            rabbit_log:error("Failed to revive ~b quorum queue replicas",
+                             [NumFailed])
+    end,
+
+    rabbit_log:info("Restart of local quorum queue replicas is complete"),
+    ok.
 
 %%
 %% Implementation
@@ -349,6 +323,3 @@ ok_or_first_error(ok, Acc) ->
     Acc;
 ok_or_first_error({error, _} = Err, _Acc) ->
     Err.
-
-readable_candidate_list(Nodes) ->
-    string:join(lists:map(fun rabbit_data_coercion:to_list/1, Nodes), ", ").

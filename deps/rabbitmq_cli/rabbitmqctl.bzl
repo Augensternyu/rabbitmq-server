@@ -1,5 +1,11 @@
 load("@bazel_skylib//lib:shell.bzl", "shell")
 load(
+    "@rules_elixir//private:elixir_toolchain.bzl",
+    "elixir_dirs",
+    "erlang_dirs",
+    "maybe_install_erlang",
+)
+load(
     "@rules_erlang//:erlang_app_info.bzl",
     "ErlangAppInfo",
     "flat_deps",
@@ -11,12 +17,6 @@ load(
 load(
     "@rules_erlang//private:util.bzl",
     "additional_file_dest_relative_path",
-)
-load(
-    "//bazel/elixir:elixir_toolchain.bzl",
-    "elixir_dirs",
-    "erlang_dirs",
-    "maybe_install_erlang",
 )
 
 ElixirAppInfo = provider(
@@ -34,23 +34,50 @@ ElixirAppInfo = provider(
     },
 )
 
+def _copy(ctx, src, dst):
+    ctx.actions.run_shell(
+        inputs = [src],
+        outputs = [dst],
+        command = """set -euo pipefail
+
+cp -RL "{src}" "{dst}"
+""".format(
+            src = src.path,
+            dst = dst.path,
+        ),
+    )
+
 def deps_dir_contents(ctx, deps, dir):
     files = []
     for dep in deps:
         lib_info = dep[ErlangAppInfo]
-        for src in lib_info.include + lib_info.beam + lib_info.srcs:
+        files_by_path = {}
+        for src in lib_info.include + lib_info.srcs:
             if not src.is_directory:
                 rp = additional_file_dest_relative_path(dep.label, src)
+                files_by_path[rp] = src
+            else:
+                fail("unexpected directory in", lib_info)
+        for rp, src in files_by_path.items():
+            f = ctx.actions.declare_file(path_join(
+                dir,
+                lib_info.app_name,
+                rp,
+            ))
+            _copy(ctx, src, f)
+            files.append(f)
+        for beam in lib_info.beam:
+            if not beam.is_directory:
                 f = ctx.actions.declare_file(path_join(
                     dir,
                     lib_info.app_name,
-                    rp,
+                    "ebin",
+                    beam.basename,
                 ))
-                ctx.actions.symlink(
-                    output = f,
-                    target_file = src,
-                )
-                files.extend([src, f])
+                _copy(ctx, beam, f)
+                files.append(f)
+            else:
+                fail("unexpected directory in", lib_info)
     return files
 
 def _impl(ctx):
@@ -122,19 +149,14 @@ export ERL_COMPILER_OPTIONS=deterministic
 for archive in {archives}; do
     "${{ABS_ELIXIR_HOME}}"/bin/mix archive.install --force $ORIGINAL_DIR/$archive
 done
-for d in {precompiled_deps}; do
-    mkdir -p _build/${{MIX_ENV}}/lib/$d
-    ln -s ${{DEPS_DIR}}/$d/ebin _build/${{MIX_ENV}}/lib/$d
-    ln -s ${{DEPS_DIR}}/$d/include _build/${{MIX_ENV}}/lib/$d
-done
 "${{ABS_ELIXIR_HOME}}"/bin/mix deps.compile
 "${{ABS_ELIXIR_HOME}}"/bin/mix compile
 "${{ABS_ELIXIR_HOME}}"/bin/mix escript.build
 
 cp escript/rabbitmqctl ${{ABS_ESCRIPT_PATH}}
 
-cp _build/${{MIX_ENV}}/lib/rabbitmqctl/ebin/* ${{ABS_EBIN_DIR}}
-cp _build/${{MIX_ENV}}/lib/rabbitmqctl/consolidated/* ${{ABS_CONSOLIDATED_DIR}}
+cp -RL _build/${{MIX_ENV}}/lib/rabbitmqctl/ebin/* ${{ABS_EBIN_DIR}}
+cp -RL _build/${{MIX_ENV}}/lib/rabbitmqctl/consolidated/* ${{ABS_CONSOLIDATED_DIR}}
 
 # remove symlinks from the _build directory since it
 # is not used, and bazel does not allow them
@@ -149,7 +171,7 @@ find . -type l -delete
         escript_path = escript.path,
         ebin_dir = ebin.path,
         consolidated_dir = consolidated.path,
-        archives = "".join([shell.quote(a.path) for a in ctx.files.archives]),
+        archives = " ".join([shell.quote(a.path) for a in ctx.files.archives]),
         precompiled_deps = " ".join([
             dep[ErlangAppInfo].app_name
             for dep in ctx.attr.deps
@@ -227,7 +249,7 @@ rabbitmqctl_private = rule(
         "source_deps": attr.label_keyed_string_dict(),
     },
     toolchains = [
-        "//bazel/elixir:toolchain_type",
+        "@rules_elixir//:toolchain_type",
     ],
     provides = [ElixirAppInfo],
     executable = True,
@@ -351,7 +373,7 @@ elixir_app_to_erlang_app = rule(
         ),
     },
     toolchains = [
-        "//bazel/elixir:toolchain_type",
+        "@rules_elixir//:toolchain_type",
     ],
     provides = [ErlangAppInfo],
 )
@@ -385,7 +407,7 @@ def rabbitmqctl(
 
     elixir_app_to_erlang_app(
         name = "elixir",
-        elixir_as_app = Label("//bazel/elixir:erlang_app"),
+        elixir_as_app = Label("@rules_elixir//elixir:elixir"),
         elixir_app = ":" + name,
         mode = "elixir",
         visibility = visibility,
@@ -393,7 +415,7 @@ def rabbitmqctl(
 
     elixir_app_to_erlang_app(
         name = "erlang_app",
-        elixir_as_app = Label("//bazel/elixir:erlang_app"),
+        elixir_as_app = Label("@rules_elixir//elixir:elixir"),
         elixir_app = ":" + name,
         mode = "app",
         visibility = visibility,

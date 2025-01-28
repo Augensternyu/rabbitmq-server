@@ -65,7 +65,7 @@ plt(
     name = "deps_plt",
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
 )
 
@@ -85,7 +85,6 @@ rabbitmq_home(
     name = "broker-for-tests-home",
     plugins = [
         "//deps/rabbit:erlang_app",
-        "//deps/rabbitmq_amqp1_0:erlang_app",
         ":erlang_app",
     ],
 )
@@ -100,16 +99,7 @@ rabbitmq_integration_suite(
 )
 
 rabbitmq_suite(
-    name = "rabbit_shovel_mgmt_SUITE",
-    deps = [
-        "//deps/rabbit_common:erlang_app",
-        "//deps/rabbitmq_management_agent:erlang_app",
-        "@meck//:erlang_app",
-    ],
-)
-
-rabbitmq_suite(
-    name = "rabbit_shovel_mgmt_util_SUITE",
+    name = "unit_SUITE",
     deps = [
         "//deps/rabbit_common:erlang_app",
         "//deps/rabbitmq_shovel:erlang_app",

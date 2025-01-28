@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2016-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 defmodule ChangeClusterNodeTypeCommandTest do
   use ExUnit.Case, async: false
@@ -59,10 +59,21 @@ defmodule ChangeClusterNodeTypeCommandTest do
   # end
 
   test "run: request to a node with running RabbitMQ app fails", context do
-    assert match?(
-             {:error, :mnesia_unexpectedly_running},
-             @command.run(["ram"], context[:opts])
-           )
+    node = RabbitMQ.CLI.Core.Helpers.normalise_node(context[:node], :shortnames)
+
+    case :rabbit_misc.rpc_call(node, :rabbit_khepri, :is_enabled, []) do
+      true ->
+        assert match?(
+                 {:error, _},
+                 @command.run(["ram"], context[:opts])
+               )
+
+      false ->
+        assert match?(
+                 {:error, :mnesia_unexpectedly_running},
+                 @command.run(["ram"], context[:opts])
+               )
+    end
   end
 
   test "run: request to an unreachable node returns a badrpc", _context do

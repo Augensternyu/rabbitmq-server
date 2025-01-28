@@ -2,12 +2,16 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_oauth2_scope).
 
--export([vhost_access/2, resource_access/3, topic_access/4, concat_scopes/2]).
+-export([vhost_access/2,
+        resource_access/3,
+        topic_access/4,
+        concat_scopes/2,
+        filter_matching_scope_prefix_and_drop_it/2]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
@@ -88,3 +92,20 @@ parse_resource_pattern(Pattern, Permission) ->
             {VhostPattern, NamePattern, RoutingKeyPattern, Permission};
         _Other -> ignore
     end.
+
+-spec filter_matching_scope_prefix_and_drop_it(list(), binary()|list()) -> list().
+filter_matching_scope_prefix_and_drop_it(Scopes, <<"">>) -> Scopes;
+filter_matching_scope_prefix_and_drop_it(Scopes, PrefixPattern)  ->
+    PatternLength = byte_size(PrefixPattern),
+    lists:filtermap(
+        fun(ScopeEl) ->
+            case binary:match(ScopeEl, PrefixPattern) of
+                {0, PatternLength} ->
+                    ElLength = byte_size(ScopeEl),
+                    {true,
+                     binary:part(ScopeEl,
+                                 {PatternLength, ElLength - PatternLength})};
+                _ -> false
+            end
+        end,
+        Scopes).

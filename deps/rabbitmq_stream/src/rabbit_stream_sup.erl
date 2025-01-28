@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stream_sup).
@@ -44,16 +44,8 @@ init([]) ->
             _ ->
                 {rabbit_networking:ensure_ssl(),
                  application:get_env(rabbitmq_stream, num_ssl_acceptors, 10),
-                 case rabbit_networking:poodle_check('STREAM') of
-                     ok ->
-                         SslListeners0;
-                     danger ->
-                         []
-                 end}
+                 SslListeners0}
         end,
-
-    Nodes = rabbit_nodes:list_members(),
-    OsirisConf = #{nodes => Nodes},
 
     ServerConfiguration =
         #{initial_credits =>
@@ -70,11 +62,6 @@ init([]) ->
               application:get_env(rabbitmq_stream, heartbeat,
                                   ?DEFAULT_HEARTBEAT)},
 
-    StreamManager =
-        #{id => rabbit_stream_manager,
-          type => worker,
-          start => {rabbit_stream_manager, start_link, [OsirisConf]}},
-
     MetricsGc =
         #{id => rabbit_stream_metrics_gc,
           type => worker,
@@ -82,7 +69,7 @@ init([]) ->
 
     {ok,
      {{one_for_all, 10, 10},
-      [StreamManager, MetricsGc]
+      [MetricsGc]
       ++ listener_specs(fun tcp_listener_spec/1,
                         [SocketOpts, ServerConfiguration, NumTcpAcceptors],
                         Listeners)

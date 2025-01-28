@@ -5,7 +5,7 @@ PROJECT_DESCRIPTION = RabbitMQ Server
 # other components. If PROJECT_VERSION is unset, then an empty variable
 # is propagated and the default version will fallback to the default
 # value from rabbitmq-components.mk.
-export RABBITMQ_VERSION = $(PROJECT_VERSION)
+export RABBITMQ_VERSION := $(PROJECT_VERSION)
 
 # Release artifacts are put in $(PACKAGES_DIR).
 PACKAGES_DIR ?= $(abspath PACKAGES)
@@ -14,26 +14,26 @@ PACKAGES_DIR ?= $(abspath PACKAGES)
 include plugins.mk
 
 # An additional list of plugins to include in a RabbitMQ release,
-# on top of the standard plugins. For example, looking_glass.
+# on top of the standard plugins.
 #
 # Note: When including NIFs in a release make sure to build
 # them on the appropriate platform for the target environment.
-# For example build looking_glass on Linux when targeting Docker.
+# For example build on Linux when targeting Docker.
 ADDITIONAL_PLUGINS ?=
 
 DEPS = rabbit_common rabbit $(PLUGINS) $(ADDITIONAL_PLUGINS)
 
 DEP_PLUGINS = rabbit_common/mk/rabbitmq-dist.mk \
-	      rabbit_common/mk/rabbitmq-run.mk \
-	      rabbit_common/mk/rabbitmq-tools.mk
+	      rabbit_common/mk/rabbitmq-run.mk
 
 DISABLE_DISTCLEAN = 1
 
+ifeq ($(filter-out xref,$(MAKECMDGOALS)),)
 XREF_SCOPE = app deps
 
 # We add all the applications that are in non-standard paths
 # so they are included in the analyses as well.
-XREF_EXTRA_APP_DIRS = $(filter-out deps/rabbitmq_cli/_build/dev/lib/rabbit_common/,$(wildcard deps/rabbitmq_cli/_build/dev/lib/*/)) deps/rabbit/apps/rabbitmq_prelaunch/
+XREF_EXTRA_APP_DIRS = $(filter-out deps/rabbitmq_cli/_build/dev/lib/rabbit_common/,$(wildcard deps/rabbitmq_cli/_build/dev/lib/*/)) deps/rabbitmq_prelaunch/
 
 # For Elixir protocols the right fix is to include the consolidated/
 # folders in addition to ebin/. However this creates conflicts because
@@ -46,17 +46,44 @@ XREF_IGNORE = [ \
     {'Elixir.RabbitMQ.CLI.Core.DataCoercion',impl_for,1}]
 
 # Include Elixir libraries in the Xref checks.
-xref: ERL_LIBS := $(ERL_LIBS):$(CURDIR)/apps:$(CURDIR)/deps:$(dir $(shell elixir --eval ":io.format '~s~n', [:code.lib_dir :elixir ]"))
+xref: ERL_LIBS := $(ERL_LIBS):$(CURDIR)/apps:$(CURDIR)/deps:$(dir $(shell elixir --eval ':io.format "~s~n", [:code.lib_dir :elixir ]'))
+endif
 
 ifneq ($(wildcard deps/.hex/cache.erl),)
 deps:: restore-hex-cache-ets-file
 endif
 
 include rabbitmq-components.mk
+
+# Set PROJECT_VERSION, calculated in rabbitmq-components.mk,
+# in stone now, because in this Makefile we will be using it
+# multiple times (including for release file names and whatnot).
+PROJECT_VERSION := $(PROJECT_VERSION)
+
+# Fetch/build community plugins.
+#
+# To include community plugins in commands, use
+# `make COMMUNITY_PLUGINS=1` or export the variable.
+# They are not included otherwise. Note that only
+# the top-level Makefile can do this.
+#
+# Note that the community plugins will be fetched using
+# SSH and therefore may be subject to GH authentication.
+
+ifdef COMMUNITY_PLUGINS
+DEPS += $(RABBITMQ_COMMUNITY)
+endif
+
 include erlang.mk
 include mk/github-actions.mk
 include mk/bazel.mk
-include mk/topic-branches.mk
+
+# If PLUGINS was set when we use run-broker we want to
+# fill in the enabled plugins list. PLUGINS is a more
+# natural space-separated list.
+ifdef PLUGINS
+RABBITMQ_ENABLED_PLUGINS ?= $(call comma_list,$(PLUGINS))
+endif
 
 # --------------------------------------------------------------------
 # Mix Hex cache management.
@@ -137,7 +164,6 @@ RSYNC_FLAGS += -a $(RSYNC_V)		\
 	       --exclude '*.pyc'			\
 	       --exclude '.git*'			\
 	       --exclude '.hg*'				\
-	       --exclude '.travis.yml*'			\
 	       --exclude '.*.plt'			\
 	       --exclude '*.bzl'			\
 	       --exclude '*.bazel'			\
@@ -168,7 +194,6 @@ RSYNC_FLAGS += -a $(RSYNC_V)		\
 	       --include 'cli/plugins'			\
 	       --exclude '$(notdir $(DIST_DIR))/'	\
 	       --exclude 'test'				\
-	       --exclude 'xrefr'			\
 	       --exclude '/$(notdir $(PACKAGES_DIR))/'	\
 	       --exclude '/PACKAGES/'			\
 	       --exclude '/amqp_client/doc/'		\
@@ -176,8 +201,6 @@ RSYNC_FLAGS += -a $(RSYNC_V)		\
 	       --exclude '/cowboy/doc/'			\
 	       --exclude '/cowboy/examples/'		\
 	       --exclude '/rabbit/escript/'		\
-	       --exclude '/rabbitmq_amqp1_0/test/swiftmq/build/'\
-	       --exclude '/rabbitmq_amqp1_0/test/swiftmq/swiftmq*'\
 	       --exclude '/rabbitmq_cli/escript/'	\
 	       --exclude '/rabbitmq_mqtt/test/build/'	\
 	       --exclude '/rabbitmq_mqtt/test/test_client/'\
@@ -559,3 +582,79 @@ install-windows-docs: install-windows-erlapp
 		*) mv "$$file" "$$file.txt" ;; \
 		esac; \
 	done
+
+INTERNAL_DEPS := \
+	   amqp10_client \
+	   amqp10_common \
+	   amqp_client \
+	   oauth2_client \
+	   rabbit_common \
+	   rabbitmq_ct_client_helpers \
+	   rabbitmq_ct_helpers \
+	   rabbitmq_stream_common \
+	   trust_store_http
+
+TIER1_PLUGINS := \
+	   rabbitmq_amqp_client \
+	   rabbitmq_amqp1_0 \
+	   rabbitmq_auth_backend_cache \
+	   rabbitmq_auth_backend_http \
+	   rabbitmq_auth_backend_ldap \
+	   rabbitmq_auth_backend_oauth2 \
+	   rabbitmq_auth_mechanism_ssl \
+	   rabbitmq_aws \
+	   rabbitmq_consistent_hash_exchange \
+	   rabbitmq_event_exchange \
+	   rabbitmq_federation \
+	   rabbitmq_federation_management \
+	   rabbitmq_federation_prometheus \
+	   rabbitmq_jms_topic_exchange \
+	   rabbitmq_management \
+	   rabbitmq_management_agent \
+	   rabbitmq_mqtt \
+	   rabbitmq_peer_discovery_aws \
+	   rabbitmq_peer_discovery_common \
+	   rabbitmq_peer_discovery_consul \
+	   rabbitmq_peer_discovery_etcd \
+	   rabbitmq_peer_discovery_k8s \
+	   rabbitmq_prelaunch \
+	   rabbitmq_prometheus \
+	   rabbitmq_random_exchange \
+	   rabbitmq_recent_history_exchange \
+	   rabbitmq_sharding \
+	   rabbitmq_shovel \
+	   rabbitmq_shovel_management \
+	   rabbitmq_shovel_prometheus \
+	   rabbitmq_stomp \
+	   rabbitmq_stream \
+	   rabbitmq_stream_management \
+	   rabbitmq_top \
+	   rabbitmq_tracing \
+	   rabbitmq_trust_store \
+	   rabbitmq_web_dispatch \
+	   rabbitmq_web_mqtt \
+	   rabbitmq_web_mqtt_examples \
+	   rabbitmq_web_stomp \
+	   rabbitmq_web_stomp_examples
+
+YTT ?= ytt
+
+actions-workflows: .github/workflows/test.yaml .github/workflows/test-mixed-versions.yaml
+
+.PHONY: .github/workflows/test.yaml .github/workflows/test-mixed-versions.yaml
+
+.github/workflows/test.yaml: .github/workflows/templates/test.template.yaml
+	$(gen_verbose) $(YTT) \
+		--file $< \
+		--data-value-yaml internal_deps=[$(subst $(space),$(comma),$(foreach s,$(INTERNAL_DEPS),"$s"))] \
+		--data-value-yaml tier1_plugins=[$(subst $(space),$(comma),$(foreach s,$(TIER1_PLUGINS),"$s"))] \
+		| sed 's/^true:/on:/' \
+		| sed 's/pull_request: null/pull_request:/'> $@
+
+.github/workflows/test-mixed-versions.yaml: .github/workflows/templates/test-mixed-versions.template.yaml
+	$(gen_verbose) $(YTT) \
+		--file $< \
+		--data-value-yaml internal_deps=[$(subst $(space),$(comma),$(foreach s,$(INTERNAL_DEPS),"$s"))] \
+		--data-value-yaml tier1_plugins=[$(subst $(space),$(comma),$(foreach s,$(TIER1_PLUGINS),"$s"))] \
+		| sed 's/^true:/on:/' \
+		| sed 's/pull_request: null/pull_request:/'> $@

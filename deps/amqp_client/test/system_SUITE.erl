@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(system_SUITE).
@@ -335,14 +335,16 @@ safe_call_timeouts_test(Params = #amqp_params_network{}) ->
     meck:unload(amqp_network_connection);
 
 safe_call_timeouts_test(Params = #amqp_params_direct{}) ->
+    %% We must mock net_kernel:get_net_ticktime/0 as changing
+    %% the tick time directly could lead to nodes disconnecting.
+    meck:new(net_kernel, [unstick, passthrough]),
+
     TestCallTimeout = 30000,
-    NetTicktime0 = net_kernel:get_net_ticktime(),
     amqp_util:update_call_timeout(TestCallTimeout),
 
     %% 1. NetTicktime >= DIRECT_OPERATION_TIMEOUT (120s)
     NetTicktime1 = 140,
-    net_kernel:set_net_ticktime(NetTicktime1, 1),
-    wait_until_net_ticktime(NetTicktime1),
+    meck:expect(net_kernel, get_net_ticktime, fun() -> NetTicktime1 end),
 
     {ok, Connection1} = amqp_connection:start(Params),
     ?assertEqual((NetTicktime1 * 1000) + ?CALL_TIMEOUT_DEVIATION,
@@ -356,14 +358,11 @@ safe_call_timeouts_test(Params = #amqp_params_direct{}) ->
 
     %% 2. Transitioning NetTicktime >= DIRECT_OPERATION_TIMEOUT (120s)
     NetTicktime2 = 120,
-    net_kernel:set_net_ticktime(NetTicktime2, 1),
-    ?assertEqual({ongoing_change_to, NetTicktime2}, net_kernel:get_net_ticktime()),
+    meck:expect(net_kernel, get_net_ticktime, fun() -> {ongoing_change_to, NetTicktime2} end),
 
     {ok, Connection2} = amqp_connection:start(Params),
     ?assertEqual((NetTicktime2 * 1000) + ?CALL_TIMEOUT_DEVIATION,
         amqp_util:call_timeout()),
-
-    wait_until_net_ticktime(NetTicktime2),
 
     ?assertEqual(ok, amqp_connection:close(Connection2)),
     wait_for_death(Connection2),
@@ -373,15 +372,14 @@ safe_call_timeouts_test(Params = #amqp_params_direct{}) ->
 
     %% 3. NetTicktime < DIRECT_OPERATION_TIMEOUT (120s)
     NetTicktime3 = 60,
-    net_kernel:set_net_ticktime(NetTicktime3, 1),
-    wait_until_net_ticktime(NetTicktime3),
+    meck:expect(net_kernel, get_net_ticktime, fun() -> NetTicktime3 end),
 
     {ok, Connection3} = amqp_connection:start(Params),
     ?assertEqual((?DIRECT_OPERATION_TIMEOUT + ?CALL_TIMEOUT_DEVIATION),
         amqp_util:call_timeout()),
 
-    net_kernel:set_net_ticktime(NetTicktime0, 1),
-    wait_until_net_ticktime(NetTicktime0),
+    meck:unload(net_kernel),
+
     ?assertEqual(ok, amqp_connection:close(Connection3)),
     wait_for_death(Connection3),
 
@@ -1342,12 +1340,18 @@ channel_writer_death(Config) ->
         Ret = amqp_channel:call(Channel, QoS),
         throw({unexpected_success, Ret})
     catch
-        exit:{{function_clause,
-               [{rabbit_channel, check_user_id_header, _, _} | _]}, _}
-        when ConnType =:= direct -> ok;
+        exit:{{{badrecord, <<>>},
+               [{rabbit_channel, _, _, _} | _]}, _}
+          when ConnType =:= direct -> ok;
 
         exit:{{infrastructure_died, {unknown_properties_record, <<>>}}, _}
-        when ConnType =:= network -> ok
+        when ConnType =:= network -> ok;
+
+        %% The writer process exited before the call and the amqp_channel_sup
+        %% supervisor shut the supervision tree down because the channel is
+        %% significant. The call happened at that shutdown time or just after.
+        exit:{shutdown, {gen_server, call, _}} -> ok;
+        exit:{noproc, {gen_server, call, _}} -> ok
     end,
     wait_for_death(Channel),
     wait_for_death(Connection).
@@ -1435,7 +1439,12 @@ shortstr_overflow_property(Config) ->
         Ret = amqp_channel:call(Channel, QoS),
         throw({unexpected_success, Ret})
     catch
-        exit:{{infrastructure_died, content_properties_shortstr_overflow}, _} -> ok
+        exit:{{infrastructure_died, content_properties_shortstr_overflow}, _} -> ok;
+        %% The writer process exited before the call and the amqp_channel_sup
+        %% supervisor shut the supervision tree down because the channel is
+        %% significant. The call happened at that shutdown time or just after.
+        exit:{shutdown, {gen_server, call, _}} -> ok;
+        exit:{noproc, {gen_server, call, _}} -> ok
     end,
     wait_for_death(Channel),
     wait_for_death(Connection).
@@ -1457,7 +1466,12 @@ shortstr_overflow_field(Config) ->
                                           consumer_tag = SentString}),
         throw({unexpected_success, Ret})
     catch
-        exit:{{infrastructure_died, method_field_shortstr_overflow}, _} -> ok
+        exit:{{infrastructure_died, method_field_shortstr_overflow}, _} -> ok;
+        %% The writer process exited before the call and the amqp_channel_sup
+        %% supervisor shut the supervision tree down because the channel is
+        %% significant. The call happened at that shutdown time or just after.
+        exit:{shutdown, {gen_server, call, _}} -> ok;
+        exit:{noproc, {gen_server, call, _}} -> ok
     end,
     wait_for_death(Channel),
     wait_for_death(Connection).
@@ -1560,16 +1574,6 @@ assert_down_with_error(MonitorRef, CodeAtom) ->
             CodeAtom = ?PROTOCOL:amqp_exception(Code)
     after 2000 ->
         exit(did_not_die)
-    end.
-
-wait_until_net_ticktime(NetTicktime) ->
-    case net_kernel:get_net_ticktime() of
-        NetTicktime -> ok;
-        {ongoing_change_to, NetTicktime} ->
-            timer:sleep(1000),
-            wait_until_net_ticktime(NetTicktime);
-        _ ->
-            throw({error, {net_ticktime_not_set, NetTicktime}})
     end.
 
 set_resource_alarm(Resource, Config)

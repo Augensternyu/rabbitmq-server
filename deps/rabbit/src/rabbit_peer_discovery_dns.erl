@@ -2,13 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_dns).
 -behaviour(rabbit_peer_discovery_backend).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([list_nodes/0, supports_registration/0, register/0, unregister/0,
          post_registration/0, lock/1, unlock/1]).
@@ -63,9 +61,9 @@ unregister() ->
 post_registration() ->
     ok.
 
--spec lock(Node :: atom()) -> not_supported.
+-spec lock(Nodes :: [node()]) -> not_supported.
 
-lock(_Node) ->
+lock(_Nodes) ->
     not_supported.
 
 -spec unlock(Data :: term()) -> ok.

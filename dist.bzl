@@ -1,4 +1,4 @@
-load("@rules_pkg//:mappings.bzl", "pkg_attributes", "pkg_filegroup", "pkg_files", "pkg_mkdirs", "strip_prefix")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 load("@rules_pkg//:pkg.bzl", "pkg_tar")
 load("@rules_erlang//:erlang_app_info.bzl", "ErlangAppInfo", "flat_deps")
 load("@rules_erlang//:util.bzl", "path_join")
@@ -77,7 +77,7 @@ def _sbin_dir_private_impl(ctx):
     ]
 
 def _escript_dir_private_impl(ctx):
-    escripts = [copy_escript(ctx, escript) for escript in ctx.files._scripts]
+    escripts = [copy_escript(ctx, escript) for escript in ctx.files._escripts]
 
     return [
         DefaultInfo(
@@ -135,6 +135,12 @@ def _versioned_plugins_dir_impl(ctx):
         "",
         maybe_install_erlang(ctx),
     ]
+
+    commands.append(
+        "echo 'Put your EZs here and use rabbitmq-plugins to enable them.' > {plugins_dir}/README".format(
+            plugins_dir = plugins_dir.path,
+        )
+    )
 
     for plugin in plugins:
         lib_info = plugin[ErlangAppInfo]
@@ -232,6 +238,7 @@ def versioned_plugins_dir(**kwargs):
 
 def package_generic_unix(
         name = "package-generic-unix",
+        extension = "tar.xz",
         plugins = None,
         extra_licenses = [],
         package_dir = "rabbitmq_server-{}".format(APP_VERSION)):
@@ -292,7 +299,7 @@ def package_generic_unix(
 
     pkg_tar(
         name = name,
-        extension = "tar.xz",
+        extension = extension,
         package_dir = package_dir,
         visibility = ["//visibility:public"],
         srcs = [
@@ -310,6 +317,7 @@ def package_generic_unix(
 
 def source_archive(
         name = "source_archive",
+        extension = "tar.xz",
         plugins = None):
     source_tree(
         name = "source-tree",
@@ -345,23 +353,13 @@ def source_archive(
         prefix = "deps/csv",
     )
 
-    pkg_files(
-        name = "parallel_stream-files",
-        srcs = [
-            "@parallel_stream//:sources",
-        ],
-        strip_prefix = "",
-        prefix = "deps/parallel_stream",
-    )
-
     pkg_tar(
         name = name,
-        extension = "tar.xz",
+        extension = extension,
         srcs = [
             ":deps-files",
             ":json-files",
             ":csv-files",
-            ":parallel_stream-files",
             Label("@rabbitmq-server//:root-licenses"),
         ],
         visibility = ["//visibility:public"],

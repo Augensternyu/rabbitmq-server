@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%   Copyright (c) 2010-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%%   Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_test_util).
@@ -21,10 +21,11 @@ merge_stats_app_env(Config, Interval, SampleInterval) ->
     Config1 = rabbit_ct_helpers:merge_app_env(
         Config, {rabbit, [{collect_statistics_interval, Interval}]}),
     rabbit_ct_helpers:merge_app_env(
-      Config1, {rabbitmq_management_agent, [{sample_retention_policies,
-                       [{global,   [{605, SampleInterval}]},
-                        {basic,    [{605, SampleInterval}]},
-                        {detailed, [{10, SampleInterval}]}] }]}).
+      Config1, {rabbitmq_management_agent,
+                [{sample_retention_policies,
+                  [{global,   [{605, SampleInterval}]},
+                   {basic,    [{605, SampleInterval}]},
+                   {detailed, [{10, SampleInterval}]}] }]}).
 http_get_from_node(Config, Node, Path) ->
     {ok, {{_HTTP, CodeAct, _}, Headers, ResBody}} =
         req(Config, Node, get, Path, [auth_header("guest", "guest")]),
@@ -67,6 +68,10 @@ http_post(Config, Path, List, CodeExp) ->
 http_post(Config, Path, List, User, Pass, CodeExp) ->
     http_post_raw(Config, Path, format_for_upload(List), User, Pass, CodeExp).
 
+http_post_json(Config, Path, Body, Assertion) ->
+    http_upload_raw(Config,  post, Path, Body, "guest", "guest",
+        Assertion, [{"content-type", "application/json"}]).
+
 http_post_accept_json(Config, Path, List, CodeExp) ->
     http_post_accept_json(Config, Path, List, "guest", "guest", CodeExp).
 
@@ -106,7 +111,7 @@ uri_base_from(Config, Node) ->
 uri_base_from(Config, Node, Base) ->
     Port = mgmt_port(Config, Node),
     Prefix = get_uri_prefix(Config),
-    Uri = rabbit_mgmt_format:print("http://localhost:~w~ts/~ts", [Port, Prefix, Base]),
+    Uri = list_to_binary(lists:flatten(io_lib:format("http://localhost:~w~ts/~ts", [Port, Prefix, Base]))),
     binary_to_list(Uri).
 
 get_uri_prefix(Config) ->
@@ -165,7 +170,7 @@ http_delete(Config, Path, CodeExp, Body) ->
 
 http_delete(Config, Path, User, Pass, CodeExp, Body) ->
     {ok, {{_HTTP, CodeAct, _}, Headers, ResBody}} =
-        req(Config, 0, delete, Path, [auth_header(User, Pass)], Body),
+        req(Config, 0, delete, Path, [auth_header(User, Pass)], format_for_upload(Body)),
     assert_code(CodeExp, CodeAct, "DELETE", Path, ResBody),
     decode(CodeExp, Headers, ResBody).
 
@@ -174,6 +179,9 @@ http_delete(Config, Path, User, Pass, CodeExp) ->
         req(Config, 0, delete, Path, [auth_header(User, Pass)]),
     assert_code(CodeExp, CodeAct, "DELETE", Path, ResBody),
     decode(CodeExp, Headers, ResBody).
+
+http_get_fails(Config, Path) ->
+    {error, {failed_connect, _}} = req(Config, get, Path, []).
 
 format_for_upload(none) ->
     <<"">>;
@@ -246,9 +254,12 @@ assert_code(CodeExp, CodeAct, Type, Path, Body) ->
     end.
 
 decode(?OK, _Headers,  ResBody) ->
-    JSON = rabbit_data_coercion:to_binary(ResBody),
-    atomize_map_keys(rabbit_json:decode(JSON));
+    decode_body(ResBody);
 decode(_,    Headers, _ResBody) -> Headers.
+
+decode_body(ResBody) ->
+    JSON = rabbit_data_coercion:to_binary(ResBody),
+    atomize_map_keys(rabbit_json:decode(JSON)).
 
 atomize_map_keys(L) when is_list(L) ->
     [atomize_map_keys(I) || I <- L];
@@ -261,7 +272,10 @@ atomize_map_keys(I) ->
 
 %% @todo There wasn't a specific order before; now there is; maybe we shouldn't have one?
 assert_list(Exp, Act) ->
-    case length(Exp) == length(Act) of
+    %% allow actual map to include keys we do not assert on
+    %% but not the other way around: we may want to only assert on a subset
+    %% of keys
+    case length(Act) >= length(Exp) of
         true  -> ok;
         false -> error({expected, Exp, actual, Act})
     end,

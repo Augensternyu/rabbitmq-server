@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt_sup).
@@ -12,9 +12,6 @@
 -include("rabbit_mqtt.hrl").
 
 -export([start_link/2, init/1, stop_listeners/0]).
-
--define(TCP_PROTOCOL, 'mqtt').
--define(TLS_PROTOCOL, 'mqtt/ssl').
 
 start_link(Listeners, []) ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, [Listeners]).
@@ -28,14 +25,11 @@ init([{Listeners, SslListeners0}]) ->
               [] -> {none, 0, []};
               _  -> {rabbit_networking:ensure_ssl(),
                      application:get_env(?APP_NAME, num_ssl_acceptors, 10),
-                     case rabbit_networking:poodle_check('MQTT') of
-                         ok     -> SslListeners0;
-                         danger -> []
-                     end}
+                     SslListeners0}
           end,
     %% Use separate process group scope per RabbitMQ node. This achieves a local-only
     %% process group which requires less memory with millions of connections.
-    PgScope = list_to_atom(io_lib:format("~s_~s", [?PG_SCOPE, node()])),
+    PgScope = rabbit:pg_local_scope(?PG_SCOPE),
     persistent_term:put(?PG_SCOPE, PgScope),
     {ok,
      {#{strategy => one_for_all,
@@ -69,8 +63,8 @@ init([{Listeners, SslListeners0}]) ->
 
 -spec stop_listeners() -> ok.
 stop_listeners() ->
-    _ = rabbit_networking:stop_ranch_listener_of_protocol(?TCP_PROTOCOL),
-    _ = rabbit_networking:stop_ranch_listener_of_protocol(?TLS_PROTOCOL),
+    _ = rabbit_networking:stop_ranch_listener_of_protocol(?MQTT_TCP_PROTOCOL),
+    _ = rabbit_networking:stop_ranch_listener_of_protocol(?MQTT_TLS_PROTOCOL),
     ok.
 
 %%
@@ -89,7 +83,7 @@ tcp_listener_spec([Address, SocketOpts, NumAcceptors, ConcurrentConnsSups]) ->
       rabbit_mqtt_listener_sup,
       Address,
       SocketOpts,
-      transport(?TCP_PROTOCOL),
+      transport(?MQTT_TCP_PROTOCOL),
       rabbit_mqtt_reader,
       [],
       mqtt,
@@ -104,7 +98,7 @@ ssl_listener_spec([Address, SocketOpts, SslOpts, NumAcceptors, ConcurrentConnsSu
       rabbit_mqtt_listener_sup,
       Address,
       SocketOpts ++ SslOpts,
-      transport(?TLS_PROTOCOL),
+      transport(?MQTT_TLS_PROTOCOL),
       rabbit_mqtt_reader,
       [],
       'mqtt/ssl',
@@ -114,7 +108,7 @@ ssl_listener_spec([Address, SocketOpts, SslOpts, NumAcceptors, ConcurrentConnsSu
       "MQTT TLS listener"
      ).
 
-transport(?TCP_PROTOCOL) ->
+transport(?MQTT_TCP_PROTOCOL) ->
     ranch_tcp;
-transport(?TLS_PROTOCOL) ->
+transport(?MQTT_TLS_PROTOCOL) ->
     ranch_ssl.

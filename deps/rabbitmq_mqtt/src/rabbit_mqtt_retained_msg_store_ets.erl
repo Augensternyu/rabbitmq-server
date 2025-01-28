@@ -2,12 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mqtt_retained_msg_store_ets).
 
 -behaviour(rabbit_mqtt_retained_msg_store).
+
 -include("rabbit_mqtt_packet.hrl").
 
 -export([new/2, recover/2, insert/3, lookup/2, delete/2, terminate/1]).
@@ -28,28 +29,33 @@ new(Dir, VHost) ->
   #store_state{table = Tid, filename = Path}.
 
 -spec recover(file:name_all(), rabbit_types:vhost()) ->
-  {error, uninitialized} | {ok, store_state()}.
+    {ok, store_state(), rabbit_mqtt_retained_msg_store:expire()} |
+    {error, uninitialized}.
 recover(Dir, VHost) ->
-  Path = rabbit_mqtt_util:path_for(Dir, VHost),
-  case ets:file2tab(Path) of
-    {ok, Tid}  -> _ = file:delete(Path),
-                  {ok, #store_state{table = Tid, filename = Path}};
-    {error, _} -> {error, uninitialized}
-  end.
+    Path = rabbit_mqtt_util:path_for(Dir, VHost),
+    case ets:file2tab(Path) of
+        {ok, Tid} ->
+            _ = file:delete(Path),
+            {ok,
+             #store_state{table = Tid, filename = Path},
+             rabbit_mqtt_retained_msg_store:expire(ets, Tid)};
+        {error, _} ->
+            {error, uninitialized}
+    end.
 
--spec insert(binary(), mqtt_msg(), store_state()) -> ok.
+-spec insert(topic(), mqtt_msg(), store_state()) -> ok.
 insert(Topic, Msg, #store_state{table = T}) ->
   true = ets:insert(T, #retained_message{topic = Topic, mqtt_msg = Msg}),
   ok.
 
--spec lookup(binary(), store_state()) -> mqtt_msg() | undefined.
+-spec lookup(topic(), store_state()) -> mqtt_msg() | mqtt_msg_v0() | undefined.
 lookup(Topic, #store_state{table = T}) ->
   case ets:lookup(T, Topic) of
     []      -> undefined;
     [#retained_message{mqtt_msg = Msg}] -> Msg
   end.
 
--spec delete(binary(), store_state()) -> ok.
+-spec delete(topic(), store_state()) -> ok.
 delete(Topic, #store_state{table = T}) ->
   true = ets:delete(T, Topic),
   ok.

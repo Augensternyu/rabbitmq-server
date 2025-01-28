@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(exchange_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
@@ -30,14 +29,27 @@
 all() ->
     [
       {group, essential},
-      {group, cluster_size_3}
-      %% {group, channel_use_mode_single}
+      {group, cluster_size_3},
+      {group, rolling_upgrade}
     ].
 
 groups() ->
-  [
-    {essential, [], [
+    [
+     {essential, [], essential()},
+     {cluster_size_3, [], [max_hops]},
+     {rolling_upgrade, [], [child_id_format]},
+     {cycle_protection, [], [
+                             %% TBD: port from v3.10.x in an Erlang 25-compatible way
+                            ]},
+     {channel_use_mod_single, [], [
+                                   %% TBD: port from v3.10.x in an Erlang 25-compatible way
+                                  ]}
+    ].
+
+essential() ->
+    [
       single_upstream,
+      single_upstream_quorum,
       multiple_upstreams,
       multiple_upstreams_pattern,
       single_upstream_multiple_uris,
@@ -47,18 +59,10 @@ groups() ->
       unbind_on_client_unbind,
       exchange_federation_link_status,
       lookup_exchange_status
-    ]},
-    {cluster_size_3, [], [
-      max_hops
-    ]},
-    {cycle_protection, [], [
-      %% TBD: port from v3.10.x in an Erlang 25-compatible way
-    ]},
-    {channel_use_mod_single, [], [
-      %% TBD: port from v3.10.x in an Erlang 25-compatible way
-    ]}
-  ].
+    ].
 
+suite() ->
+    [{timetrap, {minutes, 3}}].
 
 %% -------------------------------------------------------------------
 %% Setup/teardown.
@@ -72,7 +76,7 @@ end_per_suite(Config) ->
   rabbit_ct_helpers:run_teardown_steps(Config).
 
 %% Some of the "regular" tests but in the single channel mode.
-init_per_group(channel_use_mode_single, Config) ->
+init_per_group(essential, Config) ->
   SetupFederation = [
       fun(Config1) ->
           rabbit_federation_test_util:setup_federation_with_upstream_params(Config1, [
@@ -83,38 +87,21 @@ init_per_group(channel_use_mode_single, Config) ->
   Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
   Config1 = rabbit_ct_helpers:set_config(Config, [
       {rmq_nodename_suffix, Suffix},
-      {rmq_nodes_clustered, false}
+      {rmq_nodes_count, 1}
     ]),
   rabbit_ct_helpers:run_steps(Config1,
     rabbit_ct_broker_helpers:setup_steps() ++
     rabbit_ct_client_helpers:setup_steps() ++
     SetupFederation);
-init_per_group(cycle_detection, Config) ->
-  Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
-  Config1 = rabbit_ct_helpers:set_config(Config, [
-      {rmq_nodename_suffix, Suffix},
-      {rmq_nodes_clustered, false},
-      {rmq_nodes_count, 1}
-    ]),
-  rabbit_ct_helpers:run_steps(Config1,
-    rabbit_ct_broker_helpers:setup_steps() ++
-    rabbit_ct_client_helpers:setup_steps());
-init_per_group(without_plugins, Config) ->
-  rabbit_ct_helpers:set_config(Config,
-    {broker_with_plugins, [true, false]});
-init_per_group(cluster_size_1 = Group, Config) ->
-  Config1 = rabbit_ct_helpers:set_config(Config, [
-      {rmq_nodes_count, 1}
-    ]),
-  init_per_group1(Group, Config1);
-init_per_group(cluster_size_2 = Group, Config) ->
-  Config1 = rabbit_ct_helpers:set_config(Config, [
-      {rmq_nodes_count, 2}
-    ]),
-  init_per_group1(Group, Config1);
 init_per_group(cluster_size_3 = Group, Config) ->
   Config1 = rabbit_ct_helpers:set_config(Config, [
       {rmq_nodes_count, 3}
+    ]),
+  init_per_group1(Group, Config1);
+init_per_group(rolling_upgrade = Group, Config) ->
+  Config1 = rabbit_ct_helpers:set_config(Config, [
+      {rmq_nodes_count, 5},
+      {rmq_nodes_clustered, false}
     ]),
   init_per_group1(Group, Config1);
 init_per_group(Group, Config) ->
@@ -131,8 +118,6 @@ init_per_group1(_Group, Config) ->
     rabbit_ct_broker_helpers:setup_steps() ++
     rabbit_ct_client_helpers:setup_steps()).
 
-end_per_group(without_plugins, Config) ->
-  Config;
 end_per_group(_, Config) ->
   rabbit_ct_helpers:run_steps(Config,
     rabbit_ct_client_helpers:teardown_steps() ++
@@ -178,9 +163,46 @@ single_upstream(Config) ->
   await_binding(Config, 0, UpX, RK),
   publish_expect(Ch, UpX, RK, Q, <<"single_upstream payload">>),
 
+  Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+  assert_federation_internal_queue_type(Config, Server, rabbit_classic_queue),
+
   rabbit_ct_client_helpers:close_channel(Ch),
   clean_up_federation_related_bits(Config).
 
+single_upstream_quorum(Config) ->
+  FedX = <<"single_upstream_quorum.federated">>,
+  UpX = <<"single_upstream_quorum.upstream.x">>,
+  rabbit_ct_broker_helpers:set_parameter(
+    Config, 0, <<"federation-upstream">>, <<"localhost">>,
+    [
+      {<<"uri">>,      rabbit_ct_broker_helpers:node_uri(Config, 0)},
+      {<<"exchange">>, UpX},
+      {<<"queue-type">>, <<"quorum">>}
+    ]),
+  rabbit_ct_broker_helpers:set_policy(
+    Config, 0,
+    <<"fed.x">>, <<"^single_upstream_quorum.federated">>, <<"exchanges">>,
+    [
+      {<<"federation-upstream">>, <<"localhost">>}
+    ]),
+
+  Ch = rabbit_ct_client_helpers:open_channel(Config, 0),
+
+  Xs = [
+    exchange_declare_method(FedX)
+  ],
+  declare_exchanges(Ch, Xs),
+
+  RK = <<"key">>,
+  Q = declare_and_bind_queue(Ch, FedX, RK),
+  await_binding(Config, 0, UpX, RK),
+  publish_expect(Ch, UpX, RK, Q, <<"single_upstream_quorum payload">>),
+
+  Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+  assert_federation_internal_queue_type(Config, Server, rabbit_quorum_queue),
+
+  rabbit_ct_client_helpers:close_channel(Ch),
+  clean_up_federation_related_bits(Config).
 
 multiple_upstreams(Config) ->
   FedX = <<"multiple_upstreams.federated">>,
@@ -562,6 +584,119 @@ lookup_exchange_status(Config) ->
             [key, uri, status, timestamp, id, supervisor, upstream]),
 
   clean_up_federation_related_bits(Config).
+
+child_id_format(Config) ->
+    [UpstreamNode,
+     OldNodeA,
+     NewNodeB,
+     OldNodeC,
+     NewNodeD] = rabbit_ct_broker_helpers:get_node_configs(
+                    Config, nodename),
+
+    %% Create a cluster with the nodes running the old version of RabbitMQ in
+    %% mixed-version testing.
+    %%
+    %% Note: we build this on the assumption that `rabbit_ct_broker_helpers'
+    %% starts nodes this way:
+    %%   Node 1: the primary copy of RabbitMQ the test is started from
+    %%   Node 2: the secondary umbrella (if any)
+    %%   Node 3: the primary copy
+    %%   Node 4: the secondary umbrella
+    %%   ...
+    %%
+    %% Therefore, `UpstreamNode' will use the primary copy, `OldNodeA' the
+    %% secondary umbrella, `NewNodeB' the primary copy, and so on.
+    Config1 = rabbit_ct_broker_helpers:cluster_nodes(
+                Config, [OldNodeA, OldNodeC]),
+
+    %% Prepare the whole federated exchange on that old cluster.
+    UpstreamName = <<"fed_on_upgrade">>,
+    rabbit_ct_broker_helpers:set_parameter(
+      Config1, OldNodeA, <<"federation-upstream">>, UpstreamName,
+      [
+       {<<"uri">>, rabbit_ct_broker_helpers:node_uri(Config1, UpstreamNode)}
+      ]),
+
+    rabbit_ct_broker_helpers:set_policy(
+      Config1, OldNodeA,
+      <<"fed_on_upgrade_policy">>, <<"^fed_">>, <<"all">>,
+      [
+       {<<"federation-upstream-pattern">>, UpstreamName}
+      ]),
+
+    XName = <<"fed_ex_on_upgrade_cluster">>,
+    X = exchange_declare_method(XName, <<"direct">>),
+    {Conn1, Ch1} = rabbit_ct_client_helpers:open_connection_and_channel(
+                     Config1, OldNodeA),
+    ?assertEqual({'exchange.declare_ok'}, declare_exchange(Ch1, X)),
+    rabbit_ct_client_helpers:close_channel(Ch1),
+    rabbit_ct_client_helpers:close_connection(Conn1),
+
+    %% Verify the format of the child ID. In the main branch, the format was
+    %% temporarily a size-2 tuple with a list as the first element. This was
+    %% not kept later and the original ID format is used in old and new nodes.
+    [{Id, _, _, _}] = rabbit_ct_broker_helpers:rpc(
+                        Config1, OldNodeA,
+                        mirrored_supervisor, which_children,
+                        [rabbit_federation_exchange_link_sup_sup]),
+    case Id of
+        %% This is the format we expect everywhere.
+        #exchange{name = #resource{name = XName}} ->
+            %% Verify that the supervisors exist on all nodes.
+            lists:foreach(
+              fun(Node) ->
+                      ?assertMatch(
+                         [{#exchange{name = #resource{name = XName}},
+                           _, _, _}],
+                         rabbit_ct_broker_helpers:rpc(
+                           Config1, Node,
+                           mirrored_supervisor, which_children,
+                           [rabbit_federation_exchange_link_sup_sup]))
+              end, [OldNodeA, OldNodeC]),
+
+            %% Simulate a rolling upgrade by:
+            %% 1. adding new nodes to the old cluster
+            %% 2. stopping the old nodes
+            %%
+            %% After that, the supervisors run on the new code.
+            Config2 = rabbit_ct_broker_helpers:cluster_nodes(
+                        Config1, [OldNodeA, NewNodeB, NewNodeD]),
+            ok = rabbit_ct_broker_helpers:stop_broker(Config2, OldNodeA),
+            ok = rabbit_ct_broker_helpers:reset_node(Config1, OldNodeA),
+            ok = rabbit_ct_broker_helpers:stop_broker(Config2, OldNodeC),
+            ok = rabbit_ct_broker_helpers:reset_node(Config2, OldNodeC),
+
+            %% Verify that the supervisors still use the same IDs.
+            lists:foreach(
+              fun(Node) ->
+                      ?assertMatch(
+                         [{#exchange{name = #resource{name = XName}},
+                           _, _, _}],
+                         rabbit_ct_broker_helpers:rpc(
+                           Config2, Node,
+                           mirrored_supervisor, which_children,
+                           [rabbit_federation_exchange_link_sup_sup]))
+              end, [NewNodeB, NewNodeD]),
+
+            %% Delete the exchange: it should work because the ID format is the
+            %% one expected.
+            %%
+            %% During the transient period where the ID format was changed,
+            %% this would crash with a badmatch because the running
+            %% supervisor's ID would not match the content of the database.
+            {Conn2, Ch2} = rabbit_ct_client_helpers:open_connection_and_channel(
+                             Config2, NewNodeB),
+            ?assertEqual({'exchange.delete_ok'}, delete_exchange(Ch2, XName)),
+            rabbit_ct_client_helpers:close_channel(Ch2),
+            rabbit_ct_client_helpers:close_connection(Conn2);
+
+        %% This is the transient format we are not interested in as it only
+        %% lived in a development branch.
+        {List, #exchange{name = #resource{name = XName}}}
+          when is_list(List) ->
+            {skip, "Testcase skipped with the transiently changed ID format"}
+    end.
+
 %%
 %% Test helpers
 %%
@@ -727,15 +862,15 @@ await_binding(Config, Node, Vhost, X, Key, ExpectedBindingCount) when is_integer
 await_binding(_Config, _Node, _Vhost, _X, _Key, ExpectedBindingCount, 0) ->
   {error, rabbit_misc:format("expected ~b bindings but they did not materialize in time", [ExpectedBindingCount])};
 await_binding(Config, Node, Vhost, X, Key, ExpectedBindingCount, AttemptsLeft) when is_integer(ExpectedBindingCount) ->
-  case bound_keys_from(Config, Node, Vhost, X, Key) of
-      Bs when length(Bs) < ExpectedBindingCount ->
-          timer:sleep(100),
-          await_binding(Config, Node, Vhost, X, Key, ExpectedBindingCount, AttemptsLeft - 1);
-      Bs when length(Bs) =:= ExpectedBindingCount ->
-          ok;
-      Bs ->
-          {error, rabbit_misc:format("expected ~b bindings, got ~b", [ExpectedBindingCount, length(Bs)])}
-  end.
+    case bound_keys_from(Config, Node, Vhost, X, Key) of
+        Bs when length(Bs) < ExpectedBindingCount ->
+            timer:sleep(1000),
+            await_binding(Config, Node, Vhost, X, Key, ExpectedBindingCount, AttemptsLeft - 1);
+        Bs when length(Bs) =:= ExpectedBindingCount ->
+            ok;
+        Bs ->
+            {error, rabbit_misc:format("expected ~b bindings, got ~b", [ExpectedBindingCount, length(Bs)])}
+    end.
 
 await_bindings(Config, Node, X, Keys) ->
   [await_binding(Config, Node, X, Key) || Key <- Keys].
@@ -772,3 +907,14 @@ await_credentials_obfuscation_seeding_on_two_nodes(Config) ->
   end),
 
   timer:sleep(1000).
+
+assert_federation_internal_queue_type(Config, Server, Expected) ->
+    Qs = all_queues_on(Config, Server),
+    FedQs = lists:filter(
+              fun(Q) ->
+                      lists:member(
+                        {<<"x-internal-purpose">>, longstr, <<"federation">>}, amqqueue:get_arguments(Q))
+              end,
+              Qs),
+    FedQTypes = lists:map(fun(Q) -> amqqueue:get_type(Q) end, FedQs),
+    ?assertEqual([Expected], lists:uniq(FedQTypes)).

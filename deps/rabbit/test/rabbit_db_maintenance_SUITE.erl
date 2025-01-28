@@ -2,14 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_db_maintenance_SUITE).
 
 -include_lib("eunit/include/eunit.hrl").
--include_lib("common_test/include/ct.hrl").
-
 -compile(export_all).
 
 all() ->
@@ -24,7 +22,6 @@ groups() ->
 
 all_tests() ->
     [
-     setup_schema,
      set_and_get,
      set_and_get_consistent
     ].
@@ -63,14 +60,6 @@ end_per_testcase(Testcase, Config) ->
 %% ---------------------------------------------------------------------------
 %% Test Cases
 %% ---------------------------------------------------------------------------
-
-setup_schema(Config) ->
-    passed = rabbit_ct_broker_helpers:rpc(
-               Config, 0, ?MODULE, setup_schema1, [Config]).
-
-setup_schema1(_Config) ->
-    ?assertEqual(ok, rabbit_db_maintenance:setup_schema()),
-    passed.
 
 set_and_get(Config) ->
     passed = rabbit_ct_broker_helpers:rpc(

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @todo This module also needs to be updated when variable queue changes.
@@ -10,12 +10,11 @@
 
 -export([init/3, terminate/2, delete_and_terminate/2, delete_crashed/1,
          purge/1, purge_acks/1,
-         publish/6, publish_delivered/5,
-         batch_publish/4, batch_publish_delivered/4,
-         discard/4, drain_confirmed/1,
+         publish/5, publish_delivered/4,
+         discard/3, drain_confirmed/1,
          dropwhile/2, fetchwhile/4, fetch/2, drop/2, ack/2, requeue/2,
          ackfold/4, fold/3, len/1, is_empty/1, depth/1,
-         set_ram_duration_target/2, ram_duration/1, needs_timeout/1, timeout/1,
+         update_rates/1, needs_timeout/1, timeout/1,
          handle_pre_hibernate/1, resume/1, msg_rates/1,
          info/2, invoke/3, is_duplicate/2, set_queue_mode/2,
          set_queue_version/2,
@@ -80,7 +79,7 @@
 
           io_batch_size,
 
-          %% default queue or lazy queue
+          %% default queue (or lazy queue from 3.6 to 3.11)
           mode,
           version = 1,
           %% Fast path for confirms handling. Instead of having
@@ -119,8 +118,6 @@
 
 
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("rabbit_common/include/rabbit_framing.hrl").
-
 -define(QUEUE, lqueue).
 -define(TIMEOUT_TEST_MSG, <<"timeout_test_msg!">>).
 
@@ -226,19 +223,13 @@ purge(State) ->
 purge_acks(State) ->
     rabbit_variable_queue:purge_acks(State).
 
-publish(Msg, MsgProps, IsDelivered, ChPid, Flow, State) ->
-    rabbit_variable_queue:publish(Msg, MsgProps, IsDelivered, ChPid, Flow, State).
+publish(Msg, MsgProps, IsDelivered, ChPid, State) ->
+    rabbit_variable_queue:publish(Msg, MsgProps, IsDelivered, ChPid, State).
 
-batch_publish(Publishes, ChPid, Flow, State) ->
-    rabbit_variable_queue:batch_publish(Publishes, ChPid, Flow, State).
+publish_delivered(Msg, MsgProps, ChPid, State) ->
+    rabbit_variable_queue:publish_delivered(Msg, MsgProps, ChPid, State).
 
-publish_delivered(Msg, MsgProps, ChPid, Flow, State) ->
-    rabbit_variable_queue:publish_delivered(Msg, MsgProps, ChPid, Flow, State).
-
-batch_publish_delivered(Publishes, ChPid, Flow, State) ->
-    rabbit_variable_queue:batch_publish_delivered(Publishes, ChPid, Flow, State).
-
-discard(_MsgId, _ChPid, _Flow, State) -> State.
+discard(_MsgId, _ChPid, State) -> State.
 
 drain_confirmed(State) ->
     rabbit_variable_queue:drain_confirmed(State).
@@ -287,11 +278,8 @@ is_empty(State) -> 0 == len(State).
 depth(State) ->
     rabbit_variable_queue:depth(State).
 
-set_ram_duration_target(DurationTarget, State) ->
-    rabbit_variable_queue:set_ram_duration_target(DurationTarget, State).
-
-ram_duration(State) ->
-    rabbit_variable_queue:ram_duration(State).
+update_rates(State) ->
+    rabbit_variable_queue:update_rates(State).
 
 needs_timeout(State) ->
     rabbit_variable_queue:needs_timeout(State).

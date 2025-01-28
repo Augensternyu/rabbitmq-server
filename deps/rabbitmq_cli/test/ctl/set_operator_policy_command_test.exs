@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule SetOperatorPolicyCommandTest do
   use ExUnit.Case, async: false
@@ -127,7 +127,7 @@ defmodule SetOperatorPolicyCommandTest do
              context[:opts]
            ) ==
              {:error_string,
-              'Validation failed\n\n[{<<"foo">>,<<"bar">>}] are not recognised policy settings\n'}
+              ~c"Validation failed\n\n[{<<\"foo\">>,<<\"bar\">>}] are not recognised policy settings\n"}
 
     assert list_operator_policies(context[:vhost]) == []
   end
@@ -137,7 +137,7 @@ defmodule SetOperatorPolicyCommandTest do
     assert @command.run(
              [context[:key], context[:pattern], context[:value]],
              context[:opts]
-           ) == {:error_string, 'Validation failed\n\nno policy provided\n'}
+           ) == {:error_string, ~c"Validation failed\n\nno policy provided\n"}
 
     assert list_operator_policies(context[:vhost]) == []
   end

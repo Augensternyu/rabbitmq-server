@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(rabbit_fifo_dlx_integration_SUITE).
 
@@ -18,17 +18,18 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
--import(quorum_queue_utils, [wait_for_messages_ready/3,
-                             wait_for_min_messages/3,
-                             dirty_query/3,
-                             ra_name/1]).
+-import(queue_utils, [wait_for_messages_ready/3,
+                      wait_for_min_messages/3,
+                      wait_for_messages/2,
+                      dirty_query/3,
+                      ra_name/1]).
 -import(rabbit_ct_helpers, [eventually/1,
                             eventually/3,
                             consistently/1]).
 -import(rabbit_ct_broker_helpers, [rpc/5,
                                    rpc/6]).
 -import(quorum_queue_SUITE, [publish/2,
-                             consume/3]).
+                             basic_get_tag/3]).
 
 -define(DEFAULT_WAIT, 1000).
 -define(DEFAULT_INTERVAL, 200).
@@ -69,14 +70,17 @@ groups() ->
     ].
 
 init_per_suite(Config0) ->
+    Tick = 256,
     rabbit_ct_helpers:log_environment(),
     Config1 = rabbit_ct_helpers:merge_app_env(
-                Config0, {rabbit, [{quorum_tick_interval, 1000},
+                Config0, {rabbit, [{quorum_tick_interval, 256},
+                                   {collect_statistics_interval, Tick},
+                                   {channel_tick_interval, Tick},
                                    {dead_letter_worker_consumer_prefetch, 2},
                                    {dead_letter_worker_publisher_confirm_timeout, 1000}
                                   ]}),
     Config2 = rabbit_ct_helpers:merge_app_env(
-                Config1, {aten, [{poll_interval, 1000}]}),
+                Config1, {aten, [{poll_interval, 256}]}),
     rabbit_ct_helpers:run_setup_steps(Config2).
 
 end_per_suite(Config) ->
@@ -91,14 +95,18 @@ init_per_group(Group, Config, NodesCount) ->
     Config1 = rabbit_ct_helpers:set_config(Config,
                                            [{rmq_nodes_count, NodesCount},
                                             {rmq_nodename_suffix, Group},
-                                            {tcp_ports_base},
-                                            {net_ticktime, 10}]),
+                                            {tcp_ports_base}]),
     Config2 =  rabbit_ct_helpers:run_steps(Config1,
                                            [fun merge_app_env/1 ] ++
                                            rabbit_ct_broker_helpers:setup_steps()),
-    ok = rpc(Config2, 0, application, set_env,
-             [rabbit, channel_tick_interval, 100]),
-    Config2.
+    case Config2 of
+        {skip, _Reason} = Skip ->
+            Skip;
+        _ ->
+            ok = rpc(Config2, 0, application, set_env,
+                     [rabbit, channel_tick_interval, 100]),
+            Config2
+    end.
 
 end_per_group(_, Config) ->
     rabbit_ct_helpers:run_steps(Config,
@@ -111,8 +119,12 @@ merge_app_env(Config) ->
       {ra, [{min_wal_roll_over_interval, 30000}]}).
 
 init_per_testcase(Testcase, Config) ->
-    case {Testcase, rabbit_ct_helpers:is_mixed_versions()} of
-        {single_dlx_worker, true} ->
+    IsKhepriEnabled = lists:any(fun(B) -> B end,
+                                rabbit_ct_broker_helpers:rpc_all(
+                                  Config, rabbit_feature_flags, is_enabled,
+                                  [khepri_db])),
+    case {Testcase, rabbit_ct_helpers:is_mixed_versions(), IsKhepriEnabled} of
+        {single_dlx_worker, true, _} ->
             {skip, "single_dlx_worker is not mixed version compatible because process "
              "rabbit_fifo_dlx_sup does not exist in 3.9"};
         _ ->
@@ -194,7 +206,7 @@ rejected(Config) ->
     {Server, Ch, SourceQ, TargetQ} = declare_topology(Config, []),
     publish(Ch, SourceQ),
     wait_for_messages_ready([Server], ra_name(SourceQ), 1),
-    DelTag = consume(Ch, SourceQ, false),
+    DelTag = basic_get_tag(Ch, SourceQ, false),
     amqp_channel:cast(Ch, #'basic.nack'{delivery_tag = DelTag,
                                         multiple     = false,
                                         requeue      = false}),
@@ -211,7 +223,7 @@ delivery_limit(Config) ->
     {Server, Ch, SourceQ, TargetQ} = declare_topology(Config, [{<<"x-delivery-limit">>, long, 0}]),
     publish(Ch, SourceQ),
     wait_for_messages_ready([Server], ra_name(SourceQ), 1),
-    DelTag = consume(Ch, SourceQ, false),
+    DelTag = basic_get_tag(Ch, SourceQ, false),
     amqp_channel:cast(Ch, #'basic.nack'{delivery_tag = DelTag,
                                         multiple     = false,
                                         requeue      = true}),
@@ -589,7 +601,8 @@ reject_publish(Config, QArg) when is_tuple(QArg) ->
     ok = publish_confirm(Ch, SourceQ),
     RaName = ra_name(SourceQ),
     eventually(?_assertMatch([{2, 2}], %% 2 messages with 1 byte each
-                             dirty_query([Server], RaName, fun rabbit_fifo:query_stat_dlx/1))),
+                             dirty_query([Server], RaName,
+                                         fun rabbit_fifo:query_stat_dlx/1))),
     %% Now, we have 2 expired messages in the source quorum queue's discards queue.
     %% Now that we are over the limit we expect publishes to be rejected.
     ?assertEqual(fail, publish_confirm(Ch, SourceQ)),
@@ -637,9 +650,10 @@ reject_publish_max_length_target_quorum_queue(Config) ->
     %% Make space in target queue by consuming messages one by one
     %% allowing for more dead-lettered messages to reach the target queue.
     [begin
-         timer:sleep(2000),
          Msg = integer_to_binary(N),
-         {#'basic.get_ok'{}, #amqp_msg{payload = Msg}} = amqp_channel:call(Ch, #'basic.get'{queue = TargetQ})
+         ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg}},
+                     amqp_channel:call(Ch, #'basic.get'{queue = TargetQ}),
+                     30000)
      end || N <- lists:seq(1,4)],
     eventually(?_assertEqual([{0, 0}],
                              dirty_query([Server], RaName, fun rabbit_fifo:query_stat_dlx/1)), 500, 10),
@@ -684,7 +698,7 @@ reject_publish_down_target_quorum_queue(Config) ->
      end || N <- lists:seq(21, 50)],
 
     %% The target queue should have all 50 messages.
-    timer:sleep(2000),
+    wait_for_messages(Config, [[TargetQ, <<"50">>, <<"50">>, <<"0">>]]),
     Received = lists:foldl(
                  fun(_N, S) ->
                          {#'basic.get_ok'{}, #amqp_msg{payload = Msg}} =
@@ -741,7 +755,7 @@ publish_confirm(Ch, QName) ->
             ok;
         #'basic.nack'{} ->
             fail
-    after 2500 ->
+    after 30_000 ->
               ct:fail(confirm_timeout)
     end.
 
@@ -797,32 +811,25 @@ target_quorum_queue_delete_create(Config) ->
 %% 2. Target queue can be classic queue, quorum queue, or stream queue.
 %%
 %% Lesson learnt by writing this test:
-%% If there are multiple target queues, messages will not be sent / routed to target non-mirrored durable classic queues
+%% If there are multiple target queues, messages will not be sent / routed to target durable classic queues
 %% when their host node is temporarily down because these queues get temporarily deleted from the rabbit_queue RAM table
 %% (but will still be present in the rabbit_durable_queue DISC table). See:
 %% https://github.com/rabbitmq/rabbitmq-server/blob/cf76b479300b767b8ea450293d096cbf729ed734/deps/rabbit/src/rabbit_amqqueue.erl#L1955-L1964
 many_target_queues(Config) ->
     [Server1, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
-    Ch2 = rabbit_ct_client_helpers:open_channel(Config, Server2),
     SourceQ = ?config(source_queue, Config),
     RaName = ra_name(SourceQ),
     TargetQ1 = ?config(target_queue_1, Config),
     TargetQ2 = ?config(target_queue_2, Config),
     TargetQ3 = ?config(target_queue_3, Config),
-    TargetQ4 = ?config(target_queue_4, Config),
-    TargetQ5 = ?config(target_queue_5, Config),
-    TargetQ6 = ?config(target_queue_6, Config),
     DLX = ?config(dead_letter_exchange, Config),
     DLRKey = <<"k1">>,
     %% Create topology:
     %% * source quorum queue with 1 replica on node 1
-    %% * target non-mirrored classic queue on node 1
+    %% * target classic queue on node 1
     %% * target quorum queue with 3 replicas
     %% * target stream queue with 3 replicas
-    %% * target mirrored classic queue with 3 replicas (leader on node 1)
-    %% * target mirrored classic queue with 1 replica (leader on node 2)
-    %% * target mirrored classic queue with 3 replica (leader on node 2)
     declare_queue(Ch, SourceQ, [{<<"x-dead-letter-exchange">>, longstr, DLX},
                                 {<<"x-dead-letter-routing-key">>, longstr, DLRKey},
                                 {<<"x-dead-letter-strategy">>, longstr, <<"at-least-once">>},
@@ -841,22 +848,6 @@ many_target_queues(Config) ->
                                  {<<"x-initial-cluster-size">>, long, 3}
                                 ]),
     bind_queue(Ch, TargetQ3, DLX, DLRKey),
-    ok = rabbit_ct_broker_helpers:set_policy(Config, Server1, <<"mirror-q4">>, TargetQ4, <<"queues">>,
-                                             [{<<"ha-mode">>, <<"all">>},
-                                              {<<"queue-master-locator">>, <<"client-local">>}]),
-    declare_queue(Ch, TargetQ4, []),
-    bind_queue(Ch, TargetQ4, DLX, DLRKey),
-    ok = rabbit_ct_broker_helpers:set_policy(Config, Server1, <<"mirror-q5">>, TargetQ5, <<"queues">>,
-                                             [{<<"ha-mode">>, <<"exactly">>},
-                                              {<<"ha-params">>, 1},
-                                              {<<"queue-master-locator">>, <<"client-local">>}]),
-    declare_queue(Ch2, TargetQ5, []),
-    bind_queue(Ch2, TargetQ5, DLX, DLRKey),
-    ok = rabbit_ct_broker_helpers:set_policy(Config, Server1, <<"mirror-q6">>, TargetQ6, <<"queues">>,
-                                             [{<<"ha-mode">>, <<"all">>},
-                                              {<<"queue-master-locator">>, <<"client-local">>}]),
-    declare_queue(Ch2, TargetQ6, []),
-    bind_queue(Ch2, TargetQ6, DLX, DLRKey),
     Msg1 = <<"m1">>,
     ok = amqp_channel:cast(Ch,
                            #'basic.publish'{routing_key = SourceQ},
@@ -880,25 +871,16 @@ many_target_queues(Config) ->
     receive
         #'basic.consume_ok'{consumer_tag = CTag} ->
             ok
-    after 2000 ->
+    after 30_000 ->
               exit(consume_ok_timeout)
     end,
     receive
         {#'basic.deliver'{consumer_tag = CTag},
          #amqp_msg{payload = Msg1}} ->
             ok
-    after 2000 ->
+    after 30_000 ->
               exit(deliver_timeout)
     end,
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg1}},
-                amqp_channel:call(Ch, #'basic.get'{queue = TargetQ4}),
-                ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg1}},
-                amqp_channel:call(Ch2, #'basic.get'{queue = TargetQ5}),
-                ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg1}},
-                amqp_channel:call(Ch2, #'basic.get'{queue = TargetQ6}),
-                ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
     ?awaitMatch([{0, 0}],
                 dirty_query([Server1], RaName, fun rabbit_fifo:query_stat_dlx/1),
                 ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
@@ -915,9 +897,6 @@ many_target_queues(Config) ->
     ?awaitMatch([{1, 2}],
                 dirty_query([Server1], RaName, fun rabbit_fifo:query_stat_dlx/1),
                 ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
-    timer:sleep(1000),
-    ?assertEqual([{1, 2}],
-                 dirty_query([Server1], RaName, fun rabbit_fifo:query_stat_dlx/1)),
     ?assertMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg2}},
                  amqp_channel:call(Ch, #'basic.get'{queue = TargetQ1})),
     ok = rabbit_ct_broker_helpers:start_node(Config, Server2),
@@ -932,19 +911,9 @@ many_target_queues(Config) ->
         {#'basic.deliver'{consumer_tag = CTag},
          #amqp_msg{payload = Msg2}} ->
             ok
-    after 0 ->
+    after 30_000 ->
               exit(deliver_timeout)
     end,
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg2}},
-                amqp_channel:call(Ch, #'basic.get'{queue = TargetQ4}),
-                ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg2}},
-                amqp_channel:call(Ch, #'basic.get'{queue = TargetQ5}),
-                ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
-    %%TODO why is the 1st message (m1) a duplicate?
-    ?awaitMatch({#'basic.get_ok'{}, #amqp_msg{payload = Msg2}},
-                amqp_channel:call(Ch, #'basic.get'{queue = TargetQ6}),
-                ?DEFAULT_WAIT, ?DEFAULT_INTERVAL),
     ?assertEqual(2, counted(messages_dead_lettered_expired_total, Config)),
     ?assertEqual(2, counted(messages_dead_lettered_confirmed_total, Config)).
 
@@ -983,7 +952,7 @@ single_dlx_worker(Config) ->
     true = rpc(Config, Leader0, erlang, exit, [Pid, kill]),
     {ok, _, {_, Leader1}} = ?awaitMatch({ok, _, _},
                                         ra:members({RaName, Follower0}),
-                                        1000),
+                                        30000),
     ?assertNotEqual(Leader0, Leader1),
     [Follower1, Follower2] = Servers -- [Leader1],
     assert_active_dlx_workers(0, Config, Follower1),

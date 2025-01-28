@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_limits).
@@ -12,8 +12,6 @@
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
@@ -47,13 +45,21 @@ limits(ReqData, Context) ->
         none ->
             User = Context#context.user,
             VisibleVhosts = rabbit_mgmt_util:list_visible_vhosts_names(User),
-            [ [{vhost, VHost}, {value, Value}]
-              || {VHost, Value} <- rabbit_vhost_limit:list(),
-                 lists:member(VHost, VisibleVhosts) ];
+            [
+                #{
+                    vhost => VHost,
+                    value => rabbit_data_coercion:to_map(Value)
+                } || {VHost, Value} <- rabbit_vhost_limit:list(), lists:member(VHost, VisibleVhosts)
+            ];
         VHost when is_binary(VHost) ->
             case rabbit_vhost_limit:list(VHost) of
                 []    -> [];
-                Value -> [[{vhost, VHost}, {value, Value}]]
+                Value -> [
+                    #{
+                        vhost => VHost,
+                        value => rabbit_data_coercion:to_map(Value)
+                    }
+                ]
             end
     end.
 %%--------------------------------------------------------------------

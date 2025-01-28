@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_db).
 
--include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_metrics.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbit_common/include/rabbit_core_metrics.hrl").
@@ -145,13 +144,20 @@ augment_exchanges(Xs, Ranges, _)    ->
 
 %% we can only cache if no ranges are requested.
 %% The mgmt ui doesn't use ranges for queue listings
--spec augment_queues([proplists:proplist()], ranges(), basic | full) -> any().
-augment_queues(Qs, ?NO_RANGES = Ranges, basic)    ->
+-spec augment_queues([proplists:proplist()], ranges(), basic | detailed | full) -> any().
+augment_queues(Qs, ?NO_RANGES = Ranges, basic) ->
+   submit_cached(queues,
+                 fun(Interval, Queues) ->
+                         list_basic_queue_stats(Ranges, Queues, Interval)
+                 end, Qs, max(60000, length(Qs) * 2));
+augment_queues(Qs, ?NO_RANGES = Ranges, detailed) ->
    submit_cached(queues,
                  fun(Interval, Queues) ->
                          list_queue_stats(Ranges, Queues, Interval)
                  end, Qs, max(60000, length(Qs) * 2));
-augment_queues(Qs, Ranges, basic)    ->
+augment_queues(Qs, Ranges, basic) ->
+   submit(fun(Interval) -> list_basic_queue_stats(Ranges, Qs, Interval) end);
+augment_queues(Qs, Ranges, detailed) ->
    submit(fun(Interval) -> list_queue_stats(Ranges, Qs, Interval) end);
 augment_queues(Qs, Ranges, _)    ->
    submit(fun(Interval) -> detail_queue_stats(Ranges, Qs, Interval) end).
@@ -349,8 +355,16 @@ consumers_stats(VHost) ->
 -spec list_queue_stats(ranges(), [proplists:proplist()], integer()) ->
     [proplists:proplist()].
 list_queue_stats(Ranges, Objs, Interval) ->
+    list_queue_stats(Ranges, Objs, Interval, all_list_queue_data).
+
+-spec list_basic_queue_stats(ranges(), [proplists:proplist()], integer()) ->
+    [proplists:proplist()].
+list_basic_queue_stats(Ranges, Objs, Interval) ->
+    list_queue_stats(Ranges, Objs, Interval, all_list_basic_queue_data).
+
+list_queue_stats(Ranges, Objs, Interval, Fun) ->
     Ids = [id_lookup(queue_stats, Obj) || Obj <- Objs],
-    DataLookup = get_data_from_nodes({rabbit_mgmt_data, all_list_queue_data, [Ids, Ranges]}),
+    DataLookup = get_data_from_nodes({rabbit_mgmt_data, Fun, [Ids, Ranges]}),
     adjust_hibernated_memory_use(
       [begin
        Id = id_lookup(queue_stats, Obj),
@@ -652,9 +666,12 @@ node_stats(Ranges, Objs, Interval) ->
 combine(New, Old) ->
     case pget(state, Old) of
         unknown -> New ++ Old;
-        live    -> New ++ lists:keydelete(state, 1, Old);
+        live    -> New ++ delete_keys([state, online], Old);
         _       -> lists:keydelete(state, 1, New) ++ Old
     end.
+
+delete_keys(Keys, List) ->
+    [I || I <- List, not lists:member(element(1, I), Keys)].
 
 revert({'_', _}, {Id, _}) ->
     Id;

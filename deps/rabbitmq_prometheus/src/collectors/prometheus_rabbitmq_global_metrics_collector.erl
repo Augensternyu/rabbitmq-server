@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(prometheus_rabbitmq_global_metrics_collector).
 
@@ -29,22 +29,16 @@
 register() ->
     ok = prometheus_registry:register_collector(?MODULE).
 
-deregister_cleanup(_) -> ok.
+deregister_cleanup(_) ->
+    ok.
 
 collect_mf(_Registry, Callback) ->
-    _ = maps:fold(
-          fun (Name, #{type := Type, help := Help, values := Values}, Acc) ->
-                  Callback(
-                    create_mf(?METRIC_NAME(Name),
-                              Help,
-                              Type,
-                              maps:to_list(Values))),
-                  Acc
-          end,
-          ok,
-          rabbit_global_counters:prometheus_format()
-         ).
-
-%% ===================================================================
-%% Private functions
-%% ===================================================================
+    maps:foreach(
+      fun(Name, #{type := Type, help := Help, values := Values}) ->
+              Callback(
+                create_mf(?METRIC_NAME(Name),
+                          Help,
+                          Type,
+                          maps:to_list(Values)))
+      end,
+      rabbit_global_counters:prometheus_format()).

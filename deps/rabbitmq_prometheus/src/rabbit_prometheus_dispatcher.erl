@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_prometheus_dispatcher).
@@ -16,7 +16,9 @@ build_dispatcher() ->
     prometheus_registry:register_collectors([
         prometheus_rabbitmq_core_metrics_collector,
         prometheus_rabbitmq_global_metrics_collector,
+        prometheus_rabbitmq_message_size_metrics_collector,
         prometheus_rabbitmq_alarm_metrics_collector,
+        prometheus_rabbitmq_dynamic_collector,
         prometheus_process_collector]),
     prometheus_registry:register_collectors('per-object', [
         prometheus_vm_system_info_collector,
@@ -26,9 +28,13 @@ build_dispatcher() ->
         prometheus_vm_statistics_collector,
         prometheus_vm_msacc_collector,
         prometheus_rabbitmq_core_metrics_collector,
-        prometheus_rabbitmq_global_metrics_collector
+        prometheus_rabbitmq_global_metrics_collector,
+        prometheus_rabbitmq_message_size_metrics_collector
         ]),
     prometheus_registry:register_collectors('detailed', [
+        prometheus_rabbitmq_core_metrics_collector
+        ]),
+    prometheus_registry:register_collectors('memory-breakdown', [
         prometheus_rabbitmq_core_metrics_collector
         ]),
     rabbit_prometheus_handler:setup(),

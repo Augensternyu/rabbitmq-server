@@ -42,9 +42,12 @@ rabbitmq_app(
     license_files = [":license_files"],
     priv = [":priv"],
     deps = [
+        "//deps/amqp10_common:erlang_app",
         "//deps/rabbit_common:erlang_app",
+        "//deps/rabbitmq_stream_common:erlang_app",
         "@meck//:erlang_app",
         "@proper//:erlang_app",
+        "@ra//:erlang_app",
     ],
 )
 
@@ -57,10 +60,10 @@ alias(
 xref(
     name = "xref",
     additional_libs = [
-        "//deps/rabbitmq_cli:elixir",  # keep
+        "@rules_elixir//elixir",  # keep
         "//deps/rabbitmq_cli:erlang_app",  # keep
         "//deps/rabbit:erlang_app",  # keep
-        "//deps/rabbit/apps/rabbitmq_prelaunch:erlang_app",  # keep
+        "//deps/rabbitmq_prelaunch:erlang_app",  # keep
         "//deps/rabbitmq_management_agent:erlang_app",  # keep
         "@proper//:erlang_app",  # keep
     ],
@@ -77,16 +80,16 @@ plt(
     for_target = ":erlang_app",
     ignore_warnings = True,
     libs = [
-        "//deps/rabbitmq_cli:elixir",  # keep
+        "@rules_elixir//elixir",  # keep
     ],
     plt = "//:base_plt",
     deps = [
         "//deps/rabbit:erlang_app",  # keep
-        "//deps/rabbit/apps/rabbitmq_prelaunch:erlang_app",  # keep
-        "//deps/rabbitmq_cli:elixir",  # keep
         "//deps/rabbitmq_cli:erlang_app",  # keep
         "//deps/rabbitmq_management_agent:erlang_app",  # keep
+        "//deps/rabbitmq_prelaunch:erlang_app",  # keep
         "@proper//:erlang_app",  # keep
+        "@rules_elixir//elixir",  # keep
     ],
 )
 

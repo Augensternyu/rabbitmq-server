@@ -2,12 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_sharding_exchange_decorator).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -rabbit_boot_step({?MODULE,
                    [{description, "sharding exchange decorator"},
@@ -32,7 +30,7 @@ description() ->
 
 serialise_events(_X) -> false.
 
-create(none, X) ->
+create(_Tx, X) ->
     _ = maybe_start_sharding(X),
     ok.
 
@@ -48,7 +46,7 @@ active_for(X) ->
     end.
 
 %% we have to remove the policy from ?SHARDING_TABLE
-delete(none, X) ->
+delete(_Tx, X) ->
     _ = maybe_stop_sharding(X),
     ok.
 

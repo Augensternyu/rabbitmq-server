@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_runtime_parameters).
@@ -44,10 +44,10 @@
 
 -export([parse_set/5, set/5, set_any/5, clear/4, clear_any/4, list/0, list/1,
          list_component/1, list/2, list_formatted/1, list_formatted/3,
-         lookup/3, value/3, value/4, info_keys/0, clear_vhost/2,
+         lookup/3, value/3, info_keys/0, clear_vhost/2,
          clear_component/2]).
 
--export([parse_set_global/3, set_global/3, value_global/1, value_global/2,
+-export([parse_set_global/3, set_global/3, value_global/1,
          list_global/0, list_global_formatted/0, list_global_formatted/2,
          lookup_global/1, global_info_keys/0, clear_global/2]).
 
@@ -165,7 +165,11 @@ is_within_limit(Component) ->
     Limit = proplists:get_value(Component, Limits, -1),
     case Limit < 0 orelse count_component(Component) < Limit of
        true -> ok;
-       false -> {errors, [{"component ~ts is limited to ~tp per node", [Component, Limit]}]}
+       false ->
+            ErrorMsg = "Limit reached: component ~ts is limited to ~tp",
+            ErrorArgs = [Component, Limit],
+            rabbit_log:error(ErrorMsg, ErrorArgs),
+            {errors, [{"component ~ts is limited to ~tp", [Component, Limit]}]}
     end.
 
 count_component(Component) -> length(list_component(Component)).
@@ -203,8 +207,28 @@ clear_global(Key, ActingUser) ->
                           {user_who_performed_action, ActingUser}])
     end.
 
-clear_vhost(VHostName, _ActingUser) when is_binary(VHostName) ->
-    ok = rabbit_db_rtparams:delete(VHostName, '_', '_').
+clear_vhost(VHostName, ActingUser) when is_binary(VHostName) ->
+    case rabbit_db_rtparams:delete_vhost(VHostName) of
+        {ok, DeletedParams} ->
+            lists:foreach(
+              fun(#runtime_parameters{key = {_VHost, Component, Name}}) ->
+                      case lookup_component(Component) of
+                          {ok, Mod} ->
+                              event_notify(
+                                parameter_cleared, VHostName, Component,
+                                [{name, Name},
+                                 {user_who_performed_action, ActingUser}]),
+                              Mod:notify_clear(
+                                    VHostName, Component, Name, ActingUser),
+                              ok;
+                          _ ->
+                              ok
+                      end
+              end, DeletedParams),
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
 
 clear_component(<<"policy">>, _) ->
     {error_string, "policies may not be cleared using this method"};
@@ -323,19 +347,10 @@ lookup_global(Name)  ->
 
 value(VHost, Comp, Name) -> value0({VHost, Comp, Name}).
 
--spec value(rabbit_types:vhost(), binary(), binary(), term()) -> term().
-
-value(VHost, Comp, Name, Def) -> value0({VHost, Comp, Name}, Def).
-
 -spec value_global(atom()) -> term() | 'not_found'.
 
 value_global(Key) ->
     value0(Key).
-
--spec value_global(atom(), term()) -> term().
-
-value_global(Key, Default) ->
-    value0(Key, Default).
 
 value0(Key) ->
     case lookup0(Key, rabbit_misc:const(not_found)) of
@@ -343,18 +358,11 @@ value0(Key) ->
         Params    -> Params#runtime_parameters.value
     end.
 
-value0(Key, Default) ->
-    Params = lookup0(Key, fun () -> lookup_missing(Key, Default) end),
-    Params#runtime_parameters.value.
-
 lookup0(Key, DefaultFun) ->
     case rabbit_db_rtparams:get(Key) of
         undefined -> DefaultFun();
         Record    -> Record
     end.
-
-lookup_missing(Key, Default) ->
-    rabbit_db_rtparams:get_or_set(Key, Default).
 
 p(#runtime_parameters{key = {VHost, Component, Name}, value = Value}) ->
     [{vhost,     VHost},

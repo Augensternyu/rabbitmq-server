@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stomp_processor).
@@ -19,7 +19,6 @@
 -export([info/2]).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("amqp_client/include/rabbit_routing_prefixes.hrl").
 -include("rabbit_stomp_frame.hrl").
 -include("rabbit_stomp.hrl").
 -include("rabbit_stomp_headers.hrl").
@@ -46,7 +45,7 @@ adapter_name(State) ->
   #stomp_configuration{},
   {SendFun, AdapterInfo, SSLLoginName, PeerAddr})
     -> #proc_state{}
-  when SendFun :: fun((atom(), binary()) -> term()),
+  when SendFun :: fun((binary()) -> term()),
        AdapterInfo :: #amqp_adapter_info{},
        SSLLoginName :: atom() | binary(),
        PeerAddr :: inet:ip_address().
@@ -506,7 +505,7 @@ tidy_canceled_subscription(ConsumerTag, _Subscription,
 tidy_canceled_subscription(ConsumerTag, #subscription{dest_hdr = DestHdr},
                            Frame, State = #proc_state{subscriptions = Subs}) ->
     Subs1 = maps:remove(ConsumerTag, Subs),
-    {ok, Dest} = rabbit_routing_util:parse_endpoint(DestHdr),
+    {ok, Dest} = rabbit_routing_parser:parse_endpoint(DestHdr),
     maybe_delete_durable_sub(Dest, Frame, State#proc_state{subscriptions = Subs1}).
 
 maybe_delete_durable_sub({topic, Name}, Frame,
@@ -528,7 +527,7 @@ maybe_delete_durable_sub(_Destination, _Frame, State) ->
 with_destination(Command, Frame, State, Fun) ->
     case rabbit_stomp_frame:header(Frame, ?HEADER_DESTINATION) of
         {ok, DestHdr} ->
-            case rabbit_routing_util:parse_endpoint(DestHdr) of
+            case rabbit_routing_parser:parse_endpoint(DestHdr) of
                 {ok, Destination} ->
                     case Fun(Destination, DestHdr, Frame, State) of
                         {error, invalid_endpoint} ->
@@ -613,7 +612,7 @@ do_login(Username, Passwd, VirtualHost, Heartbeat, AdapterInfo, Version,
         {error, {auth_failure, _}} ->
             rabbit_log:warning("STOMP login failed for user '~ts': authentication failed", [Username]),
             error("Bad CONNECT", "Access refused for user '" ++
-                  binary_to_list(Username) ++ "'~n", [], State);
+                  binary_to_list(Username) ++ "'", [], State);
         {error, not_allowed} ->
             rabbit_log:warning("STOMP login failed for user '~ts': "
                                "virtual host access not allowed", [Username]),
@@ -676,13 +675,7 @@ do_subscribe(Destination, DestHdr, Frame,
                     {stop, normal, close_connection(State)};
                 error ->
                     ExchangeAndKey = parse_routing(Destination, DfltTopicEx),
-                    StreamOffset = rabbit_stomp_frame:stream_offset_header(Frame, undefined),
-                    Arguments = case StreamOffset of
-                                    undefined ->
-                                        [];
-                                    {Type, Value} ->
-                                        [{<<"x-stream-offset">>, Type, Value}]
-                                end,
+                    Arguments = subscribe_arguments(Frame),
                     try
                         amqp_channel:subscribe(Channel,
                                                #'basic.consume'{
@@ -720,6 +713,51 @@ do_subscribe(Destination, DestHdr, Frame,
             end;
         {error, _} = Err ->
             Err
+    end.
+
+subscribe_arguments(Frame) ->
+    subscribe_arguments([?HEADER_X_STREAM_OFFSET,
+                         ?HEADER_X_STREAM_FILTER,
+                         ?HEADER_X_STREAM_MATCH_UNFILTERED,
+                         ?HEADER_X_PRIORITY], Frame, []).
+
+subscribe_arguments([], _Frame , Acc) ->
+    Acc;
+subscribe_arguments([K | T], Frame, Acc0) ->
+    Acc1 = subscribe_argument(K, Frame, Acc0),
+    subscribe_arguments(T, Frame, Acc1).
+
+subscribe_argument(?HEADER_X_STREAM_OFFSET, Frame, Acc) ->
+    StreamOffset = rabbit_stomp_frame:stream_offset_header(Frame),
+    case StreamOffset of
+        not_found ->
+            Acc;
+        {OffsetType, OffsetValue} ->
+            [{list_to_binary(?HEADER_X_STREAM_OFFSET), OffsetType, OffsetValue}] ++ Acc
+    end;
+subscribe_argument(?HEADER_X_STREAM_FILTER, Frame, Acc) ->
+    StreamFilter = rabbit_stomp_frame:stream_filter_header(Frame),
+    case StreamFilter of
+        not_found ->
+            Acc;
+        {FilterType, FilterValue} ->
+            [{list_to_binary(?HEADER_X_STREAM_FILTER), FilterType, FilterValue}] ++ Acc
+    end;
+subscribe_argument(?HEADER_X_STREAM_MATCH_UNFILTERED, Frame, Acc) ->
+    MatchUnfiltered = rabbit_stomp_frame:boolean_header(Frame, ?HEADER_X_STREAM_MATCH_UNFILTERED),
+    case MatchUnfiltered of
+        {ok, MU} ->
+            [{list_to_binary(?HEADER_X_STREAM_MATCH_UNFILTERED), bool, MU}] ++ Acc;
+        not_found ->
+            Acc
+    end;
+subscribe_argument(?HEADER_X_PRIORITY, Frame, Acc) ->
+    Priority = rabbit_stomp_frame:integer_header(Frame, ?HEADER_X_PRIORITY),
+    case Priority of
+        {ok, P} ->
+            [{list_to_binary(?HEADER_X_PRIORITY), byte, P}] ++ Acc;
+        not_found ->
+            Acc
     end.
 
 check_subscription_access(Destination = {topic, _Topic},
@@ -872,7 +910,7 @@ ensure_reply_to(Frame = #stomp_frame{headers = Headers}, State) ->
         not_found ->
             {Frame, State};
         {ok, ReplyTo} ->
-            {ok, Destination} = rabbit_routing_util:parse_endpoint(ReplyTo),
+            {ok, Destination} = rabbit_routing_parser:parse_endpoint(ReplyTo),
             case rabbit_routing_util:dest_temp_queue(Destination) of
                 none ->
                     {Frame, State};
@@ -1096,7 +1134,7 @@ ensure_endpoint(source, EndPoint, {_, _, Headers, _} = Frame, Channel, State) ->
               Id = build_subscription_id(Frame),
               % Note: we discard the exchange here so there's no need to use
               % the default_topic_exchange configuration key
-              {_, Name} = rabbit_routing_util:parse_routing(EndPoint),
+              {_, Name} = rabbit_routing_parser:parse_routing(EndPoint),
               list_to_binary(rabbit_stomp_util:subscription_queue_name(Name, Id, Frame))
           end
          }] ++ rabbit_stomp_util:build_params(EndPoint, Headers),
@@ -1174,7 +1212,7 @@ send_frame(Command, Headers, BodyFragments, State) ->
 
 send_frame(Frame, State = #proc_state{send_fun = SendFun,
                                  trailing_lf = TrailingLF}) ->
-    SendFun(async, rabbit_stomp_frame:serialize(Frame, TrailingLF)),
+    SendFun(rabbit_stomp_frame:serialize(Frame, TrailingLF)),
     State.
 
 send_error_frame(Message, ExtraHeaders, Format, Args, State) ->
@@ -1200,7 +1238,7 @@ additional_info(Key,
     proplists:get_value(Key, AddInfo).
 
 parse_routing(Destination, DefaultTopicExchange) ->
-    {Exchange0, RoutingKey} = rabbit_routing_util:parse_routing(Destination),
+    {Exchange0, RoutingKey} = rabbit_routing_parser:parse_routing(Destination),
     Exchange1 = maybe_apply_default_topic_exchange(Exchange0, DefaultTopicExchange),
     {Exchange1, RoutingKey}.
 

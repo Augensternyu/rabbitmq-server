@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Core.Helpers do
   alias RabbitMQ.CLI.Core.{Config, DataCoercion, NodeName}
@@ -75,6 +75,11 @@ defmodule RabbitMQ.CLI.Core.Helpers do
       value ->
         fun.(value)
     end
+  end
+
+  def cluster_member?(target_node, node_to_check, timeout \\ 30_000) do
+    node_to_check_a = DataCoercion.to_atom(node_to_check)
+    Enum.member?(nodes_in_cluster(target_node, timeout), node_to_check_a)
   end
 
   def node_running?(node) do

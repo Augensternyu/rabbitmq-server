@@ -2,19 +2,17 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(rabbit_exchange_type_recent_history).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("rabbit_common/include/rabbit_framing.hrl").
--include("rabbit_recent_history.hrl").
 
 -behaviour(rabbit_exchange_type).
 
 -import(rabbit_misc, [table_lookup/2]).
 
--export([description/0, serialise_events/0, route/2]).
+-export([description/0, serialise_events/0, route/3]).
 -export([validate/1, validate_binding/2, create/2, delete/2, add_binding/3,
          remove_bindings/3, assert_args_equivalence/2, policy_changed/2]).
 -export([setup_schema/0, disable_plugin/0]).
@@ -46,8 +44,7 @@ description() ->
 serialise_events() -> false.
 
 route(#exchange{name      = XName,
-                arguments = Args},
-      #delivery{message = Message}) ->
+                arguments = Args}, Message, _Options) ->
     Length = table_lookup(Args, <<"x-recent-history-length">>),
     maybe_cache_msg(XName, Message, Length),
     rabbit_router:match_routing_key(XName, ['_']).
@@ -70,13 +67,13 @@ validate(#exchange{arguments = Args}) ->
     end.
 
 validate_binding(_X, _B) -> ok.
-create(_Tx, _X) -> ok.
+create(_Serial, _X) -> ok.
 policy_changed(_X1, _X2) -> ok.
 
-delete(none, #exchange{ name = XName }) ->
+delete(_Tx, #exchange{ name = XName }) ->
     rabbit_db_rh_exchange:delete(XName).
 
-add_binding(none, #exchange{ name = XName },
+add_binding(_Tx, #exchange{ name = XName },
             #binding{ destination = #resource{kind = queue} = QName }) ->
     _ = case rabbit_amqqueue:lookup(QName) of
         {error, not_found} ->
@@ -86,7 +83,7 @@ add_binding(none, #exchange{ name = XName },
             deliver_messages([Q], Msgs)
     end,
     ok;
-add_binding(none, #exchange{ name = XName },
+add_binding(_Tx, #exchange{ name = XName },
             #binding{ destination = #resource{kind = exchange} = DestName }) ->
     _ = case rabbit_exchange:lookup(DestName) of
         {error, not_found} ->
@@ -94,8 +91,7 @@ add_binding(none, #exchange{ name = XName },
         {ok, X} ->
             Msgs = get_msgs_from_cache(XName),
             [begin
-                 Delivery = rabbit_basic:delivery(false, false, Msg, undefined),
-                 Qs = rabbit_exchange:route(X, Delivery),
+                 Qs = rabbit_exchange:route(X, Msg),
                  case rabbit_amqqueue:lookup_many(Qs) of
                      [] ->
                          destination_not_found_error(Qs);
@@ -104,11 +100,9 @@ add_binding(none, #exchange{ name = XName },
                  end
              end || Msg <- Msgs]
     end,
-    ok;
-add_binding(none, _Exchange, _Binding) ->
     ok.
 
-remove_bindings(_Tx, _X, _Bs) -> ok.
+remove_bindings(_Serial, _X, _Bs) -> ok.
 
 assert_args_equivalence(X, Args) ->
     rabbit_exchange:assert_args_equivalence(X, Args).
@@ -120,28 +114,16 @@ setup_schema() ->
 
 disable_plugin() ->
     rabbit_registry:unregister(exchange, <<"x-recent-history">>),
-    rabbit_db_rh_exchange:delete(),
-    ok.
+    rabbit_db_rh_exchange:delete().
 
 %%----------------------------------------------------------------------------
 %%private
-maybe_cache_msg(XName,
-                #basic_message{content =
-                               #content{properties =
-                                        #'P_basic'{headers = Headers}}}
-                = Message,
-                Length) ->
-    case Headers of
-        undefined ->
-            cache_msg(XName, Message, Length);
+maybe_cache_msg(XName, Message, Length) ->
+    case mc:x_header(<<"x-recent-history-no-store">>, Message) of
+        {boolean, true} ->
+            ok;
         _ ->
-            Store = table_lookup(Headers, <<"x-recent-history-no-store">>),
-            case Store of
-                {bool, true} ->
-                    ok;
-                _ ->
-                    cache_msg(XName, Message, Length)
-            end
+            cache_msg(XName, Message, Length)
     end.
 
 cache_msg(XName, Message, Length) ->
@@ -153,8 +135,7 @@ get_msgs_from_cache(XName) ->
 deliver_messages(Qs, Msgs) ->
     lists:map(
       fun (Msg) ->
-              Delivery = rabbit_basic:delivery(false, false, Msg, undefined),
-              rabbit_amqqueue:deliver(Qs, Delivery)
+              _ = rabbit_queue_type:deliver(Qs, Msg, #{}, stateless)
       end, lists:reverse(Msgs)).
 
 -spec destination_not_found_error(string()) -> no_return().

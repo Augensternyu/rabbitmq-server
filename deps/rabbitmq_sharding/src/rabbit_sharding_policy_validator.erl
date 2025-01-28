@@ -2,14 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_sharding_policy_validator).
 
 -behaviour(rabbit_policy_validator).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([register/0, validate_policy/1]).
 

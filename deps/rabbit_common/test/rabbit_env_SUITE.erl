@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2019-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_env_SUITE).
@@ -58,7 +58,8 @@
          check_log_process_env/1,
          check_log_context/1,
          check_get_used_env_vars/1,
-         check_parse_conf_env_file_output/1
+         check_parse_conf_env_file_output/1,
+         check_parse_conf_env_file_output_win32/1
         ]).
 
 all() ->
@@ -101,7 +102,8 @@ all() ->
      check_log_process_env,
      check_log_context,
      check_get_used_env_vars,
-     check_parse_conf_env_file_output
+     check_parse_conf_env_file_output,
+     check_parse_conf_env_file_output_win32
     ].
 
 suite() ->
@@ -185,7 +187,6 @@ check_default_values(_) ->
       interactive_shell => default,
       keep_pid_file_on_exit => default,
       log_base_dir => default,
-      log_feature_flags_registry => default,
       log_levels => default,
       main_config_file => default,
       main_log_file => default,
@@ -229,7 +230,6 @@ check_default_values(_) ->
          interactive_shell => false,
          keep_pid_file_on_exit => false,
          log_base_dir => "/var/log/rabbitmq",
-         log_feature_flags_registry => false,
          log_levels => undefined,
          main_config_file => "/etc/rabbitmq/rabbitmq",
          main_log_file => "/var/log/rabbitmq/" ++ NodeS ++ ".log",
@@ -280,7 +280,6 @@ check_default_values(_) ->
          interactive_shell => false,
          keep_pid_file_on_exit => false,
          log_base_dir => "%APPDATA%/RabbitMQ/log",
-         log_feature_flags_registry => false,
          log_levels => undefined,
          main_config_file => "%APPDATA%/RabbitMQ/rabbitmq",
          main_log_file => "%APPDATA%/RabbitMQ/log/" ++ NodeS ++ ".log",
@@ -381,7 +380,8 @@ check_values_from_reachable_remote_node(Config) ->
 
     try
         persistent_term:put({rabbit_env, os_type}, {unix, undefined}),
-        UnixContext = rabbit_env:get_context(Node),
+        TakeFromRemoteNode = {Node, 120000},
+        UnixContext = rabbit_env:get_context(TakeFromRemoteNode),
 
         persistent_term:erase({rabbit_env, os_type}),
 
@@ -405,7 +405,6 @@ check_values_from_reachable_remote_node(Config) ->
           interactive_shell => default,
           keep_pid_file_on_exit => default,
           log_base_dir => default,
-          log_feature_flags_registry => default,
           log_levels => default,
           main_config_file => default,
           main_log_file => default,
@@ -445,11 +444,10 @@ check_values_from_reachable_remote_node(Config) ->
              erlang_dist_tcp_port => 25672,
              feature_flags_file => FeatureFlagsFile,
              forced_feature_flags_on_init => RFFValue,
-             from_remote_node => {Node, 10000},
+             from_remote_node => TakeFromRemoteNode,
              interactive_shell => false,
              keep_pid_file_on_exit => false,
              log_base_dir => "/var/log/rabbitmq",
-             log_feature_flags_registry => false,
              log_levels => undefined,
              main_config_file => "/etc/rabbitmq/rabbitmq",
              main_log_file => "/var/log/rabbitmq/" ++ NodeS ++ ".log",
@@ -490,9 +488,19 @@ consume_stdout(Port, Nodename) ->
 
 wait_for_remote_node(Nodename) ->
     case net_adm:ping(Nodename) of
-        pong -> ok;
-        pang -> timer:sleep(200),
-                wait_for_remote_node(Nodename)
+        pong ->
+            Ret = erpc:call(
+                    Nodename, application, get_env, [rabbit, plugins_dir]),
+            case Ret of
+                {ok, Val} when is_list(Val) ->
+                    ok;
+                _ ->
+                    timer:sleep(200),
+                    wait_for_remote_node(Nodename)
+            end;
+        pang ->
+            timer:sleep(200),
+            wait_for_remote_node(Nodename)
     end.
 
 check_values_from_offline_remote_node(_) ->
@@ -527,7 +535,6 @@ check_values_from_offline_remote_node(_) ->
       interactive_shell => default,
       keep_pid_file_on_exit => default,
       log_base_dir => default,
-      log_feature_flags_registry => default,
       log_levels => default,
       main_config_file => default,
       main_log_file => default,
@@ -571,7 +578,6 @@ check_values_from_offline_remote_node(_) ->
          interactive_shell => false,
          keep_pid_file_on_exit => false,
          log_base_dir => "/var/log/rabbitmq",
-         log_feature_flags_registry => false,
          log_levels => undefined,
          main_config_file => "/etc/rabbitmq/rabbitmq",
          main_log_file => "/var/log/rabbitmq/" ++ NodeS ++ ".log",
@@ -1104,6 +1110,26 @@ get_default_nodename() ->
               "rabbit@\\1",
               [{return, list}]),
     list_to_atom(NodeS).
+
+check_parse_conf_env_file_output_win32(_) ->
+    ?assertEqual(
+       #{},
+       rabbit_env:parse_conf_env_file_output_win32(
+         [],
+         #{}
+        )),
+    ?assertEqual(
+       #{"UNQUOTED" => "a",
+         "UNICODE" => [39, 43, 43, 32, 1550, 32, 39],
+         "DOUBLE_QUOTED" => "c"},
+       rabbit_env:parse_conf_env_file_output_win32(
+         %% a relatively rarely used Unicode character
+         ["++ ؎ ",
+          "UNQUOTED=a",
+          "UNICODE='++ ؎ '",
+          "DOUBLE_QUOTED=\"c\""],
+         #{}
+        )).
 
 check_parse_conf_env_file_output(_) ->
     ?assertEqual(

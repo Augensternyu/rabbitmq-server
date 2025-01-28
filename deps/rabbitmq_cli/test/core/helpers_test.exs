@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule HelpersTest do
   alias RabbitMQ.CLI.Core.{Config, Helpers}
@@ -122,8 +122,8 @@ defmodule HelpersTest do
     rabbitmq_home = :rabbit_misc.rpc_call(node(), :code, :lib_dir, [:rabbit])
     opts = %{plugins_dir: to_string(plugins_directory_03), rabbitmq_home: rabbitmq_home}
 
-    desc = 'A mock RabbitMQ plugin to be used in tests'
-    vsn = '0.1.0'
+    desc = ~c"A mock RabbitMQ plugin to be used in tests"
+    vsn = ~c"0.1.0"
 
     assert Enum.member?(Application.loaded_applications(), {:mock_rabbitmq_plugins_03, desc, vsn}) ==
              false
@@ -138,8 +138,8 @@ defmodule HelpersTest do
     rabbitmq_home = :rabbit_misc.rpc_call(node(), :code, :lib_dir, [:rabbit])
     opts = %{plugins_dir: to_string(plugins_directory_04), rabbitmq_home: rabbitmq_home}
 
-    desc = 'A mock RabbitMQ plugin to be used in tests'
-    vsn = 'rolling'
+    desc = ~c"A mock RabbitMQ plugin to be used in tests"
+    vsn = ~c"rolling"
 
     assert Enum.member?(Application.loaded_applications(), {:mock_rabbitmq_plugins_04, desc, vsn}) ==
              false

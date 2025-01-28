@@ -2,14 +2,14 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_format).
 
 -export([format/2, ip/1, ipb/1, amqp_table/1, tuple/1]).
 -export([parameter/1, now_to_str/0, now_to_str/1, strip_pids/1]).
--export([protocol/1, resource/1, queue/1, queue_state/1, queue_info/1]).
+-export([protocol/1, resource/1, queue/1, queue/2, queue_state/1, queue_info/1]).
 -export([exchange/1, user/1, internal_user/1, binding/1, url/2]).
 -export([pack_binding_props/2, tokenise/1]).
 -export([to_amqp_table/1, listener/1, web_context/1, properties/1, basic_properties/1]).
@@ -18,7 +18,8 @@
 -export([format_nulls/1, escape_html_tags/1]).
 -export([print/2, print/1]).
 
--export([format_queue_stats/1, format_channel_stats/1,
+-export([format_queue_stats/1, format_queue_basic_stats/1,
+         format_channel_stats/1,
          format_consumer_arguments/1,
          format_connection_created/1,
          format_accept_content/1, format_args/1]).
@@ -52,20 +53,15 @@ format_queue_stats({exclusive_consumer_pid, _}) ->
     [];
 format_queue_stats({single_active_consumer_pid, _}) ->
     [];
-format_queue_stats({slave_pids, ''}) ->
-    [];
-format_queue_stats({slave_pids, Pids}) ->
-    [{slave_nodes, [node(Pid) || Pid <- Pids]}];
 format_queue_stats({leader, Leader}) ->
     [{node, Leader}];
-format_queue_stats({synchronised_slave_pids, ''}) ->
-    [];
 format_queue_stats({effective_policy_definition, []}) ->
     [{effective_policy_definition, #{}}];
-format_queue_stats({synchronised_slave_pids, Pids}) ->
-    [{synchronised_slave_nodes, [node(Pid) || Pid <- Pids]}];
 format_queue_stats({backing_queue_status, Value}) ->
-    [{backing_queue_status, properties(Value)}];
+    case proplists:get_value(version, Value, undefined) of
+        undefined -> [];
+        Version   -> [{storage_version, Version}]
+    end;
 format_queue_stats({idle_since, Value}) ->
     [{idle_since, now_to_str(Value)}];
 format_queue_stats({state, Value}) ->
@@ -74,7 +70,53 @@ format_queue_stats({disk_reads, _}) ->
     [];
 format_queue_stats({disk_writes, _}) ->
     [];
+format_queue_stats({members, Value}) ->
+    [{members, lists:sort(Value)}];
+format_queue_stats({online, Value}) ->
+    [{online, lists:sort(Value)}];
+format_queue_stats({open_files, Value}) ->
+    [{open_files, lists:sort(Value)}];
 format_queue_stats(Stat) ->
+    [Stat].
+
+format_queue_basic_stats({_, ''}) ->
+    [];
+format_queue_basic_stats({reductions, _}) ->
+    [];
+format_queue_basic_stats({exclusive_consumer_pid, _}) ->
+    [];
+format_queue_basic_stats({single_active_consumer_pid, _}) ->
+    [];
+format_queue_basic_stats({slave_pids, Pids}) ->
+    [{slave_nodes, [node(Pid) || Pid <- Pids]}];
+format_queue_basic_stats({leader, Leader}) ->
+    [{node, Leader}];
+format_queue_basic_stats({effective_policy_definition, []}) ->
+    [{effective_policy_definition, #{}}];
+format_queue_basic_stats({synchronised_slave_pids, Pids}) ->
+    [{synchronised_slave_nodes, [node(Pid) || Pid <- Pids]}];
+format_queue_basic_stats({backing_queue_status, Value}) ->
+    case proplists:get_value(version, Value, undefined) of
+        undefined -> [];
+        Version   -> [{storage_version, Version}]
+    end;
+format_queue_basic_stats({garbage_collection, _}) ->
+    [];
+format_queue_basic_stats({idle_since, _Value}) ->
+    [];
+format_queue_basic_stats({state, Value}) ->
+    queue_state(Value);
+format_queue_basic_stats({disk_reads, _}) ->
+    [];
+format_queue_basic_stats({disk_writes, _}) ->
+    [];
+format_queue_basic_stats({members, Value}) ->
+    [{members, lists:sort(Value)}];
+format_queue_basic_stats({online, Value}) ->
+    [{online, lists:sort(Value)}];
+format_queue_basic_stats({open_files, Value}) ->
+    [{open_files, lists:sort(Value)}];
+format_queue_basic_stats(Stat) ->
     [Stat].
 
 format_channel_stats([{idle_since, Value} | Rest]) ->
@@ -176,6 +218,8 @@ protocol(unknown) ->
     unknown;
 protocol(Version = {_Major, _Minor, _Revision}) ->
     protocol({'AMQP', Version});
+protocol(Version = {1, 0}) ->
+    protocol({'AMQP', Version});
 protocol({Family, Version}) ->
     print("~ts ~ts", [Family, protocol_version(Version)]);
 protocol(Protocol) when is_binary(Protocol) ->
@@ -221,7 +265,9 @@ internal_user(User) ->
 
 user(User) ->
     [{name, User#user.username},
-     {tags, tags_as_binaries(User#user.tags)}].
+     {tags, tags_as_binaries(User#user.tags)},
+     {is_internal_user, lists:any(fun({Module,_}) -> Module == rabbit_auth_backend_internal  end,
+                                    User#user.authz_backends)}].
 
 tags_as_binaries(Tags) ->
     [to_binary(T) || T <- Tags].
@@ -329,34 +375,26 @@ exchange(X) ->
 %% We get queues using rabbit_amqqueue:list/1 rather than :info_all/1 since
 %% the latter wakes up each queue. Therefore we have a record rather than a
 %% proplist to deal with.
-queue(Q) when ?is_amqqueue(Q) ->
-    Name = amqqueue:get_name(Q),
+queue(Q) ->
+    queue(Q, #{}).
+
+queue(Q, Ctx) when ?is_amqqueue(Q) ->
+    #resource{name = Name, virtual_host = VHost} = amqqueue:get_name(Q),
     Durable = amqqueue:is_durable(Q),
     AutoDelete = amqqueue:is_auto_delete(Q),
     ExclusiveOwner = amqqueue:get_exclusive_owner(Q),
     Arguments = amqqueue:get_arguments(Q),
     Pid = amqqueue:get_pid(Q),
-    State = amqqueue:get_state(Q),
-    %% TODO: in the future queue types should be registered with their
-    %% full and short names and this hard-coded translation should not be
-    %% necessary
-    Type = case amqqueue:get_type(Q) of
-               rabbit_classic_queue -> classic;
-               rabbit_quorum_queue -> quorum;
-               rabbit_stream_queue -> stream;
-               T -> T
-           end,
-    format(
-      [{name,        Name},
-       {durable,     Durable},
-       {auto_delete, AutoDelete},
-       {exclusive,   is_pid(ExclusiveOwner)},
-       {owner_pid,   ExclusiveOwner},
-       {arguments,   Arguments},
-       {pid,         Pid},
-       {type,        Type},
-       {state,       State}] ++ rabbit_amqqueue:format(Q),
-      {fun format_exchange_and_queue/1, false}).
+    [{name, Name},
+     {vhost, VHost},
+     {durable, Durable},
+     {auto_delete, AutoDelete},
+     {exclusive, is_pid(ExclusiveOwner)},
+     {owner_pid, ExclusiveOwner},
+     {arguments, amqp_table(Arguments)},
+     {pid, Pid}
+     %% type specific stuff like, state, type, members etc is returned here
+     | rabbit_queue_type:format(Q, Ctx)].
 
 queue_info(List) ->
     format(List, {fun format_exchange_and_queue/1, false}).
@@ -469,14 +507,6 @@ strip_pids([{channel_pid, _} | T], Acc) ->
     strip_pids(T, Acc);
 strip_pids([{exclusive_consumer_pid, _} | T], Acc) ->
     strip_pids(T, Acc);
-strip_pids([{slave_pids, ''} | T], Acc) ->
-    strip_pids(T, Acc);
-strip_pids([{slave_pids, Pids} | T], Acc) ->
-    strip_pids(T, [{slave_nodes, [node(Pid) || Pid <- Pids]} | Acc]);
-strip_pids([{synchronised_slave_pids, ''} | T], Acc) ->
-    strip_pids(T, Acc);
-strip_pids([{synchronised_slave_pids, Pids} | T], Acc) ->
-    strip_pids(T, [{synchronised_slave_nodes, [node(Pid) || Pid <- Pids]} | Acc]);
 strip_pids([{K, [P|_] = Nested} | T], Acc) when is_tuple(P) -> % recurse
     strip_pids(T, [{K, strip_pids(Nested)} | Acc]);
 strip_pids([{K, [L|_] = Nested} | T], Acc) when is_list(L) -> % recurse
@@ -549,12 +579,20 @@ format_channel_details(Any) -> Any.
 
 -spec format_consumer_arguments(proplists:proplist()) -> proplists:proplist().
 format_consumer_arguments(Obj) ->
-    case pget(arguments, Obj) of
-         undefined -> Obj;
-         #{}       -> Obj;
-         []        -> pset(arguments, #{}, Obj);
-         Args      -> pset(arguments, amqp_table(Args), Obj)
-     end.
+    %% Make sure arguments is a map and not an empty list
+    Obj1 = case pget(arguments, Obj) of
+        undefined -> Obj;
+        #{}       -> Obj;
+        []        -> pset(arguments, #{}, Obj);
+        Args      -> pset(arguments, amqp_table(Args), Obj)
+    end,
+    %% Make sure channel_details is a map and not an empty list
+    case pget(channel_details, Obj1) of
+        undefined -> Obj1;
+        #{}       -> Obj1;
+        []        -> pset(channel_details, #{}, Obj1);
+        _         -> Obj1
+    end.
 
 
 parse_bool(<<"true">>)  -> true;

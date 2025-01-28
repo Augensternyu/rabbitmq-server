@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Core.CodePath do
   alias RabbitMQ.CLI.Core.{Config, Paths, Platform}
@@ -61,9 +61,9 @@ defmodule RabbitMQ.CLI.Core.CodePath do
 
     case :erl_prim_loader.list_dir(app_dir) do
       {:ok, list} ->
-        case Enum.member?(list, 'ebin') do
+        case Enum.member?(list, ~c"ebin") do
           true ->
-            ebin_dir = :filename.join(app_dir, 'ebin')
+            ebin_dir = :filename.join(app_dir, ~c"ebin")
             Code.append_path(ebin_dir)
 
           false ->

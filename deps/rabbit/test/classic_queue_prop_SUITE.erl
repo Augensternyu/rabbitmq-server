@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(classic_queue_prop_SUITE).
@@ -23,7 +23,6 @@
 -record(cq, {
     amq = undefined :: amqqueue:amqqueue(),
     name :: atom(),
-    version :: 1 | 2,
 
     %% We have one queue per way of publishing messages (such as channels).
     %% We can only confirm the publish order on a per-channel level because
@@ -73,16 +72,12 @@
 %% Common Test.
 
 all() ->
-    [{group, classic_queue_tests}, {group, classic_queue_regressions}].
+    [{group, classic_queue_tests}].
 
 groups() ->
     [{classic_queue_tests, [], [
 %        manual%,
-        classic_queue_v1,
         classic_queue_v2
-     ]},
-     {classic_queue_regressions, [], [
-        reg_v1_full_recover_only_journal
      ]}
     ].
 
@@ -133,10 +128,10 @@ instrs_to_manual([Instrs]) ->
     io:format("~ndo_manual(Config) ->~n~n"),
     lists:foreach(fun
         ({init, CQ}) ->
-            #cq{name=Name, version=Version} = CQ,
-            io:format("    St0 = #cq{name=~0p, version=~0p,~n"
+            #cq{name=Name} = CQ,
+            io:format("    St0 = #cq{name=~0p,~n"
                       "              config=minimal_config(Config)},~n~n",
-                      [Name, Version]);
+                      [Name]);
         ({set, {var,Var}, {call, ?MODULE, cmd_setup_queue, _}}) ->
             Res = "Res" ++ integer_to_list(Var),
             PrevSt = "St" ++ integer_to_list(Var - 1),
@@ -194,15 +189,6 @@ manual(Config) ->
 do_manual(Config) ->
     Config =:= Config.
 
-classic_queue_v1(Config) ->
-    true = rabbit_ct_broker_helpers:rpc(Config, 0,
-        ?MODULE, do_classic_queue_v1, [Config]).
-
-do_classic_queue_v1(Config) ->
-    true = proper:quickcheck(prop_classic_queue_v1(Config),
-                             [{on_output, on_output_fun()},
-                              {numtests, ?NUM_TESTS}]).
-
 classic_queue_v2(Config) ->
     true = rabbit_ct_broker_helpers:rpc(Config, 0,
         ?MODULE, do_classic_queue_v2, [Config]).
@@ -222,16 +208,11 @@ on_output_fun() ->
 
 %% Properties.
 
-prop_classic_queue_v1(Config) ->
-    {ok, LimiterPid} = rabbit_limiter:start_link(no_id),
-    InitialState = #cq{name=?FUNCTION_NAME, version=1,
-                       config=minimal_config(Config), limiter=LimiterPid},
-    prop_common(InitialState).
-
 prop_classic_queue_v2(Config) ->
     {ok, LimiterPid} = rabbit_limiter:start_link(no_id),
-    InitialState = #cq{name=?FUNCTION_NAME, version=2,
-                       config=minimal_config(Config), limiter=LimiterPid},
+    InitialState = #cq{name=?FUNCTION_NAME,
+                       config=minimal_config(Config),
+                       limiter=LimiterPid},
     prop_common(InitialState).
 
 prop_common(InitialState) ->
@@ -340,8 +321,8 @@ next_state(St=#cq{q=Q0, confirmed=Confirmed, uncertain=Uncertain0}, AMQ, {call, 
     St#cq{amq=AMQ, q=Q, restarted=true, crashed=true, uncertain=Uncertain};
 next_state(St, _, {call, _, cmd_set_v2_check_crc32, _}) ->
     St;
-next_state(St, _, {call, _, cmd_set_version, [Version]}) ->
-    St#cq{version=Version};
+next_state(St, _, {call, _, cmd_set_version, _}) ->
+    St;
 next_state(St=#cq{q=Q}, Msg, {call, _, cmd_publish_msg, _}) ->
     IntQ = maps:get(internal, Q, queue:new()),
     St#cq{q=Q#{internal => queue:in(Msg, IntQ)}};
@@ -527,8 +508,10 @@ postcondition(_, {call, _, Cmd, _}, Q) when
     element(1, Q) =:= amqqueue;
 postcondition(_, {call, _, cmd_set_v2_check_crc32, _}, Res) ->
     Res =:= ok;
-postcondition(#cq{amq=AMQ}, {call, _, cmd_set_version, [Version]}, _) ->
-    do_check_queue_version(AMQ, Version) =:= ok;
+postcondition(#cq{amq=AMQ}, {call, _, cmd_set_version, _}, _) ->
+    %% We cannot use CQv1 anymore so we always
+    %% expect the queue to use v2.
+    do_check_queue_version(AMQ, 2) =:= ok;
 postcondition(_, {call, _, cmd_publish_msg, _}, Msg) ->
     is_record(Msg, amqp_msg);
 postcondition(_, {call, _, cmd_purge, _}, Res) ->
@@ -695,21 +678,16 @@ crashed_and_previously_received(#cq{crashed=Crashed, received=Received}, Msg) ->
 
 %% Helpers.
 
-cmd_setup_queue(St=#cq{name=Name, version=Version}) ->
+cmd_setup_queue(St=#cq{name=Name}) ->
     ?DEBUG("~0p", [St]),
     IsDurable = true, %% We want to be able to restart the queue process.
     IsAutoDelete = false,
-    %% We cannot use args to set the version as the arguments override
-    %% the policies and we also want to test policy changes.
-    cmd_set_version(Version),
-    Args = [
-%        {<<"x-queue-version">>, long, Version}
-    ],
+    Args = [],
     QName = rabbit_misc:r(<<"/">>, queue, iolist_to_binary([atom_to_binary(Name, utf8), $_,
                                                             integer_to_binary(erlang:unique_integer([positive]))])),
     {new, AMQ} = rabbit_amqqueue:declare(QName, IsDurable, IsAutoDelete, Args, none, <<"acting-user">>),
-    %% We check that the queue was creating with the right version.
-    ok = do_check_queue_version(AMQ, Version),
+    %% We check that the queue was created with the right version.
+    ok = do_check_queue_version(AMQ, 2),
     AMQ.
 
 cmd_teardown_queue(St=#cq{amq=undefined}) ->
@@ -767,7 +745,7 @@ do_wait_updated_amqqueue(Name, Pid) ->
     end.
 
 cmd_set_v2_check_crc32(Value) ->
-    application:set_env(rabbit, classic_queue_store_v2_check_crc32, Value).
+    persistent_term:put(classic_queue_store_v2_check_crc32, Value).
 
 cmd_set_version(Version) ->
     ?DEBUG("~0p ~0p", [Version]),
@@ -785,21 +763,24 @@ do_check_queue_version(AMQ, Version, N) ->
     timer:sleep(1),
     [{backing_queue_status, Status}] = rabbit_amqqueue:info(AMQ, [backing_queue_status]),
     case proplists:get_value(version, Status) of
-        Version -> ok;
+        2 -> ok;
         _ -> do_check_queue_version(AMQ, Version, N - 1)
     end.
 
 cmd_publish_msg(St=#cq{amq=AMQ}, PayloadSize, DeliveryMode, Mandatory, Expiration) ->
     ?DEBUG("~0p ~0p ~0p ~0p ~0p", [St, PayloadSize, DeliveryMode, Mandatory, Expiration]),
     Payload = do_rand_payload(PayloadSize),
-    Msg = rabbit_basic:message(rabbit_misc:r(<<>>, exchange, <<>>),
-                               <<>>, #'P_basic'{delivery_mode = DeliveryMode,
-                                                expiration = do_encode_expiration(Expiration)},
-                               Payload),
-    Delivery = #delivery{mandatory = Mandatory, sender = self(),
-                         confirm = false, message = Msg, flow = noflow},
-    ok = rabbit_amqqueue:deliver([AMQ], Delivery),
-    {MsgProps, MsgPayload} = rabbit_basic_common:from_content(Msg#basic_message.content),
+    Ex = rabbit_misc:r(<<>>, exchange, <<>>),
+    BasicMsg = rabbit_basic:message(Ex, <<>>,
+                                    #'P_basic'{delivery_mode = DeliveryMode,
+                                               expiration = do_encode_expiration(Expiration)},
+                                    Payload),
+
+    {ok, Msg0} = mc_amqpl:message(Ex, <<>>, BasicMsg#basic_message.content),
+    Msg = mc:set_annotation(id, BasicMsg#basic_message.id, Msg0),
+    {ok, _, _} = rabbit_queue_type:deliver([AMQ], Msg, #{}, stateless),
+    Content = mc:protocol_state(Msg),
+    {MsgProps, MsgPayload} = rabbit_basic_common:from_content(Content),
     #amqp_msg{props=MsgProps, payload=MsgPayload}.
 
 cmd_basic_get_msg(St=#cq{amq=AMQ, limiter=LimiterPid}) ->
@@ -812,7 +793,8 @@ cmd_basic_get_msg(St=#cq{amq=AMQ, limiter=LimiterPid}) ->
         {empty, _} ->
             empty;
         {ok, _CountMinusOne, {_QName, _QPid, _AckTag, _IsDelivered, Msg}, _} ->
-            {MsgProps, MsgPayload} = rabbit_basic_common:from_content(Msg#basic_message.content),
+            Content = mc:protocol_state(Msg),
+            {MsgProps, MsgPayload} = rabbit_basic_common:from_content(Content),
             #amqp_msg{props=MsgProps, payload=MsgPayload}
     end.
 
@@ -1091,37 +1073,38 @@ queue_fold(Fun, Acc0, {R, F}) when is_function(Fun, 2), is_list(R), is_list(F) -
 queue_fold(Fun, Acc0, Q) ->
     erlang:error(badarg, [Fun, Acc0, Q]).
 
-%% Regression tests.
-%%
-%% These tests are hard to reproduce by running the test suite normally
-%% because they require a very specific sequence of events.
+cmd(CmdName, StIn, ExtraArgs) ->
+    Res0 = apply(?MODULE, CmdName, [StIn | ExtraArgs]),
+    true = postcondition(StIn, {call, undefined, CmdName, [StIn | ExtraArgs]}, Res0),
+    StOut = next_state(StIn, Res0, {call, undefined, CmdName, [StIn | ExtraArgs]}),
+    {StOut, Res0}.
 
-reg_v1_full_recover_only_journal(Config) ->
-    true = rabbit_ct_broker_helpers:rpc(Config, 0,
-        ?MODULE, do_reg_v1_full_recover_only_journal, [Config]).
+validate_and_teaddown(St) ->
+    try
+        case meck:validate(rabbit_queue_index) of
+            true ->
+                true;
+            false ->
+                FailedCalls =
+                    [Hist || Hist = {_CallerPid, _MFA, _Class, _Reason, _ST}
+                                 <- meck:history(rabbit_queue_index)],
+                ct:pal("Failed call(s) to rabbit_queue_index:~n~p", [FailedCalls]),
 
-do_reg_v1_full_recover_only_journal(Config) ->
+                {_, _, _, _, [{_M, F, _A, _Loc}|_]} = hd(FailedCalls),
+                ct:fail({queue_index_crashed, F})
+        end
+    after
+        ok = meck:unload(rabbit_queue_index),
+        safe_teardown_queue(St)
+    end.
 
-    St0 = #cq{name=prop_classic_queue_v1, version=1,
-              config=minimal_config(Config)},
-
-    Res1 = cmd_setup_queue(St0),
-    St3 = St0#cq{amq=Res1},
-
-    Res4 = cmd_channel_open(St3),
-    true = postcondition(St3, {call, undefined, cmd_channel_open, [St3]}, Res4),
-    St7 = next_state(St3, Res4, {call, undefined, cmd_channel_open, [St3]}),
-
-    Res8 = cmd_restart_queue_dirty(St7),
-    true = postcondition(St7, {call, undefined, cmd_restart_queue_dirty, [St7]}, Res8),
-    St11 = next_state(St7, Res8, {call, undefined, cmd_restart_queue_dirty, [St7]}),
-
-    Res12 = cmd_channel_publish_many(St11, Res4, 117, 4541, 2, true, undefined),
-    true = postcondition(St11, {call, undefined, cmd_channel_publish_many, [St11, Res4, 117, 4541, 2, true, undefined]}, Res12),
-    St14 = next_state(St11, Res12, {call, undefined, cmd_channel_publish_many, [St11, Res4, 117, 4541, 2, true, undefined]}),
-
-    Res15 = cmd_restart_vhost_clean(St14),
-    true = postcondition(St14, {call, undefined, cmd_restart_vhost_clean, [St14]}, Res15),
-    _ = next_state(St14, Res15, {call, undefined, cmd_restart_vhost_clean, [St14]}),
-
-    true.
+safe_teardown_queue(St) ->
+    try cmd_teardown_queue(St)
+    catch _:_ ->
+            %% It is possible that asking a queue process in cyclic
+            %% crashing to stop fails.
+            VHostDir = rabbit_vhost:msg_store_dir_path(<<"/">>),
+            [ok = file:delete(QIFile)
+             || QIFile <- filelib:wildcard(filename:join(VHostDir, "queues/*/*"))],
+            cmd_teardown_queue(St)
+    end.

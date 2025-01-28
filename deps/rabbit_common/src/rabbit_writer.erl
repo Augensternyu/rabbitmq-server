@@ -2,10 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_writer).
+
+-behavior(gen_server).
 
 %% This module backs writer processes ("writers"). The responsibility of
 %% a writer is to serialise protocol methods and write them to the socket.
@@ -25,11 +27,14 @@
 %% When a socket write fails, writer will exit.
 
 -include("rabbit.hrl").
--include("rabbit_framing.hrl").
-
 -export([start/6, start_link/6, start/7, start_link/7, start/8, start_link/8]).
 
--export([system_continue/3, system_terminate/4, system_code_change/4]).
+-export([init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
 
 -export([send_command/2, send_command/3,
          send_command_sync/2, send_command_sync/3,
@@ -38,9 +43,6 @@
          flush/1]).
 -export([internal_send_command/4, internal_send_command/6]).
 -export([msg_size/1, maybe_gc_large_msg/1, maybe_gc_large_msg/2]).
-
-%% internal
--export([enter_mainloop/2, mainloop/2, mainloop1/2]).
 
 -record(wstate, {
     %% socket (port)
@@ -62,7 +64,7 @@
     writer_gc_threshold
 }).
 
--define(HIBERNATE_AFTER, 5000).
+-define(HIBERNATE_AFTER, 6_000).
 %% 1GB
 -define(DEFAULT_GC_THRESHOLD, 1_000_000_000).
 
@@ -98,10 +100,6 @@
          non_neg_integer(), rabbit_types:protocol(), pid(),
          rabbit_types:proc_name(), boolean(), undefined|non_neg_integer()) ->
             rabbit_types:ok(pid()).
-
--spec system_code_change(_,_,_,_) -> {'ok',_}.
--spec system_continue(_,_,#wstate{}) -> any().
--spec system_terminate(_,_,_,_) -> no_return().
 
 -spec send_command(pid(), rabbit_framing:amqp_method_record()) -> 'ok'.
 -spec send_command
@@ -163,13 +161,15 @@ start(Sock, Channel, FrameMax, Protocol, ReaderPid, Identity,
       ReaderWantsStats, GCThreshold) ->
     State = initial_state(Sock, Channel, FrameMax, Protocol, ReaderPid,
                           ReaderWantsStats, GCThreshold),
-    {ok, proc_lib:spawn(?MODULE, enter_mainloop, [Identity, State])}.
+    Options = [{hibernate_after, ?HIBERNATE_AFTER}],
+    gen_server:start(?MODULE, [Identity, State], Options).
 
 start_link(Sock, Channel, FrameMax, Protocol, ReaderPid, Identity,
            ReaderWantsStats, GCThreshold) ->
     State = initial_state(Sock, Channel, FrameMax, Protocol, ReaderPid,
                           ReaderWantsStats, GCThreshold),
-    {ok, proc_lib:spawn_link(?MODULE, enter_mainloop, [Identity, State])}.
+    Options = [{hibernate_after, ?HIBERNATE_AFTER}],
+    gen_server:start_link(?MODULE, [Identity, State], Options).
 
 initial_state(Sock, Channel, FrameMax, Protocol, ReaderPid, ReaderWantsStats, GCThreshold) ->
     (case ReaderWantsStats of
@@ -184,49 +184,57 @@ initial_state(Sock, Channel, FrameMax, Protocol, ReaderPid, ReaderWantsStats, GC
                   writer_gc_threshold = GCThreshold},
           #wstate.stats_timer).
 
-system_continue(Parent, Deb, State) ->
-    mainloop(Deb, State#wstate{reader = Parent}).
-
-system_terminate(Reason, _Parent, _Deb, _State) ->
-    exit(Reason).
-
-system_code_change(Misc, _Module, _OldVsn, _Extra) ->
-    {ok, Misc}.
-
-enter_mainloop(Identity, State) ->
+init([Identity, State]) ->
     ?LG_PROCESS_TYPE(writer),
-    Deb = sys:debug_options([]),
     ?store_proc_name(Identity),
-    mainloop(Deb, State).
+    {ok, State}.
 
-mainloop(Deb, State) ->
+handle_call({send_command_sync, MethodRecord}, _From, State) ->
     try
-        mainloop1(Deb, State)
+        State1 = internal_flush(
+                   internal_send_command_async(MethodRecord, State)),
+        {reply, ok, State1, 0}
     catch
-        exit:Error -> #wstate{reader = ReaderPid, channel = Channel} = State,
-                      ReaderPid ! {channel_exit, Channel, Error}
-    end,
-    done.
-
-mainloop1(Deb, State = #wstate{pending = []}) ->
-    receive
-        Message -> {Deb1, State1} = handle_message(Deb, Message, State),
-                   ?MODULE:mainloop1(Deb1, State1)
-    after ?HIBERNATE_AFTER ->
-            erlang:hibernate(?MODULE, mainloop, [Deb, State])
+        _Class:Reason ->
+            {stop, {shutdown, Reason}, State}
     end;
-mainloop1(Deb, State) ->
-    receive
-        Message -> {Deb1, State1} = handle_message(Deb, Message, State),
-                   ?MODULE:mainloop1(Deb1, State1)
-    after 0 ->
-            ?MODULE:mainloop1(Deb, internal_flush(State))
+handle_call({send_command_sync, MethodRecord, Content}, _From, State) ->
+    try
+        State1 = internal_flush(
+                   internal_send_command_async(MethodRecord, Content, State)),
+        {reply, ok, State1, 0}
+    catch
+        _Class:Reason ->
+            {stop, {shutdown, Reason}, State}
+    end;
+handle_call(flush, _From, State) ->
+    try
+        State1 = internal_flush(State),
+        {reply, ok, State1, 0}
+    catch
+        _Class:Reason ->
+            {stop, {shutdown, Reason}, State}
     end.
 
-handle_message(Deb, {system, From, Req}, State = #wstate{reader = Parent}) ->
-    sys:handle_system_msg(Req, From, Parent, ?MODULE, Deb, State);
-handle_message(Deb, Message, State) ->
-    {Deb, handle_message(Message, State)}.
+handle_cast(_Message, State) ->
+    {noreply, State, 0}.
+
+handle_info(timeout, State) ->
+    try
+        State1 = internal_flush(State),
+        {noreply, State1}
+    catch
+        _Class:Reason ->
+            {stop, {shutdown, Reason}, State}
+    end;
+handle_info(Message, State) ->
+    try
+        State1 = handle_message(Message, State),
+        {noreply, State1, 0}
+    catch
+        _Class:Reason ->
+            {stop, {shutdown, Reason}, State}
+    end.
 
 handle_message({send_command, MethodRecord}, State) ->
     internal_send_command_async(MethodRecord, State);
@@ -238,21 +246,6 @@ handle_message({send_command_flow, MethodRecord, Sender}, State) ->
 handle_message({send_command_flow, MethodRecord, Content, Sender}, State) ->
     credit_flow:ack(Sender),
     internal_send_command_async(MethodRecord, Content, State);
-handle_message({'$gen_call', From, {send_command_sync, MethodRecord}}, State) ->
-    State1 = internal_flush(
-               internal_send_command_async(MethodRecord, State)),
-    gen_server:reply(From, ok),
-    State1;
-handle_message({'$gen_call', From, {send_command_sync, MethodRecord, Content}},
-               State) ->
-    State1 = internal_flush(
-               internal_send_command_async(MethodRecord, Content, State)),
-    gen_server:reply(From, ok),
-    State1;
-handle_message({'$gen_call', From, flush}, State) ->
-    State1 = internal_flush(State),
-    gen_server:reply(From, ok),
-    State1;
 handle_message({send_command_and_notify, QPid, ChPid, MethodRecord}, State) ->
     State1 = internal_send_command_async(MethodRecord, State),
     rabbit_amqqueue_common:notify_sent(QPid, ChPid),
@@ -265,15 +258,27 @@ handle_message({send_command_and_notify, QPid, ChPid, MethodRecord, Content},
 handle_message({'DOWN', _MRef, process, QPid, _Reason}, State) ->
     rabbit_amqqueue_common:notify_sent_queue_down(QPid),
     State;
-handle_message({inet_reply, _, ok}, State) ->
-    rabbit_event:ensure_stats_timer(State, #wstate.stats_timer, emit_stats);
-handle_message({inet_reply, _, Status}, _State) ->
-    exit({writer, send_failed, Status});
 handle_message(emit_stats, State = #wstate{reader = ReaderPid}) ->
     ReaderPid ! ensure_stats,
     rabbit_event:reset_stats_timer(State, #wstate.stats_timer);
+handle_message(ok, State) ->
+    State;
+handle_message({_Ref, ok} = Msg, State) ->
+    rabbit_log:warning("AMQP 0-9-1 channel writer has received a message it does not support: ~p", [Msg]),
+    State;
+handle_message({ok, _Ref} = Msg, State) ->
+    rabbit_log:warning("AMQP 0-9-1 channel writer has received a message it does not support: ~p", [Msg]),
+    State;
 handle_message(Message, _State) ->
     exit({writer, message_not_understood, Message}).
+
+terminate(Reason, State) ->
+    #wstate{reader = ReaderPid, channel = Channel} = State,
+    ReaderPid ! {channel_exit, Channel, Reason},
+    ok.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
 
 %%---------------------------------------------------------------------------
 
@@ -314,8 +319,7 @@ flush(W) -> call(W, flush).
 %%---------------------------------------------------------------------------
 
 call(Pid, Msg) ->
-    {ok, Res} = gen:call(Pid, '$gen_call', Msg, infinity),
-    Res.
+    gen_server:call(Pid, Msg, infinity).
 
 %%---------------------------------------------------------------------------
 
@@ -381,33 +385,15 @@ maybe_flush(State = #wstate{pending = Pending}) ->
 
 internal_flush(State = #wstate{pending = []}) ->
     State;
-internal_flush(State = #wstate{sock = Sock, pending = Pending}) ->
-    ok = port_cmd(Sock, lists:reverse(Pending)),
-    State#wstate{pending = []}.
-
-%% gen_tcp:send/2 does a selective receive of {inet_reply, Sock,
-%% Status} to obtain the result. That is bad when it is called from
-%% the writer since it requires scanning of the writers possibly quite
-%% large message queue.
-%%
-%% So instead we lift the code from prim_inet:send/2, which is what
-%% gen_tcp:send/2 calls, do the first half here and then just process
-%% the result code in handle_message/2 as and when it arrives.
-%%
-%% This means we may end up happily sending data down a closed/broken
-%% socket, but that's ok since a) data in the buffers will be lost in
-%% any case (so qualitatively we are no worse off than if we used
-%% gen_tcp:send/2), and b) we do detect the changed socket status
-%% eventually, i.e. when we get round to handling the result code.
-%%
-%% Also note that the port has bounded buffers and port_command blocks
-%% when these are full. So the fact that we process the result
-%% asynchronously does not impact flow control.
-port_cmd(Sock, Data) ->
-    true = try rabbit_net:port_command(Sock, Data)
-           catch error:Error -> exit({writer, send_failed, Error})
-           end,
-    ok.
+internal_flush(State0 = #wstate{sock = Sock, pending = Pending}) ->
+    case rabbit_net:send(Sock, lists:reverse(Pending)) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            exit({writer, send_failed, Reason})
+    end,
+    State = State0#wstate{pending = []},
+    rabbit_event:ensure_stats_timer(State, #wstate.stats_timer, emit_stats).
 
 %% Some processes (channel, writer) can get huge amounts of binary
 %% garbage when processing huge messages at high speed (since we only

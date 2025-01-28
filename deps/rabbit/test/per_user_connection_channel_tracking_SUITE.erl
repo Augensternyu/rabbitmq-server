@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_user_connection_channel_tracking_SUITE).
@@ -12,14 +12,14 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
+
+-define(A_TOUT, 20000).
 
 all() ->
     [
-     {group, cluster_size_1_network},
-     {group, cluster_size_2_network},
-     {group, cluster_size_1_direct},
-     {group, cluster_size_2_direct}
+     {group, tests}
     ].
 
 groups() ->
@@ -29,17 +29,19 @@ groups() ->
         single_node_vhost_down_mimic,
         single_node_vhost_deletion
     ],
-    ClusterSize2Tests = [
+    ClusterSize3Tests = [
         cluster_user_deletion,
         cluster_vhost_down_mimic,
         cluster_vhost_deletion,
         cluster_node_removed
     ],
     [
-      {cluster_size_1_network, [], ClusterSize1Tests},
-      {cluster_size_2_network, [], ClusterSize2Tests},
-      {cluster_size_1_direct, [], ClusterSize1Tests},
-      {cluster_size_2_direct, [], ClusterSize2Tests}
+     {tests, [], [
+                  {cluster_size_1_network, [], ClusterSize1Tests},
+                  {cluster_size_3_network, [], ClusterSize3Tests},
+                  {cluster_size_1_direct, [], ClusterSize1Tests},
+                  {cluster_size_3_direct, [], ClusterSize3Tests}
+                 ]}
     ].
 
 suite() ->
@@ -62,15 +64,17 @@ end_per_suite(Config) ->
 init_per_group(cluster_size_1_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
     init_per_multinode_group(cluster_size_1_network, Config1, 1);
-init_per_group(cluster_size_2_network, Config) ->
+init_per_group(cluster_size_3_network, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, network}]),
-    init_per_multinode_group(cluster_size_2_network, Config1, 2);
+    init_per_multinode_group(cluster_size_3_network, Config1, 3);
 init_per_group(cluster_size_1_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
     init_per_multinode_group(cluster_size_1_direct, Config1, 1);
-init_per_group(cluster_size_2_direct, Config) ->
+init_per_group(cluster_size_3_direct, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [{connection_type, direct}]),
-    init_per_multinode_group(cluster_size_2_direct, Config1, 2).
+    init_per_multinode_group(cluster_size_3_direct, Config1, 3);
+init_per_group(_Group, Config) ->
+    Config.
 
 init_per_multinode_group(_Group, Config, NodeCount) ->
     Suffix = rabbit_ct_helpers:testcase_absname(Config, "", "-"),
@@ -82,6 +86,9 @@ init_per_multinode_group(_Group, Config, NodeCount) ->
       Config1, rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps()).
 
+end_per_group(tests, Config) ->
+    % The broker is managed by {init,end}_per_testcase().
+    Config;
 end_per_group(_Group, Config) ->
     rabbit_ct_helpers:run_steps(Config,
       rabbit_ct_client_helpers:teardown_steps() ++
@@ -92,6 +99,11 @@ init_per_testcase(Testcase, Config) ->
     Config.
 
 end_per_testcase(Testcase, Config) ->
+    Vhost = proplists:get_value(rmq_vhost, Config),
+    Username = proplists:get_value(rmq_username, Config),
+    rabbit_ct_broker_helpers:add_vhost(Config, Vhost),
+    rabbit_ct_broker_helpers:add_user(Config, Username),
+    rabbit_ct_broker_helpers:set_full_permissions(Config, Username, Vhost),
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
 %% -------------------------------------------------------------------
@@ -106,73 +118,78 @@ single_node_user_connection_channel_tracking(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [0]),
     [Chan1] = open_channels(Conn1, 1),
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
     [#tracked_connection{username = Username}] = connections_in(Config, Username),
+    ?awaitMatch(1, count_channels_in(Config, Username), ?A_TOUT),
     [#tracked_channel{username = Username}] = channels_in(Config, Username),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    ?assertEqual(true, is_process_alive(Chan1)),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Chan1), ?A_TOUT),
     close_channels([Chan1]),
-    ?awaitMatch(0, count_channels_in(Config, Username), 20000),
-    ?awaitMatch(0, tracked_user_channel_count(Config, Username), 20000),
-    ?awaitMatch(false, is_process_alive(Chan1), 20000),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Chan1), ?A_TOUT),
     close_connections([Conn1]),
-    ?awaitMatch(0, length(connections_in(Config, Username)), 20000),
-    ?awaitMatch(0, tracked_user_connection_count(Config, Username), 20000),
-    ?awaitMatch(false, is_process_alive(Conn1), 20000),
+    ?awaitMatch(0, length(connections_in(Config, Username)), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn1), ?A_TOUT),
 
     [Conn2] = open_connections(Config, [{0, Username2}]),
     Chans2  = [_|_] = open_channels(Conn2, 5),
-    timer:sleep(100),
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
     [#tracked_connection{username = Username2}] = connections_in(Config, Username2),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     [Conn3] = open_connections(Config, [0]),
     Chans3 = [_|_] = open_channels(Conn3, 5),
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
     [#tracked_connection{username = Username}] = connections_in(Config, Username),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn3)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans3],
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn3), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans3],
 
     [Conn4] = open_connections(Config, [0]),
     Chans4 = [_|_] = open_channels(Conn4, 5),
-    ?assertEqual(2, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(10, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn4)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans4],
+    ?awaitMatch(2, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(10, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn4), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans4],
     kill_connections([Conn4]),
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
     [#tracked_connection{username = Username}] = connections_in(Config, Username),
-    ?awaitMatch(5, count_channels_in(Config, Username), 20000),
-    ?awaitMatch(1, tracked_user_connection_count(Config, Username), 20000),
-    ?awaitMatch(5, tracked_user_channel_count(Config, Username), 20000),
-    ?assertEqual(false, is_process_alive(Conn4)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans4],
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn4), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans4],
 
     [Conn5] = open_connections(Config, [0]),
     Chans5  = [_|_] = open_channels(Conn5, 7),
+    ?awaitMatch(2, count_connections_in(Config, Username), ?A_TOUT),
     [Username, Username] =
         lists:map(fun (#tracked_connection{username = U}) -> U end,
                   connections_in(Config, Username)),
-    ?assertEqual(12, count_channels_in(Config, Username)),
-    ?assertEqual(12, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(2, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn5)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans5],
+    ?awaitMatch(12, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(12, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(2, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn5), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans5],
 
     close_channels(Chans2 ++ Chans3 ++ Chans5),
     ?awaitMatch(0, length(all_channels(Config)), 20000),
@@ -196,57 +213,56 @@ single_node_user_deletion(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(100, get_tracking_execution_timeout(Config)),
+    ?awaitMatch(100, get_tracking_execution_timeout(Config), ?A_TOUT),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [0]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{0, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(true, exists_in_tracked_connection_per_user_table(Config, Username2)),
-    ?assertEqual(true, exists_in_tracked_channel_per_user_table(Config, Username2)),
+    ?awaitMatch(true, exists_in_tracked_connection_per_user_table(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, exists_in_tracked_channel_per_user_table(Config, Username2), ?A_TOUT),
 
     rabbit_ct_broker_helpers:delete_user(Config, Username2),
-    timer:sleep(100),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     %% ensure vhost entry is cleared after 'tracking_execution_timeout'
     ?awaitMatch(false, exists_in_tracked_connection_per_user_table(Config, Username2), 20000),
     ?awaitMatch(false, exists_in_tracked_channel_per_user_table(Config, Username2), 20000),
 
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     close_channels(Chans1),
     ?awaitMatch(0, count_channels_in(Config, Username), 20000),
@@ -267,55 +283,54 @@ single_node_vhost_deletion(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(100, get_tracking_execution_timeout(Config)),
+    ?awaitMatch(100, get_tracking_execution_timeout(Config), ?A_TOUT),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [0]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{0, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(true, exists_in_tracked_connection_per_vhost_table(Config, Vhost)),
+    ?awaitMatch(true, exists_in_tracked_connection_per_vhost_table(Config, Vhost), ?A_TOUT),
 
     rabbit_ct_broker_helpers:delete_vhost(Config, Vhost),
-    timer:sleep(200),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(false, is_process_alive(Conn1)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     %% ensure vhost entry is cleared after 'tracking_execution_timeout'
-    ?assertEqual(false, exists_in_tracked_connection_per_vhost_table(Config, Vhost)),
+    ?awaitMatch(false, exists_in_tracked_connection_per_vhost_table(Config, Vhost), 20000),
 
     rabbit_ct_broker_helpers:add_vhost(Config, Vhost).
 
@@ -328,49 +343,48 @@ single_node_vhost_down_mimic(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [0]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{0, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     %% mimic vhost down event, while connections exist
     mimic_vhost_down(Config, 0, Vhost),
-    timer:sleep(200),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(false, is_process_alive(Conn1)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans1].
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1].
 
 cluster_user_deletion(Config) ->
     set_tracking_execution_timeout(Config, 0, 100),
@@ -383,59 +397,58 @@ cluster_user_deletion(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(100, get_tracking_execution_timeout(Config, 0)),
-    ?assertEqual(100, get_tracking_execution_timeout(Config, 1)),
+    ?awaitMatch(100, get_tracking_execution_timeout(Config, 0), ?A_TOUT),
+    ?awaitMatch(100, get_tracking_execution_timeout(Config, 1), ?A_TOUT),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [0]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{1, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(true, exists_in_tracked_connection_per_user_table(Config, 1, Username2)),
-    ?assertEqual(true, exists_in_tracked_channel_per_user_table(Config, 1, Username2)),
+    ?awaitMatch(true, exists_in_tracked_connection_per_user_table(Config, 1, Username2), ?A_TOUT),
+    ?awaitMatch(true, exists_in_tracked_channel_per_user_table(Config, 1, Username2), ?A_TOUT),
 
     rabbit_ct_broker_helpers:delete_user(Config, Username2),
-    timer:sleep(200),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     %% ensure user entry is cleared after 'tracking_execution_timeout'
-    ?assertEqual(false, exists_in_tracked_connection_per_user_table(Config, 1, Username2)),
-    ?assertEqual(false, exists_in_tracked_channel_per_user_table(Config, 1, Username2)),
+    ?awaitMatch(false, exists_in_tracked_connection_per_user_table(Config, 1, Username2), ?A_TOUT),
+    ?awaitMatch(false, exists_in_tracked_channel_per_user_table(Config, 1, Username2), ?A_TOUT),
 
     close_channels(Chans1),
-    ?awaitMatch(0, count_channels_in(Config, Username), 20000),
-    ?awaitMatch(0, tracked_user_channel_count(Config, Username), 20000),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
 
     close_connections([Conn1]),
-    ?awaitMatch(0, count_connections_in(Config, Username), 20000),
-    ?awaitMatch(0, tracked_user_connection_count(Config, Username), 20000).
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT).
 
 cluster_vhost_deletion(Config) ->
     set_tracking_execution_timeout(Config, 0, 100),
@@ -448,63 +461,58 @@ cluster_vhost_deletion(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(100, get_tracking_execution_timeout(Config, 0)),
-    ?assertEqual(100, get_tracking_execution_timeout(Config, 1)),
+    ?awaitMatch(100, get_tracking_execution_timeout(Config, 0), ?A_TOUT),
+    ?awaitMatch(100, get_tracking_execution_timeout(Config, 1), ?A_TOUT),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [{0, Username}]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{1, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(true, exists_in_tracked_connection_per_vhost_table(Config, 0, Vhost)),
-    ?assertEqual(true, exists_in_tracked_connection_per_vhost_table(Config, 1, Vhost)),
+    ?awaitMatch(true, exists_in_tracked_connection_per_vhost_table(Config, 0, Vhost), ?A_TOUT),
+    ?awaitMatch(true, exists_in_tracked_connection_per_vhost_table(Config, 1, Vhost), ?A_TOUT),
 
     rabbit_ct_broker_helpers:delete_vhost(Config, Vhost),
-    timer:sleep(200),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(false, is_process_alive(Conn1)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     %% ensure vhost entry is cleared after 'tracking_execution_timeout'
 
-    ?assertEqual(false, exists_in_tracked_connection_per_vhost_table(Config, 0, Vhost)),
-    ?assertEqual(false, exists_in_tracked_connection_per_vhost_table(Config, 1, Vhost)),
-
-    rabbit_ct_broker_helpers:add_vhost(Config, Vhost),
-    rabbit_ct_broker_helpers:add_user(Config, Username),
-    rabbit_ct_broker_helpers:set_full_permissions(Config, Username, Vhost).
+    ?awaitMatch(false, exists_in_tracked_connection_per_vhost_table(Config, 0, Vhost), ?A_TOUT),
+    ?awaitMatch(false, exists_in_tracked_connection_per_vhost_table(Config, 1, Vhost), ?A_TOUT).
 
 cluster_vhost_down_mimic(Config) ->
     Username = proplists:get_value(rmq_username, Config),
@@ -515,58 +523,56 @@ cluster_vhost_down_mimic(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [{0, Username}]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{1, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     mimic_vhost_down(Config, 1, Vhost),
-    timer:sleep(100),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     %% gen_event notifies local handlers. remote connections still active
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     mimic_vhost_down(Config, 0, Vhost),
-    timer:sleep(100),
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(false, is_process_alive(Conn1)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans1].
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(false, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1].
 
 cluster_node_removed(Config) ->
     Username = proplists:get_value(rmq_username, Config),
@@ -577,54 +583,52 @@ cluster_node_removed(Config) ->
     rabbit_ct_broker_helpers:add_user(Config, Username2),
     rabbit_ct_broker_helpers:set_full_permissions(Config, Username2, Vhost),
 
-    ?assertEqual(0, count_connections_in(Config, Username)),
-    ?assertEqual(0, count_connections_in(Config, Username2)),
-    ?assertEqual(0, count_channels_in(Config, Username)),
-    ?assertEqual(0, count_channels_in(Config, Username2)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(0, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(0, tracked_user_channel_count(Config, Username2)),
+    ?awaitMatch(0, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(0, tracked_user_channel_count(Config, Username2), ?A_TOUT),
 
     [Conn1] = open_connections(Config, [{0, Username}]),
     Chans1 = [_|_] = open_channels(Conn1, 5),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     [Conn2] = open_connections(Config, [{1, Username2}]),
     Chans2 = [_|_] = open_channels(Conn2, 5),
-    ?assertEqual(1, count_connections_in(Config, Username2)),
-    ?assertEqual(5, count_channels_in(Config, Username2)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username2)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username2)),
-    ?assertEqual(true, is_process_alive(Conn2)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(1, count_connections_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username2), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username2), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
     rabbit_ct_broker_helpers:stop_broker(Config, 1),
-    timer:sleep(200),
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     rabbit_ct_broker_helpers:forget_cluster_node(Config, 0, 1),
-    timer:sleep(200),
 
-    ?assertEqual(false, is_process_alive(Conn2)),
-    [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans2],
+    ?awaitMatch(false, is_process_alive(Conn2), ?A_TOUT),
+    [?awaitMatch(false, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans2],
 
-    ?assertEqual(1, count_connections_in(Config, Username)),
-    ?assertEqual(5, count_channels_in(Config, Username)),
-    ?assertEqual(1, tracked_user_connection_count(Config, Username)),
-    ?assertEqual(5, tracked_user_channel_count(Config, Username)),
-    ?assertEqual(true, is_process_alive(Conn1)),
-    [?assertEqual(true, is_process_alive(Ch)) || Ch <- Chans1],
+    ?awaitMatch(1, count_connections_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, count_channels_in(Config, Username), ?A_TOUT),
+    ?awaitMatch(1, tracked_user_connection_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(5, tracked_user_channel_count(Config, Username), ?A_TOUT),
+    ?awaitMatch(true, is_process_alive(Conn1), ?A_TOUT),
+    [?awaitMatch(true, is_process_alive(Ch), ?A_TOUT) || Ch <- Chans1],
 
     close_channels(Chans1),
     ?awaitMatch(0, count_channels_in(Config, Username), 20000),
@@ -651,22 +655,19 @@ open_connections(Config, NodesAndUsers) ->
       (Node) ->
           rabbit_ct_client_helpers:OpenConnectionFun(Config, Node)
       end, NodesAndUsers),
-    timer:sleep(500),
     Conns.
 
 close_connections(Conns) ->
     lists:foreach(fun
       (Conn) ->
           rabbit_ct_client_helpers:close_connection(Conn)
-      end, Conns),
-    timer:sleep(500).
+      end, Conns).
 
 kill_connections(Conns) ->
     lists:foreach(fun
       (Conn) ->
           (catch exit(Conn, please_terminate))
-      end, Conns),
-    timer:sleep(500).
+      end, Conns).
 
 open_channels(Conn, N) ->
     [begin
@@ -791,9 +792,6 @@ get_tracking_execution_timeout(Config, NodeIndex) ->
                                     application, get_env,
                                     [rabbit, tracking_execution_timeout]),
     Timeout.
-
-await_running_node_refresh(_Config, _NodeIndex) ->
-    timer:sleep(250).
 
 expect_that_client_connection_is_rejected(Config) ->
     expect_that_client_connection_is_rejected(Config, 0).

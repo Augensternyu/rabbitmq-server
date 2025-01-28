@@ -2,7 +2,7 @@
 %% from rabbitmq-autocluster by Gavin Roy.
 %%
 %% Copyright (c) 2014-2015 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %% All rights reserved.
 %%
 %% Redistribution and use in source and binary forms, with or without modification,
@@ -32,16 +32,14 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2014-2015 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_backend).
 
--include("rabbit.hrl").
-
 -callback init() -> ok | {error, Reason :: string()}.
 
--callback list_nodes() -> {ok, {Nodes :: list(), NodeType :: rabbit_types:node_type()}} |
+-callback list_nodes() -> {ok, {Nodes :: [node()] | node(), NodeType :: rabbit_types:node_type()}} |
                           {error, Reason :: string()}.
 
 -callback supports_registration() -> boolean().
@@ -52,8 +50,13 @@
 
 -callback post_registration()   -> ok | {error, Reason :: string()}.
 
--callback lock(Node :: atom())   -> {ok, Data :: term()} | not_supported | {error, Reason :: string()}.
+-callback lock(Nodes :: [node()]) -> {ok, Data :: term()} | not_supported | {error, Reason :: string()}.
 
 -callback unlock(Data :: term()) -> ok.
 
 -optional_callbacks([init/0]).
+
+-export([api_version/0]).
+
+api_version() ->
+    2.

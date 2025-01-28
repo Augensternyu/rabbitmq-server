@@ -2,13 +2,21 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(amqp10_framing).
 
--export([encode/1, encode_described/3, decode/1, version/0,
-         symbol_for/1, number_for/1, encode_bin/1, decode_bin/1, pprint/1]).
+-export([version/0,
+         encode/1,
+         encode_described/3,
+         encode_bin/1,
+         decode/1,
+         decode_bin/1,
+         decode_bin/2,
+         symbol_for/1,
+         number_for/1,
+         pprint/1]).
 
 %% debug
 -export([fill_from_list/2, fill_from_map/2]).
@@ -100,30 +108,34 @@ symbolify(FieldName) when is_atom(FieldName) ->
 
 %% A sequence comes as an arbitrary list of values; it's not a
 %% composite type.
-decode({described, Descriptor, {list, Fields}}) ->
+decode({described, Descriptor, {list, Fields} = Type}) ->
     case amqp10_framing0:record_for(Descriptor) of
         #'v1_0.amqp_sequence'{} ->
             #'v1_0.amqp_sequence'{content = [decode(F) || F <- Fields]};
+        #'v1_0.amqp_value'{} ->
+            #'v1_0.amqp_value'{content = Type};
         Else ->
             fill_from_list(Else, Fields)
     end;
-decode({described, Descriptor, {map, Fields}}) ->
+decode({described, Descriptor, {map, Fields} = Type}) ->
     case amqp10_framing0:record_for(Descriptor) of
         #'v1_0.application_properties'{} ->
             #'v1_0.application_properties'{content = decode_map(Fields)};
         #'v1_0.delivery_annotations'{} ->
-            #'v1_0.delivery_annotations'{content = decode_map(Fields)};
+            #'v1_0.delivery_annotations'{content = decode_annotations(Fields)};
         #'v1_0.message_annotations'{} ->
-            #'v1_0.message_annotations'{content = decode_map(Fields)};
+            #'v1_0.message_annotations'{content = decode_annotations(Fields)};
         #'v1_0.footer'{} ->
-            #'v1_0.footer'{content = decode_map(Fields)};
+            #'v1_0.footer'{content = decode_annotations(Fields)};
+        #'v1_0.amqp_value'{} ->
+            #'v1_0.amqp_value'{content = Type};
         Else ->
             fill_from_map(Else, Fields)
     end;
-decode({described, Descriptor, {binary, Field}}) ->
+decode({described, Descriptor, {binary, Field} = Type}) ->
     case amqp10_framing0:record_for(Descriptor) of
         #'v1_0.amqp_value'{} ->
-            #'v1_0.amqp_value'{content = {binary, Field}};
+            #'v1_0.amqp_value'{content = Type};
         #'v1_0.data'{} ->
             #'v1_0.data'{content = Field}
     end;
@@ -136,6 +148,18 @@ decode(Other) ->
 
 decode_map(Fields) ->
     [{decode(K), decode(V)} || {K, V} <- Fields].
+
+%% "The annotations type is a map where the keys are restricted to be of type symbol
+%% or of type ulong. All ulong keys, and all symbolic keys except those beginning
+%% with "x-" are reserved." [3.2.10]
+%% Since we already parse annotations here and neither the client nor server uses
+%% reserved keys, we perform strict validation and throw if any reserved keys are used.
+decode_annotations(Fields) ->
+    lists:map(fun({{symbol, <<"x-", _/binary>>} = K, V}) ->
+                      {K, decode(V)};
+                 ({ReservedKey, _V}) ->
+                      throw({reserved_annotation_key, ReservedKey})
+              end, Fields).
 
 -spec encode_described(list | map | binary | annotations | '*',
                        non_neg_integer(),
@@ -157,7 +181,8 @@ encode_described(map, CodeNumber,
 encode_described(map, CodeNumber,
                  #'v1_0.message_annotations'{content = Content}) ->
     {described, {ulong, CodeNumber}, {map, Content}};
-encode_described(map, CodeNumber, #'v1_0.footer'{content = Content}) ->
+encode_described(map, CodeNumber,
+                 #'v1_0.footer'{content = Content}) ->
     {described, {ulong, CodeNumber}, {map, Content}};
 encode_described(binary, CodeNumber, #'v1_0.data'{content = Content}) ->
     {described, {ulong, CodeNumber}, {binary, Content}};
@@ -169,11 +194,21 @@ encode_described(annotations, CodeNumber, Frame) ->
 encode(X) ->
     amqp10_framing0:encode(X).
 
+-spec encode_bin(term()) -> iodata().
 encode_bin(X) ->
     amqp10_binary_generator:generate(encode(X)).
 
-decode_bin(X) ->
-    [decode(PerfDesc) || PerfDesc <- amqp10_binary_parser:parse_all(X)].
+-spec decode_bin(binary()) -> [term()].
+decode_bin(Binary) ->
+    [decode(Section) || Section <- amqp10_binary_parser:parse_many(Binary, [])].
+
+-spec decode_bin(binary(), amqp10_binary_parser:opts()) -> [term()].
+decode_bin(Binary, Opts) ->
+    lists:map(fun({Pos = {pos, _}, Section}) ->
+                      {Pos, decode(Section)};
+                 (Section) ->
+                      decode(Section)
+              end, amqp10_binary_parser:parse_many(Binary, Opts)).
 
 symbol_for(X) ->
     amqp10_framing0:symbol_for(X).
@@ -193,7 +228,7 @@ pprint(Other) -> Other.
 -include_lib("eunit/include/eunit.hrl").
 
 encode_decode_test_() ->
-    Data = [{{utf8, <<"k">>}, {binary, <<"v">>}}],
+    Data = [{{symbol, <<"x-my key">>}, {binary, <<"my value">>}}],
     Test = fun(M) -> [M] = decode_bin(iolist_to_binary(encode_bin(M))) end,
     [
      fun() -> Test(#'v1_0.application_properties'{content = Data}) end,

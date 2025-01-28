@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
   alias RabbitMQ.CLI.Core.DocGuide
@@ -32,8 +32,8 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
   use RabbitMQ.CLI.Core.AcceptsNoPositionalArguments
   use RabbitMQ.CLI.Core.RequiresRabbitAppRunning
 
-  def run([], %{node: node_name, timeout: timeout}) do
-    status =
+  def run([], %{node: node_name, timeout: timeout} = opts) do
+    status0 =
       case :rabbit_misc.rpc_call(node_name, :rabbit_db_cluster, :cli_cluster_status, []) do
         {:badrpc, {:EXIT, {:undef, _}}} ->
           :rabbit_misc.rpc_call(node_name, :rabbit_mnesia, :status, [])
@@ -45,11 +45,14 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
           status
       end
 
-    case status do
+    case status0 do
       {:badrpc, _} = err ->
         err
 
-      status ->
+      status0 ->
+        tags = cluster_tags(node_name, timeout)
+        status = status0 ++ [{:cluster_tags, tags}]
+
         case :rabbit_misc.rpc_call(node_name, :rabbit_nodes, :list_running, []) do
           {:badrpc, _} = err ->
             err
@@ -72,7 +75,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
             maintenance_status_by_node =
               Enum.map(
                 nodes,
-                fn n -> maintenance_status_by_node(n, per_node_timeout(timeout, count)) end
+                fn n -> maintenance_status_by_node(n, per_node_timeout(timeout, count), opts) end
               )
 
             cpu_cores_by_node =
@@ -122,7 +125,6 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
 
   def output(result, %{node: node_name}) when is_list(result) do
     m = result_map(result)
-
     total_cores = Enum.reduce(m[:cpu_cores], 0, fn {_, val}, acc -> acc + val end)
 
     cluster_name_section = [
@@ -130,6 +132,15 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
       "Cluster name: #{m[:cluster_name]}",
       "Total CPU cores available cluster-wide: #{total_cores}"
     ]
+
+    cluster_tag_section =
+      [
+        "\n#{bright("Cluster Tags")}\n"
+      ] ++
+        case m[:cluster_tags] do
+          [] -> ["(none)"]
+          tags -> cluster_tag_lines(tags)
+        end
 
     disk_nodes_section =
       [
@@ -210,6 +221,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
 
     lines =
       cluster_name_section ++
+        cluster_tag_section ++
         disk_nodes_section ++
         ram_nodes_section ++
         running_nodes_section ++
@@ -260,6 +272,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
     #           {rabbit@warp10,[{resource_limit,memory,rabbit@warp10}]}]}]
     %{
       cluster_name: Keyword.get(result, :cluster_name),
+      cluster_tags: result |> Keyword.get(:cluster_tags, []),
       disk_nodes: result |> Keyword.get(:nodes, []) |> Keyword.get(:disc, []),
       ram_nodes: result |> Keyword.get(:nodes, []) |> Keyword.get(:ram, []),
       running_nodes: result |> Keyword.get(:running_nodes, []) |> Enum.map(&to_string/1),
@@ -285,23 +298,21 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
   end
 
   defp listeners_of(node, timeout) do
-    # This may seem inefficient since this call returns all known listeners
-    # in the cluster, so why do we run it on every node? See the badrpc clause,
-    # some nodes may be inavailable or partitioned from other nodes. This way we
-    # gather as complete a picture as possible. MK.
+    node = to_atom(node)
+
     listeners =
       case :rabbit_misc.rpc_call(
-             to_atom(node),
+             node,
              :rabbit_networking,
-             :active_listeners,
-             [],
+             :node_listeners,
+             [node],
              timeout
            ) do
         {:badrpc, _} -> []
         xs -> xs
       end
 
-    {node, listeners_on(listeners, node)}
+    {node, listeners}
   end
 
   defp versions_by_node(node, timeout) do
@@ -342,26 +353,26 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
      }}
   end
 
-  defp maintenance_status_by_node(node, timeout) do
+  defp maintenance_status_by_node(node, timeout, opts) do
     target = to_atom(node)
+    formatter = Map.get(opts, :formatter)
+
+    rpc_result =
+      :rabbit_misc.rpc_call(target, :rabbit_maintenance, :status_local_read, [target], timeout)
 
     result =
-      case :rabbit_misc.rpc_call(
-             target,
-             :rabbit_maintenance,
-             :status_local_read,
-             [target],
-             timeout
-           ) do
-        {:badrpc, _} -> "unknown"
-        :regular -> "not under maintenance"
-        :draining -> magenta("marked for maintenance")
+      case {rpc_result, formatter} do
+        {{:badrpc, _}, _} -> "unknown"
+        {:regular, _} -> "not under maintenance"
+        {:draining, "json"} -> "marked for maintenance"
+        {:draining, _} -> magenta("marked for maintenance")
         # forward compatibility: should we figure out a way to know when
         # draining completes (it involves inherently asynchronous cluster
         # operations such as quorum queue leader re-election), we'd introduce
         # a new state
-        :drained -> magenta("marked for maintenance")
-        value -> to_string(value)
+        {:drained, "json"} -> "marked for maintenance"
+        {:drained, _} -> magenta("marked for maintenance")
+        {value, _} -> to_string(value)
       end
 
     {node, result}
@@ -383,6 +394,19 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
       end
 
     {node, result}
+  end
+
+  defp cluster_tags(node, timeout) do
+    case :rabbit_misc.rpc_call(
+           node,
+           :rabbit_runtime_parameters,
+           :value_global,
+           [:cluster_tags],
+           timeout
+         ) do
+      :not_found -> []
+      tags -> tags
+    end
   end
 
   defp node_lines(nodes) do
@@ -414,5 +438,11 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ClusterStatusCommand do
 
   defp maintenance_lines(mapping) do
     Enum.map(mapping, fn {node, status} -> "Node: #{node}, status: #{status}" end)
+  end
+
+  defp cluster_tag_lines(mapping) do
+    Enum.map(mapping, fn {key, value} ->
+      "#{key}: #{value}"
+    end)
   end
 end

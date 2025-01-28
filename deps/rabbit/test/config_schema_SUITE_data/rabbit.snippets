@@ -9,6 +9,14 @@
   "auth_backends.1 = ldap",
   [{rabbit,[{auth_backends,[rabbit_auth_backend_ldap]}]}],
   []},
+ {http_auth_backend,
+  "auth_backends.1 = http",
+  [{rabbit,[{auth_backends,[rabbit_auth_backend_http]}]}],
+  []},
+ {oauth2_auth_backend,
+  "auth_backends.1 = oauth2",
+  [{rabbit,[{auth_backends,[rabbit_auth_backend_oauth2]}]}],
+  []},
  {multiple_auth_backends,
  "auth_backends.1 = ldap
 auth_backends.2 = internal",
@@ -117,9 +125,52 @@ ssl_options.fail_if_no_peer_cert = true",
   "disk_free_limit.relative = 1.0",
    [{rabbit, [{disk_free_limit, {mem_relative, 1.0}}]}],[]},
 
- {disk_free_limit_only_absolute,
+ %%
+ %% Absolute free disk space limit
+ %%
+
+ {disk_free_limit_only_absolute_integer,
   "disk_free_limit.absolute = 50000",
    [{rabbit, [{disk_free_limit, 50000}]}],[]},
+
+  {disk_free_limit_only_absolute_units_gb,
+    "disk_free_limit.absolute = 2GB",
+    [{rabbit,[{disk_free_limit, "2GB"}]}],
+    []},
+  {disk_free_limit_only_absolute_units_gib,
+    "disk_free_limit.absolute = 2GiB",
+    [{rabbit,[{disk_free_limit, "2GiB"}]}],
+    []},
+  {disk_free_limit_only_absolute_units_g,
+    "disk_free_limit.absolute = 2G",
+    [{rabbit,[{disk_free_limit, "2G"}]}],
+    []},
+
+  {disk_free_limit_only_absolute_units_tb,
+    "disk_free_limit.absolute = 2TB",
+    [{rabbit,[{disk_free_limit, "2TB"}]}],
+    []},
+  {disk_free_limit_only_absolute_units_tib,
+    "disk_free_limit.absolute = 2TiB",
+    [{rabbit,[{disk_free_limit, "2TiB"}]}],
+    []},
+  {disk_free_limit_only_absolute_units_t,
+    "disk_free_limit.absolute = 2T",
+    [{rabbit,[{disk_free_limit, "2T"}]}],
+    []},
+
+  {disk_free_limit_only_absolute_units_pb,
+    "disk_free_limit.absolute = 2PB",
+    [{rabbit,[{disk_free_limit, "2PB"}]}],
+    []},
+  {disk_free_limit_only_absolute_units_pib,
+    "disk_free_limit.absolute = 2PiB",
+    [{rabbit,[{disk_free_limit, "2PiB"}]}],
+    []},
+  {disk_free_limit_only_absolute_units_p,
+    "disk_free_limit.absolute = 2P",
+    [{rabbit,[{disk_free_limit, "2P"}]}],
+    []},
 
  {default_users,
  "
@@ -131,7 +182,7 @@ ssl_options.fail_if_no_peer_cert = true",
   [{rabbit, [{default_users, [
       {<<"a">>, [{<<"vhost_pattern">>, "banana"},
                  {<<"tags">>, [administrator, operator]},
-                 {<<"password">>, "SECRET"},
+                 {<<"password">>, <<"SECRET">>},
                  {<<"read">>, ".*"}]}]}]}],
   []},
 
@@ -142,12 +193,17 @@ ssl_options.fail_if_no_peer_cert = true",
   default_policies.operator.a.vhost_pattern = banana
   default_policies.operator.a.classic_queues.ha_mode = exactly
   default_policies.operator.a.classic_queues.ha_params = 2
+  default_policies.operator.a.classic_queues.ha_sync_mode = automatic
+  default_policies.operator.a.classic_queues.queue_version = 2
+
  ",
   [{rabbit, [{default_policies, [{operator, [
       {<<"a">>, [{<<"expires">>, 3600000},
-                 {<<"ha_mode">>, "exactly"},
+                 {<<"ha_mode">>, <<"exactly">>},
                  {<<"ha_params">>, 2},
-                 {<<"queue_pattern">>, "apple"},
+                 {<<"ha_sync_mode">>, <<"automatic">>},
+                 {<<"queue_pattern">>, <<"apple">>},
+                 {<<"queue_version">>, 2},
                  {<<"vhost_pattern">>, "banana"}]}]}]}]}],
   []},
 
@@ -164,6 +220,8 @@ ssl_options.fail_if_no_peer_cert = true",
  {default_user_settings,
   "default_user = guest
 default_pass = guest
+anonymous_login_user = guest
+anonymous_login_pass = guest
 default_user_tags.administrator = true
 default_permissions.configure = .*
 default_permissions.read = .*
@@ -171,9 +229,30 @@ default_permissions.write = .*",
   [{rabbit,
        [{default_user,<<"guest">>},
         {default_pass,<<"guest">>},
+        {anonymous_login_user,<<"guest">>},
+        {anonymous_login_pass,<<"guest">>},
         {default_user_tags,[administrator]},
         {default_permissions,[<<".*">>,<<".*">>,<<".*">>]}]}],
   []},
+ {anonymous_login_user,
+  "anonymous_login_user = none",
+  [{rabbit,
+       [{anonymous_login_user, none}]}],
+  []},
+
+ {auth_mechanisms_ordered,
+  "auth_mechanisms.1 = PLAIN
+auth_mechanisms.2 = AMQPLAIN
+auth_mechanisms.3 = ANONYMOUS",
+  [],
+  [{rabbit,
+    %% We expect the mechanisms in the order as declared.
+    [{auth_mechanisms, ['PLAIN', 'AMQPLAIN', 'ANONYMOUS']}]
+   }],
+  [],
+  nosort
+ },
+
  {cluster_formation,
   "cluster_formation.peer_discovery_backend = rabbit_peer_discovery_classic_config
 cluster_formation.classic_config.nodes.peer1 = rabbit@hostname1
@@ -239,19 +318,61 @@ tcp_listen_options.exit_on_close = false",
        [{tcp_listen_options,
             [{backlog,128},{nodelay,true},{exit_on_close,false}]}]}],
   []},
- {vm_memory_watermark_absolute,
+
+ %%
+ %% Absolute high runtime memory watermark
+ %%
+
+ {vm_memory_watermark_absolute_integer,
   "vm_memory_high_watermark.absolute = 1073741824",
   [{rabbit,[{vm_memory_high_watermark,{absolute,1073741824}}]}],
   []},
- {vm_memory_watermark_absolute_units,
+
+ {vm_memory_watermark_absolute_units_mb,
   "vm_memory_high_watermark.absolute = 1024MB",
   [{rabbit,[{vm_memory_high_watermark,{absolute,"1024MB"}}]}],
   []},
+  {vm_memory_watermark_absolute_units_mib,
+    "vm_memory_high_watermark.absolute = 1024MiB",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"1024MiB"}}]}],
+    []},
+  {vm_memory_watermark_absolute_units_m,
+    "vm_memory_high_watermark.absolute = 1024M",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"1024M"}}]}],
+    []},
+
+  {vm_memory_watermark_absolute_units_gb,
+    "vm_memory_high_watermark.absolute = 4GB",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"4GB"}}]}],
+    []},
+  {vm_memory_watermark_absolute_units_gib,
+    "vm_memory_high_watermark.absolute = 3GiB",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"3GiB"}}]}],
+    []},
+  {vm_memory_watermark_absolute_units_g,
+    "vm_memory_high_watermark.absolute = 10G",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"10G"}}]}],
+    []},
+
+  {vm_memory_watermark_absolute_units_tb,
+    "vm_memory_high_watermark.absolute = 1TB",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"1TB"}}]}],
+    []},
+  {vm_memory_watermark_absolute_units_tib,
+    "vm_memory_high_watermark.absolute = 1TiB",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"1TiB"}}]}],
+    []},
+  {vm_memory_watermark_absolute_units_t,
+    "vm_memory_high_watermark.absolute = 1T",
+    [{rabbit,[{vm_memory_high_watermark,{absolute,"1T"}}]}],
+    []},
+
  {vm_memory_watermark_absolute_priority,
   "vm_memory_high_watermark.absolute = 1073741824
    vm_memory_high_watermark.relative = 0.4",
   [{rabbit,[{vm_memory_high_watermark,{absolute,1073741824}}]}],
   []},
+ %% DEPRECATED; just for backwards compatibility
  {vm_memory_watermark_paging_ratio,
   "vm_memory_high_watermark_paging_ratio = 0.75
    vm_memory_high_watermark.relative = 0.4",
@@ -259,6 +380,7 @@ tcp_listen_options.exit_on_close = false",
        [{vm_memory_high_watermark_paging_ratio,0.75},
         {vm_memory_high_watermark,0.4}]}],
   []},
+ %% DEPRECATED; just for backwards compatibility
  {memory_monitor_interval, "memory_monitor_interval = 5000",
   [{rabbit,
        [{memory_monitor_interval, 5000}]}],
@@ -298,6 +420,38 @@ tcp_listen_options.exit_on_close = false",
  {channel_max,
   "channel_max = 16",
   [{rabbit,[{channel_max, 16}]}],
+  []},
+ {channel_max_per_node,
+  "channel_max_per_node = 16",
+  [{rabbit,[{channel_max_per_node, 16}]}],
+  []},
+ {channel_max_per_node,
+  "channel_max_per_node = infinity",
+  [{rabbit,[{channel_max_per_node, infinity}]}],
+  []},
+ {session_max_per_connection_1,
+  "session_max_per_connection = 1",
+  [{rabbit,[{session_max_per_connection, 1}]}],
+  []},
+ {session_max_per_connection,
+  "session_max_per_connection = 65000",
+  [{rabbit,[{session_max_per_connection, 65_000}]}],
+  []},
+ {link_max_per_session_1,
+  "link_max_per_session = 1",
+  [{rabbit,[{link_max_per_session, 1}]}],
+  []},
+ {link_max_per_session,
+  "link_max_per_session = 4200000000",
+  [{rabbit,[{link_max_per_session, 4_200_000_000}]}],
+  []},
+ {consumer_max_per_channel,
+  "consumer_max_per_channel = 16",
+  [{rabbit,[{consumer_max_per_channel, 16}]}],
+  []},
+ {consumer_max_per_channel,
+  "consumer_max_per_channel = infinity",
+  [{rabbit,[{consumer_max_per_channel, infinity}]}],
   []},
  {max_message_size,
   "max_message_size = 131072",
@@ -397,7 +551,7 @@ tcp_listen_options.exit_on_close = false",
             [{cacertfile,"test/config_schema_SUITE_data/certs/cacert.pem"},
              {certfile,"test/config_schema_SUITE_data/certs/cert.pem"},
              {keyfile,"test/config_schema_SUITE_data/certs/key.pem"},
-             {password,"t0p$3kRe7"}]}]}],
+             {password,<<"t0p$3kRe7">>}]}]}],
   []},
  {ssl_options_tls_ver_old,
   "listeners.ssl.1 = 5671
@@ -634,22 +788,6 @@ tcp_listen_options.exit_on_close = false",
   [{rabbit,[{tcp_listen_options,[{linger,{false,100}}]}]}],
   []},
 
- {cluster_formation_randomized_startup_delay_both_values,
-  "cluster_formation.randomized_startup_delay_range.min = 10
-   cluster_formation.randomized_startup_delay_range.max = 30",
-  [],
-  []},
-
- {cluster_formation_randomized_startup_delay_min_only,
-  "cluster_formation.randomized_startup_delay_range.min = 10",
-  [],
-  []},
-
- {cluster_formation_randomized_startup_delay_max_only,
-  "cluster_formation.randomized_startup_delay_range.max = 30",
-  [],
-  []},
-
  {cluster_formation_internal_lock_retries,
   "cluster_formation.internal_lock_retries = 10",
   [{rabbit,[{cluster_formation,[{internal_lock_retries,10}]}]}],
@@ -838,9 +976,9 @@ credential_validator.regexp = ^abc\\d+",
    []},
 
   {raft_segment_max_entries,
-   "raft.segment_max_entries = 65536",
+   "raft.segment_max_entries = 32768",
    [{ra, [
-      {segment_max_entries, 65536}
+      {segment_max_entries, 32768}
      ]}],
    []},
 
@@ -918,9 +1056,63 @@ credential_validator.regexp = ^abc\\d+",
   %%
 
   {deprecated_features_cmq,
-   "deprecated_features.permit.classic_mirrored_queues = false",
+   "deprecated_features.permit.classic_queue_mirroring = false",
    [{rabbit, [
-      {permitted_deprecated_features, #{classic_mirrored_queues => false}}
+      {permit_deprecated_features, #{classic_queue_mirroring => false}}
+     ]}],
+   []},
+
+  %%
+  %% Message interceptors
+  %%
+
+  {message_interceptors,
+   "message_interceptors.incoming.set_header_timestamp.overwrite = true",
+   [{rabbit, [
+      {incoming_message_interceptors, [{set_header_timestamp, true}]}
+     ]}],
+   []},
+
+  {message_interceptors,
+  "
+   message_interceptors.incoming.set_header_routing_node.overwrite = false
+   message_interceptors.incoming.set_header_timestamp.overwrite = false
+  ",
+   [{rabbit, [
+      {incoming_message_interceptors, [{set_header_routing_node, false},
+                                       {set_header_timestamp, false}]}
+     ]}],
+   []},
+
+  %%
+  %% Stream replication port range
+  %%
+
+  {stream_replication_port_range,
+   "
+    stream.replication.port_range.min = 4000
+    stream.replication.port_range.max = 4600
+   ",
+   [{osiris, [
+      {port_range, {4000, 4600}}
+     ]}],
+   []},
+
+  {stream_replication_port_range,
+   "
+    stream.replication.port_range.min = 4000
+   ",
+   [{osiris, [
+      {port_range, {4000, 4500}}
+     ]}],
+   []},
+
+  {stream_replication_port_range,
+   "
+    stream.replication.port_range.max = 4600
+   ",
+   [{osiris, [
+      {port_range, {4100, 4600}}
      ]}],
    []}
 

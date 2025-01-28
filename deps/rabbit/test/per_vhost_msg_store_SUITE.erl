@@ -2,45 +2,60 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(per_vhost_msg_store_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(MSGS_COUNT, 100).
 
 all() ->
     [
-      publish_to_different_dirs,
-      storage_deleted_on_vhost_delete,
-      single_vhost_storage_delete_is_safe
+     {group, tests}
     ].
 
+groups() ->
+    [
+     {tests, [], all_tests()}
+    ].
 
+all_tests() ->
+    [publish_to_different_dirs,
+     storage_deleted_on_vhost_delete,
+     single_vhost_storage_delete_is_safe].
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
+    rabbit_ct_helpers:run_setup_steps(Config, []).
+
+end_per_suite(Config) ->
+    rabbit_ct_helpers:run_teardown_steps(Config).
+
+init_per_group(tests, Config) ->
+    init_per_group_common(Config).
+
+init_per_group_common(Config) ->
     Config1 = rabbit_ct_helpers:set_config(
                 Config,
                 [{rmq_nodename_suffix, ?MODULE}]),
     Config2 = rabbit_ct_helpers:merge_app_env(
                 Config1,
                 {rabbit, [{queue_index_embed_msgs_below, 100}]}),
-    rabbit_ct_helpers:run_setup_steps(
-        Config2,
-        rabbit_ct_broker_helpers:setup_steps() ++
-        rabbit_ct_client_helpers:setup_steps()).
+    rabbit_ct_helpers:run_steps(Config2,
+                                rabbit_ct_broker_helpers:setup_steps() ++
+                                    rabbit_ct_client_helpers:setup_steps()).
 
-end_per_suite(Config) ->
-    rabbit_ct_helpers:run_teardown_steps(
-        Config,
-        rabbit_ct_client_helpers:teardown_steps() ++
-        rabbit_ct_broker_helpers:teardown_steps()).
+end_per_group(_, Config) ->
+    rabbit_ct_helpers:run_steps(Config,
+                                rabbit_ct_client_helpers:teardown_steps() ++
+                                    rabbit_ct_broker_helpers:teardown_steps()).
 
 init_per_testcase(_, Config) ->
     Vhost1 = <<"vhost1">>,
@@ -109,23 +124,16 @@ storage_deleted_on_vhost_delete(Config) ->
     Vhost1 = ?config(vhost1, Config),
     Channel1 = ?config(channel1, Config),
     Queue1 = declare_durable_queue(Channel1),
-    FolderSize = get_global_folder_size(Config),
+    FolderSize = get_folder_size(Vhost1, Config),
 
     publish_persistent_messages(index, Channel1, Queue1),
     publish_persistent_messages(store, Channel1, Queue1),
-    FolderSizeAfterPublish = get_global_folder_size(Config),
-
-    %% Total storage size increased
-    true = (FolderSize < FolderSizeAfterPublish),
+    ?awaitMatch(true, get_folder_size(Vhost1, Config) > FolderSize, 30000),
 
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, Vhost1),
 
-    %% Total memory reduced
-    FolderSizeAfterDelete = get_global_folder_size(Config),
-    true = (FolderSizeAfterPublish > FolderSizeAfterDelete),
-
     %% There is no Vhost1 folder
-    0 = get_folder_size(Vhost1, Config).
+    ?awaitMatch(0, get_folder_size(Vhost1, Config), 30000).
 
 
 single_vhost_storage_delete_is_safe(Config) ->
@@ -191,10 +199,6 @@ get_folder_size(Vhost, Config) ->
 folder_size(Dir) ->
     filelib:fold_files(Dir, ".*", true,
                        fun(F,Acc) -> filelib:file_size(F) + Acc end, 0).
-
-get_global_folder_size(Config) ->
-    BaseDir = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit, data_dir, []),
-    folder_size(BaseDir).
 
 vhost_dir(Vhost, Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0,

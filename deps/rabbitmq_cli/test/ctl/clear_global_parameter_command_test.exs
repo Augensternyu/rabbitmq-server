@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule ClearGlobalParameterCommandTest do
   use ExUnit.Case, async: false
@@ -44,7 +44,7 @@ defmodule ClearGlobalParameterCommandTest do
     assert @command.run(
              [context[:key]],
              context[:opts]
-           ) == {:error_string, 'Parameter does not exist'}
+           ) == {:error_string, ~c"Parameter does not exist"}
   end
 
   test "run: throws a badrpc when instructed to contact an unreachable RabbitMQ node" do

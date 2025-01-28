@@ -1,5 +1,6 @@
 -module(rabbit_classic_queue).
 -behaviour(rabbit_queue_type).
+-behaviour(rabbit_policy_validator).
 
 -include("amqqueue.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
@@ -32,15 +33,17 @@
          purge/1,
          policy_changed/1,
          stat/1,
+         format/2,
          init/1,
          close/1,
          update/2,
          consume/3,
-         cancel/5,
+         cancel/3,
          handle_event/3,
-         deliver/2,
+         deliver/3,
          settle/5,
-         credit/5,
+         credit_v1/5,
+         credit/6,
          dequeue/5,
          info/2,
          state_info/1,
@@ -51,13 +54,46 @@
 
 -export([delete_crashed/1,
          delete_crashed/2,
-         delete_crashed_internal/2]).
+         delete_crashed_internal/2,
+         delete_crashed_in_backing_queue/1]).
 
 -export([confirm_to_sender/3,
          send_rejection/3,
          deliver_to_consumer/5,
-         send_drained/3,
-         send_credit_reply/3]).
+         send_credit_reply_credit_api_v1/3,
+         send_drained_credit_api_v1/4,
+         send_credit_reply/7]).
+
+-export([validate_policy/1]).
+
+-rabbit_boot_step(
+   {?MODULE,
+    [{description, "Deprecated queue-master-locator support."
+      "Use queue-leader-locator instead."},
+     {mfa, {rabbit_registry, register,
+            [policy_validator, <<"queue-master-locator">>, ?MODULE]}},
+     {mfa, {rabbit_registry, register,
+            [operator_policy_validator, <<"queue-master-locator">>, ?MODULE]}},
+     {requires, rabbit_registry},
+     {enables, recovery}]}).
+
+validate_policy(Args) ->
+    %% queue-master-locator was deprecated in 4.0
+    Locator = proplists:get_value(<<"queue-master-locator">>, Args, unknown),
+    case Locator of
+        unknown ->
+            ok;
+        _ ->
+            case rabbit_queue_location:master_locator_permitted() of
+                true ->
+                    case lists:member(Locator, rabbit_queue_location:queue_leader_locators()) of
+                        true -> ok;
+                        false -> {error, "~tp is not a valid master locator", [Locator]}
+                    end;
+                false ->
+                    {error, "use of deprecated queue-master-locator argument is not permitted", []}
+                end
+    end.
 
 -spec is_enabled() -> boolean().
 is_enabled() -> true.
@@ -66,7 +102,28 @@ is_enabled() -> true.
 is_compatible(_, _, _) ->
     true.
 
+validate_arguments(Args) ->
+    case lists:keymember(<<"x-queue-master-locator">>, 1, Args) of
+        false ->
+            ok;
+        true ->
+            case rabbit_queue_location:master_locator_permitted() of
+                true ->
+                    ok;
+                false ->
+                    Warning = rabbit_deprecated_features:get_warning(
+                                queue_master_locator),
+                    {protocol_error, internal_error, "~ts", [Warning]}
+            end
+    end.
+
 declare(Q, Node) when ?amqqueue_is_classic(Q) ->
+    case validate_arguments(amqqueue:get_arguments(Q)) of
+        ok -> do_declare(Q, Node);
+        Error -> Error
+    end.
+
+do_declare(Q, Node) when ?amqqueue_is_classic(Q) ->
     QName = amqqueue:get_name(Q),
     VHost = amqqueue:get_vhost(Q),
     Node1 = case {Node, rabbit_amqqueue:is_exclusive(Q)} of
@@ -75,59 +132,58 @@ declare(Q, Node) when ?amqqueue_is_classic(Q) ->
                 {_, true} ->
                     Node;
                 _ ->
-                    case rabbit_queue_master_location_misc:get_location(Q) of
-                        {ok, Node0}  -> Node0;
-                        _   -> Node
-                    end
+                    {Node0, _} = rabbit_queue_location:select_leader_and_followers(Q, 1),
+                    Node0
             end,
-    Node1 = rabbit_mirror_queue_misc:initial_queue_node(Q, Node1),
     case rabbit_vhost_sup_sup:get_vhost_sup(VHost, Node1) of
         {ok, _} ->
             gen_server2:call(
-              rabbit_amqqueue_sup_sup:start_queue_process(Node1, Q, declare),
+              rabbit_amqqueue_sup_sup:start_queue_process(Node1, Q),
               {init, new}, infinity);
         {error, Error} ->
             {protocol_error, internal_error, "Cannot declare a queue '~ts' on node '~ts': ~255p",
              [rabbit_misc:rs(QName), Node1, Error]}
     end.
 
-delete(Q, IfUnused, IfEmpty, ActingUser) when ?amqqueue_is_classic(Q) ->
-    case wait_for_promoted_or_stopped(Q) of
-        {promoted, Q1} ->
-            QPid = amqqueue:get_pid(Q1),
-            delegate:invoke(QPid, {gen_server2, call,
-                                   [{delete, IfUnused, IfEmpty, ActingUser},
-                                    infinity]});
-        {stopped, Q1} ->
-            #resource{name = Name, virtual_host = Vhost} = amqqueue:get_name(Q1),
-            case IfEmpty of
+delete(Q0, IfUnused, IfEmpty, ActingUser) when ?amqqueue_is_classic(Q0) ->
+    QName = amqqueue:get_name(Q0),
+    case rabbit_amqqueue:lookup(QName) of
+        {ok, Q} ->
+            QPid = amqqueue:get_pid(Q),
+            case rabbit_process:is_process_alive(QPid) of
                 true ->
-                    rabbit_log:error("Queue ~ts in vhost ~ts has its master node down and "
-                                     "no mirrors available or eligible for promotion. "
-                                     "The queue may be non-empty. "
-                                     "Refusing to force-delete.",
-                                     [Name, Vhost]),
-                    {error, not_empty};
+                    delegate:invoke(QPid, {gen_server2, call,
+                                           [{delete, IfUnused, IfEmpty, ActingUser},
+                                            infinity]});
                 false ->
-                    rabbit_log:warning("Queue ~ts in vhost ~ts has its master node is down and "
-                                       "no mirrors available or eligible for promotion. "
-                                       "Forcing queue deletion.",
-                                       [Name, Vhost]),
-                    delete_crashed_internal(Q1, ActingUser),
-                    {ok, 0}
+                    #resource{name = Name, virtual_host = Vhost} = QName,
+                    case IfEmpty of
+                        true ->
+                            rabbit_log:error("Queue ~ts in vhost ~ts is down. "
+                                             "The queue may be non-empty. "
+                                             "Refusing to force-delete.",
+                                             [Name, Vhost]),
+                            {error, not_empty};
+                        false ->
+                            rabbit_log:warning("Queue ~ts in vhost ~ts is down. "
+                                               "Forcing queue deletion.",
+                                               [Name, Vhost]),
+                            case delete_crashed_internal(Q, ActingUser) of
+                                ok ->
+                                    {ok, 0};
+                                {error, timeout} = Err ->
+                                    Err
+                            end
+                    end
             end;
         {error, not_found} ->
             %% Assume the queue was deleted
             {ok, 0}
     end.
 
-is_recoverable(Q) when ?is_amqqueue(Q) ->
+is_recoverable(Q) when ?is_amqqueue(Q) and ?amqqueue_is_classic(Q) ->
     Node = node(),
-    Node =:= node(amqqueue:get_pid(Q)) andalso
-    %% Terminations on node down will not remove the rabbit_queue
-    %% record if it is a mirrored queue (such info is now obtained from
-    %% the policy). Thus, we must check if the local pid is alive
-    %% - if the record is present - in order to restart.
+    Node =:= amqqueue:qnode(Q) andalso
     (not rabbit_db_queue:consistent_exists(amqqueue:get_name(Q))
      orelse not rabbit_process:is_process_alive(amqqueue:get_pid(Q))).
 
@@ -169,11 +225,35 @@ find_missing_queues([Q1|Rem1], [Q2|Rem2] = Q2s, Acc) ->
 -spec policy_changed(amqqueue:amqqueue()) -> ok.
 policy_changed(Q) ->
     QPid = amqqueue:get_pid(Q),
-    gen_server2:cast(QPid, policy_changed).
+    case rabbit_khepri:is_enabled() of
+        false ->
+            gen_server2:cast(QPid, policy_changed);
+        true ->
+            %% When using Khepri, projections are guaranteed to be atomic on
+            %% the node that processes them, but there might be a slight delay
+            %% until they're applied on other nodes. Some test suites fail
+            %% intermittently, showing that rabbit_amqqueue_process is reading
+            %% the old policy value. We use the khepri ff to hide this API change,
+            %% and use the up-to-date record to update the policy on the gen_server
+            %% state.
+            gen_server2:cast(QPid, {policy_changed, Q})
+    end.
 
 stat(Q) ->
     delegate:invoke(amqqueue:get_pid(Q),
                     {gen_server2, call, [stat, infinity]}).
+
+
+format(Q, _Ctx) when ?is_amqqueue(Q) ->
+    State = case amqqueue:get_state(Q) of
+                live ->
+                    running;
+                S ->
+                    S
+            end,
+    [{type, classic},
+     {state, State},
+     {node, node(amqqueue:get_pid(Q))}].
 
 -spec init(amqqueue:amqqueue()) -> {ok, state()}.
 init(Q) when ?amqqueue_is_classic(Q) ->
@@ -200,16 +280,17 @@ consume(Q, Spec, State0) when ?amqqueue_is_classic(Q) ->
       channel_pid := ChPid,
       limiter_pid := LimiterPid,
       limiter_active := LimiterActive,
-      prefetch_count := ConsumerPrefetchCount,
+      mode := Mode,
       consumer_tag := ConsumerTag,
       exclusive_consume := ExclusiveConsume,
-      args := Args,
+      args := Args0,
       ok_msg := OkMsg,
       acting_user :=  ActingUser} = Spec,
+    {ModeOrPrefetch, Args} = consume_backwards_compat(Mode, Args0),
     case delegate:invoke(QPid,
                          {gen_server2, call,
                           [{basic_consume, NoAck, ChPid, LimiterPid,
-                            LimiterActive, ConsumerPrefetchCount, ConsumerTag,
+                            LimiterActive, ModeOrPrefetch, ConsumerTag,
                             ExclusiveConsume, Args, OkMsg, ActingUser},
                            infinity]}) of
         ok ->
@@ -220,36 +301,69 @@ consume(Q, Spec, State0) when ?amqqueue_is_classic(Q) ->
             Err
     end.
 
-cancel(Q, ConsumerTag, OkMsg, ActingUser, State) ->
-    QPid = amqqueue:get_pid(Q),
-    case delegate:invoke(QPid, {gen_server2, call,
-                                [{basic_cancel, self(), ConsumerTag,
-                                  OkMsg, ActingUser}, infinity]}) of
-        ok ->
-            {ok, State};
+%% Delete this function when feature flag rabbitmq_4.0.0 becomes required.
+consume_backwards_compat({simple_prefetch, PrefetchCount} = Mode, Args) ->
+    case rabbit_feature_flags:is_enabled('rabbitmq_4.0.0') of
+        true -> {Mode, Args};
+        false -> {PrefetchCount, Args}
+    end;
+consume_backwards_compat({credited, InitialDeliveryCount} = Mode, Args)
+  when is_integer(InitialDeliveryCount) ->
+    %% credit API v2
+    {Mode, Args};
+consume_backwards_compat({credited, credit_api_v1}, Args) ->
+    %% credit API v1
+    {_PrefetchCount = 0,
+     [{<<"x-credit">>, table, [{<<"credit">>, long, 0},
+                               {<<"drain">>,  bool, false}]} | Args]}.
+
+cancel(Q, Spec, State) ->
+    %% Cancel API v2 reuses feature flag rabbitmq_4.0.0.
+    Request = case rabbit_feature_flags:is_enabled('rabbitmq_4.0.0') of
+                  true ->
+                      {stop_consumer, Spec#{pid => self()}};
+                  false ->
+                      #{consumer_tag := ConsumerTag,
+                        user := ActingUser} = Spec,
+                      OkMsg = maps:get(ok_msg, Spec, undefined),
+                      {basic_cancel, self(), ConsumerTag, OkMsg, ActingUser}
+              end,
+    case delegate:invoke(amqqueue:get_pid(Q),
+                         {gen_server2, call, [Request, infinity]}) of
+        ok -> {ok, State};
         Err -> Err
     end.
 
 -spec settle(rabbit_amqqueue:name(), rabbit_queue_type:settle_op(),
              rabbit_types:ctag(), [non_neg_integer()], state()) ->
     {state(), rabbit_queue_type:actions()}.
-settle(_QName, complete, _CTag, MsgIds, State) ->
-    Pid = State#?STATE.pid,
-    delegate:invoke_no_result(Pid,
-                              {gen_server2, cast, [{ack, MsgIds, self()}]}),
-    {State, []};
-settle(_QName, Op, _CTag, MsgIds, State) ->
-    ChPid = self(),
-    ok = delegate:invoke_no_result(State#?STATE.pid,
-                                   {gen_server2, cast,
-                                    [{reject, Op == requeue, MsgIds, ChPid}]}),
+settle(QName, {modify, _DelFailed, Undel, _Anns}, CTag, MsgIds, State) ->
+    %% translate modify into other op
+    Op = case Undel of
+             true ->
+                 discard;
+             false ->
+                 requeue
+         end,
+    settle(QName, Op, CTag, MsgIds, State);
+settle(_QName, Op, _CTag, MsgIds, State = #?STATE{pid = Pid}) ->
+    Arg = case Op of
+              complete ->
+                  {ack, MsgIds, self()};
+              _ ->
+                  {reject, Op == requeue, MsgIds, self()}
+          end,
+    delegate:invoke_no_result(Pid, {gen_server2, cast, [Arg]}),
     {State, []}.
 
-credit(_QName, CTag, Credit, Drain, State) ->
-    ChPid = self(),
-    delegate:invoke_no_result(State#?STATE.pid,
-                              {gen_server2, cast,
-                               [{credit, ChPid, CTag, Credit, Drain}]}),
+credit_v1(_QName, Ctag, LinkCreditSnd, Drain, #?STATE{pid = QPid} = State) ->
+    Request = {credit, self(), Ctag, LinkCreditSnd, Drain},
+    delegate:invoke_no_result(QPid, {gen_server2, cast, [Request]}),
+    {State, []}.
+
+credit(_QName, Ctag, DeliveryCountRcv, LinkCreditRcv, Drain, #?STATE{pid = QPid} = State) ->
+    Request = {credit, self(), Ctag, DeliveryCountRcv, LinkCreditRcv, Drain},
+    delegate:invoke_no_result(QPid, {gen_server2, cast, [Request]}),
     {State, []}.
 
 handle_event(QName, {confirm, MsgSeqNos, Pid}, #?STATE{unconfirmed = U0} = State) ->
@@ -273,21 +387,14 @@ handle_event(QName, {reject_publish, SeqNo, _QPid},
     Actions = [{rejected, QName, Rejected}],
     {ok, State#?STATE{unconfirmed = U}, Actions};
 handle_event(QName, {down, Pid, Info}, #?STATE{monitored = Monitored,
-                                               pid = MasterPid,
                                                unconfirmed = U0} = State0) ->
     State = State0#?STATE{monitored = maps:remove(Pid, Monitored)},
-    Actions0 = case Pid =:= MasterPid of
-                   true ->
-                       [{queue_down, QName}];
-                   false ->
-                       []
-              end,
+    Actions0 = [{queue_down, QName}],
     case rabbit_misc:is_abnormal_exit(Info) of
-        false when Info =:= normal andalso Pid == MasterPid ->
-            %% queue was deleted and masterpid is down
+        false when Info =:= normal ->
+            %% queue was deleted
             {eol, []};
         false ->
-            %% this assumes the mirror isn't part of the active set
             MsgSeqNos = maps:keys(
                           maps:filter(fun (_, #msg_status{pending = Pids}) ->
                                               lists:member(Pid, Pids)
@@ -300,8 +407,7 @@ handle_event(QName, {down, Pid, Info}, #?STATE{monitored = Monitored,
             {ok, State#?STATE{unconfirmed = Unconfirmed}, Actions};
         true ->
             %% any abnormal exit should be considered a full reject of the
-            %% oustanding message ids - If the message didn't get to all
-            %% mirrors we have to assume it will never get there
+            %% oustanding message ids
             MsgIds = maps:fold(
                           fun (SeqNo, Status, Acc) ->
                                   case lists:member(Pid, Status#msg_status.pending) of
@@ -315,9 +421,13 @@ handle_event(QName, {down, Pid, Info}, #?STATE{monitored = Monitored,
             {ok, State#?STATE{unconfirmed = U},
              [{rejected, QName, MsgIds} | Actions0]}
     end;
-handle_event(_QName, {send_drained, _} = Action, State) ->
+handle_event(_QName, Action, State)
+  when element(1, Action) =:= credit_reply ->
     {ok, State, [Action]};
-handle_event(_QName, {send_credit_reply, _} = Action, State) ->
+handle_event(_QName, {send_drained, {Ctag, Credit}}, State) ->
+    %% This function clause should be deleted when feature flag
+    %% rabbitmq_4.0.0 becomes required.
+    Action = {credit_reply_v1, Ctag, Credit, _Available = 0, _Drain = true},
     {ok, State, [Action]}.
 
 settlement_action(_Type, _QRef, [], Acc) ->
@@ -326,32 +436,32 @@ settlement_action(Type, QRef, MsgSeqs, Acc) ->
     [{Type, QRef, MsgSeqs} | Acc].
 
 -spec deliver([{amqqueue:amqqueue(), state()}],
-              Delivery :: term()) ->
+              Delivery :: mc:state(),
+              rabbit_queue_type:delivery_options()) ->
     {[{amqqueue:amqqueue(), state()}], rabbit_queue_type:actions()}.
-deliver(Qs0, #delivery{flow = Flow,
-                       msg_seq_no = MsgNo,
-                       message = #basic_message{} = Msg0,
-                       confirm = Confirm} = Delivery0) ->
+deliver(Qs0, Msg0, Options) ->
     %% add guid to content here instead of in rabbit_basic:message/3,
     %% as classic queues are the only ones that need it
-    Msg = Msg0#basic_message{id = rabbit_guid:gen()},
-    Delivery = Delivery0#delivery{message = Msg},
+    Msg = mc:prepare(store, mc:set_annotation(id, rabbit_guid:gen(), Msg0)),
+    Mandatory = maps:get(mandatory, Options, false),
+    MsgSeqNo = maps:get(correlation, Options, undefined),
+    Flow = maps:get(flow, Options, noflow),
+    Confirm = MsgSeqNo /= undefined,
 
-    {MPids, SPids, Qs} = qpids(Qs0, Confirm, MsgNo),
+    {MPids, Qs} = qpids(Qs0, Confirm, MsgSeqNo),
+    Delivery = rabbit_basic:delivery(Mandatory, Confirm, Msg, MsgSeqNo, Flow),
+
     case Flow of
         %% Here we are tracking messages sent by the rabbit_channel
         %% process. We are accessing the rabbit_channel process
         %% dictionary.
         flow ->
             _ = [credit_flow:send(QPid) || QPid <- MPids],
-            _ = [credit_flow:send(QPid) || QPid <- SPids],
             ok;
         noflow -> ok
     end,
     MMsg = {deliver, Delivery, false},
-    SMsg = {deliver, Delivery, true},
     delegate:invoke_no_result(MPids, {gen_server2, cast, [MMsg]}),
-    delegate:invoke_no_result(SPids, {gen_server2, cast, [SMsg]}),
     {Qs, []}.
 
 -spec dequeue(rabbit_amqqueue:name(), NoAck :: boolean(),
@@ -400,80 +510,61 @@ purge(Q) when ?is_amqqueue(Q) ->
 
 qpids(Qs, Confirm, MsgNo) ->
     lists:foldl(
-      fun ({Q, S0}, {MPidAcc, SPidAcc, Qs0}) ->
+      fun ({Q, S0}, {MPidAcc, Qs0}) ->
               QPid = amqqueue:get_pid(Q),
-              SPids = amqqueue:get_slave_pids(Q),
               QRef = amqqueue:get_name(Q),
               S1 = ensure_monitor(QPid, QRef, S0),
-              S2 = lists:foldl(fun(SPid, Acc) ->
-                                       ensure_monitor(SPid, QRef, Acc)
-                               end, S1, SPids),
               %% confirm record only if necessary
-              S = case S2 of
+              S = case S1 of
                       #?STATE{unconfirmed = U0} ->
-                          Rec = [QPid | SPids],
+                          Rec = [QPid],
                           U = case Confirm of
                                   false ->
                                       U0;
                                   true ->
                                       U0#{MsgNo => #msg_status{pending = Rec}}
                               end,
-                          S2#?STATE{pid = QPid,
+                          S1#?STATE{pid = QPid,
                                     unconfirmed = U};
                       stateless ->
-                          S2
+                          S1
                   end,
-              {[QPid | MPidAcc], SPidAcc ++ SPids,
-               [{Q, S} | Qs0]}
-      end, {[], [], []}, Qs).
-
-%% internal-ish
--spec wait_for_promoted_or_stopped(amqqueue:amqqueue()) ->
-    {promoted, amqqueue:amqqueue()} |
-    {stopped, amqqueue:amqqueue()} |
-    {error, not_found}.
-wait_for_promoted_or_stopped(Q0) ->
-    QName = amqqueue:get_name(Q0),
-    case rabbit_amqqueue:lookup(QName) of
-        {ok, Q} ->
-            QPid = amqqueue:get_pid(Q),
-            SPids = amqqueue:get_slave_pids(Q),
-            case rabbit_process:is_process_alive(QPid) of
-                true  -> {promoted, Q};
-                false ->
-                    case lists:any(fun(Pid) ->
-                                       rabbit_process:is_process_alive(Pid)
-                                   end, SPids) of
-                        %% There is a live slave. May be promoted
-                        true ->
-                            timer:sleep(100),
-                            wait_for_promoted_or_stopped(Q);
-                        %% All slave pids are stopped.
-                        %% No process left for the queue
-                        false -> {stopped, Q}
-                    end
-            end;
-        {error, not_found} ->
-            {error, not_found}
-    end.
+              {[QPid | MPidAcc], [{Q, S} | Qs0]}
+      end, {[], []}, Qs).
 
 -spec delete_crashed(amqqueue:amqqueue()) -> ok.
 delete_crashed(Q) ->
     delete_crashed(Q, ?INTERNAL_USER).
 
 delete_crashed(Q, ActingUser) ->
-    ok = rpc:call(amqqueue:qnode(Q), ?MODULE, delete_crashed_internal,
-                  [Q, ActingUser]).
+    %% Delete from `rabbit_db_queue' from the queue's node. The deletion's
+    %% change to the Khepri projection is immediately consistent on that node,
+    %% so the call will block until that node has fully deleted and forgotten
+    %% about the queue.
+    Ret = rpc:call(amqqueue:qnode(Q), ?MODULE, delete_crashed_in_backing_queue,
+                   [Q]),
+    case Ret of
+        {badrpc, {'EXIT', {undef, _}}} ->
+            %% Compatibility: if the remote node doesn't yet expose this
+            %% function, call it directly on this node.
+            ok = delete_crashed_in_backing_queue(Q);
+        ok ->
+            ok
+    end,
+    ok = rabbit_amqqueue:internal_delete(Q, ActingUser).
 
 delete_crashed_internal(Q, ActingUser) ->
+    delete_crashed_in_backing_queue(Q),
+    rabbit_amqqueue:internal_delete(Q, ActingUser).
+
+delete_crashed_in_backing_queue(Q) ->
     {ok, BQ} = application:get_env(rabbit, backing_queue_module),
-    BQ:delete_crashed(Q),
-    ok = rabbit_amqqueue:internal_delete(Q, ActingUser).
+    BQ:delete_crashed(Q).
 
 recover_durable_queues(QueuesAndRecoveryTerms) ->
     {Results, Failures} =
         gen_server2:mcall(
-          [{rabbit_amqqueue_sup_sup:start_queue_process(node(), Q, recovery),
+          [{rabbit_amqqueue_sup_sup:start_queue_process(node(), Q),
             {init, {self(), Terms}}} || {Q, Terms} <- QueuesAndRecoveryTerms]),
     [rabbit_log:error("Queue ~tp failed to initialise: ~tp",
                       [Pid, Error]) || {Pid, Error} <- Failures],
@@ -482,17 +573,19 @@ recover_durable_queues(QueuesAndRecoveryTerms) ->
 capabilities() ->
     #{unsupported_policies => [%% Stream policies
                                <<"max-age">>, <<"stream-max-segment-size-bytes">>,
-                               <<"queue-leader-locator">>, <<"initial-cluster-size">>,
+                               <<"initial-cluster-size">>,
                                %% Quorum policies
-                               <<"delivery-limit">>, <<"dead-letter-strategy">>],
+                               <<"delivery-limit">>, <<"dead-letter-strategy">>, <<"max-in-memory-length">>, <<"max-in-memory-bytes">>, <<"target-group-size">>],
       queue_arguments => [<<"x-expires">>, <<"x-message-ttl">>, <<"x-dead-letter-exchange">>,
                           <<"x-dead-letter-routing-key">>, <<"x-max-length">>,
                           <<"x-max-length-bytes">>, <<"x-max-priority">>,
                           <<"x-overflow">>, <<"x-queue-mode">>, <<"x-queue-version">>,
-                          <<"x-single-active-consumer">>, <<"x-queue-type">>,
-                          <<"x-queue-master-locator">>],
-      consumer_arguments => [<<"x-cancel-on-ha-failover">>,
-                             <<"x-priority">>, <<"x-credit">>],
+                          <<"x-single-active-consumer">>, <<"x-queue-type">>, <<"x-queue-master-locator">>]
+                          ++ case rabbit_feature_flags:is_enabled('rabbitmq_4.0.0') of
+                                 true -> [<<"x-queue-leader-locator">>];
+                                 false -> []
+                             end,
+      consumer_arguments => [<<"x-priority">>],
       server_named => true}.
 
 notify_decorators(Q) when ?is_amqqueue(Q) ->
@@ -554,27 +647,30 @@ ensure_monitor(Pid, QName, State = #?STATE{monitored = Monitored}) ->
 
 %% part of channel <-> queue api
 confirm_to_sender(Pid, QName, MsgSeqNos) ->
-    Msg = {confirm, MsgSeqNos, self()},
-    gen_server:cast(Pid, {queue_event, QName, Msg}).
+    Evt = {confirm, MsgSeqNos, self()},
+    send_queue_event(Pid, QName, Evt).
 
 send_rejection(Pid, QName, MsgSeqNo) ->
-    Msg = {reject_publish, MsgSeqNo, self()},
-    gen_server:cast(Pid, {queue_event, QName, Msg}).
+    Evt = {reject_publish, MsgSeqNo, self()},
+    send_queue_event(Pid, QName, Evt).
 
 deliver_to_consumer(Pid, QName, CTag, AckRequired, Message) ->
-    Deliver = {deliver, CTag, AckRequired, [Message]},
-    Evt = {queue_event, QName, Deliver},
-    gen_server:cast(Pid, Evt).
+    Evt = {deliver, CTag, AckRequired, [Message]},
+    send_queue_event(Pid, QName, Evt).
 
-send_drained(Pid, QName, CTagCredits) when is_list(CTagCredits) ->
-    [_ = gen_server:cast(Pid, {queue_event, QName,
-                               {send_drained, CTagCredit}})
-     || CTagCredit <- CTagCredits],
-    ok;
-send_drained(Pid, QName, CTagCredit) when is_tuple(CTagCredit) ->
-    gen_server:cast(Pid, {queue_event, QName,
-                          {send_drained, CTagCredit}}).
+%% Delete this function when feature flag rabbitmq_4.0.0 becomes required.
+send_credit_reply_credit_api_v1(Pid, QName, Available) ->
+    Evt = {send_credit_reply, Available},
+    send_queue_event(Pid, QName, Evt).
 
-send_credit_reply(Pid, QName, Len) when is_integer(Len) ->
-    gen_server:cast(Pid, {queue_event, QName,
-                          {send_credit_reply, Len}}).
+%% Delete this function when feature flag rabbitmq_4.0.0 becomes required.
+send_drained_credit_api_v1(Pid, QName, Ctag, Credit) ->
+    Evt = {send_drained, {Ctag, Credit}},
+    send_queue_event(Pid, QName, Evt).
+
+send_credit_reply(Pid, QName, Ctag, DeliveryCount, Credit, Available, Drain) ->
+    Evt = {credit_reply, Ctag, DeliveryCount, Credit, Available, Drain},
+    send_queue_event(Pid, QName, Evt).
+
+send_queue_event(Pid, QName, Event) ->
+    gen_server:cast(Pid, {queue_event, QName, Event}).

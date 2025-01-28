@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_federation_queue_link_sup_sup).
@@ -18,6 +18,7 @@
 
 -export([start_link/0, start_child/1, adjust/1, stop_child/1]).
 -export([init/1]).
+-export([id_to_khepri_path/1]).
 
 %%----------------------------------------------------------------------------
 
@@ -87,5 +88,10 @@ init([]) ->
 %% we don't clear it out here and can trust it.
 id(Q) when ?is_amqqueue(Q) ->
     Policy = amqqueue:get_policy(Q),
-    Q1 = rabbit_amqqueue:immutable(Q),
-    amqqueue:set_policy(Q1, Policy).
+    Q1 = amqqueue:set_immutable(Q),
+    Q2 = amqqueue:set_policy(Q1, Policy),
+    Q2.
+
+id_to_khepri_path(Id) when ?is_amqqueue(Id) ->
+    #resource{virtual_host = VHost, name = Name} = amqqueue:get_name(Id),
+    [queue, VHost, Name].

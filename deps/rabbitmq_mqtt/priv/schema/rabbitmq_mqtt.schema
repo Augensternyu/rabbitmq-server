@@ -6,35 +6,8 @@
 %% ----------------------------------------------------------------------------
 
 %  {rabbitmq_mqtt,
-%   [%% Set the default user name and password. Will be used as the default login
-%% if a connecting client provides no other login details.
-%%
-%% Please note that setting this will allow clients to connect without
-%% authenticating!
-%%
-%% {default_user, <<"guest">>},
-%% {default_pass, <<"guest">>},
-
-{mapping, "mqtt.default_user", "rabbitmq_mqtt.default_user", [
-    {datatype, string}
-]}.
-
-{mapping, "mqtt.default_pass", "rabbitmq_mqtt.default_pass", [
-    {datatype, string}
-]}.
-
-{translation, "rabbitmq_mqtt.default_user",
-fun(Conf) ->
-    list_to_binary(cuttlefish:conf_get("mqtt.default_user", Conf))
-end}.
-
-{translation, "rabbitmq_mqtt.default_pass",
-fun(Conf) ->
-    list_to_binary(cuttlefish:conf_get("mqtt.default_pass", Conf))
-end}.
-
-%% Enable anonymous access. If this is set to false, clients MUST provide
-%% login information in order to connect. See the default_user/default_pass
+%   [%% Enable anonymous access. If this is set to false, clients MUST provide
+%% login information in order to connect. See the anonymous_login_user/anonymous_login_pass
 %% configuration elements for managing logins without authentication.
 %%
 %% {allow_anonymous, true},
@@ -65,19 +38,32 @@ fun(Conf) ->
     list_to_binary(cuttlefish:conf_get("mqtt.exchange", Conf))
 end}.
 
-%% Specify TTL (time to live) to control the lifetime of non-clean sessions.
-%%
-%% {subscription_ttl, 1800000},
 {mapping, "mqtt.subscription_ttl", "rabbitmq_mqtt.subscription_ttl", [
     {datatype, [{enum, [undefined, infinity]}, integer]}
 ]}.
 
 {translation, "rabbitmq_mqtt.subscription_ttl",
 fun(Conf) ->
-    case cuttlefish:conf_get("mqtt.subscription_ttl", Conf, undefined) of
-        undefined -> undefined;
-        infinity  -> undefined;
-        Ms        -> Ms
+    cuttlefish:invalid(
+        "Since 3.13 mqtt.subscription_ttl (in milliseconds) is unsupported. "
+        "Use mqtt.max_session_expiry_interval_seconds (in seconds) instead.")
+end}.
+
+%% Defines the maximum Session Expiry Interval in seconds allowed by the server.
+%% 'infinity' means the session does not expire.
+%% An MQTT 5.0 client can choose a lower value.
+
+{mapping, "mqtt.max_session_expiry_interval_seconds", "rabbitmq_mqtt.max_session_expiry_interval_seconds", [
+    {datatype, [integer, {atom, infinity}]}
+]}.
+
+{translation, "rabbitmq_mqtt.max_session_expiry_interval_seconds",
+fun(Conf) ->
+    case cuttlefish:conf_get("mqtt.max_session_expiry_interval_seconds", Conf) of
+        N when is_integer(N) andalso N < 0 ->
+            cuttlefish:invalid("negative integer not allowed");
+        Valid ->
+            Valid
     end
 end}.
 
@@ -168,6 +154,20 @@ end}.
 
 {mapping, "mqtt.ssl_cert_login", "rabbitmq_mqtt.ssl_cert_login", [
     {datatype, {enum, [true, false]}}]}.
+
+
+{mapping, "mqtt.ssl_cert_client_id_from", "rabbitmq_mqtt.ssl_cert_client_id_from", [
+    {datatype, {enum, [distinguished_name, subject_alternative_name]}}
+]}.
+
+{mapping, "mqtt.ssl_cert_login_san_type", "rabbitmq_mqtt.ssl_cert_login_san_type", [
+    {datatype, {enum, [dns, ip, email, uri, other_name]}}
+]}.
+
+{mapping, "mqtt.ssl_cert_login_san_index", "rabbitmq_mqtt.ssl_cert_login_san_index", [
+    {datatype, integer}, {validators, ["non_negative_integer"]}
+]}.
+
 
 
 %% TCP/Socket options (as per the broker configuration).
@@ -284,3 +284,22 @@ end}.
 %% {mailbox_soft_limit, 30},
 {mapping, "mqtt.mailbox_soft_limit", "rabbitmq_mqtt.mailbox_soft_limit",
     [{datatype, integer}, {validators, ["non_negative_integer"]}]}.
+
+%% Maximum packet size
+
+{mapping, "mqtt.max_packet_size_unauthenticated", "rabbitmq_mqtt.max_packet_size_unauthenticated", [
+    {datatype, integer},
+    {validators, ["non_zero_positive_integer"]}
+]}.
+
+{mapping, "mqtt.max_packet_size_authenticated", "rabbitmq_mqtt.max_packet_size_authenticated", [
+    {datatype, integer},
+    {validators, ["non_zero_positive_integer"]}
+]}.
+
+%% Topic Aliax Maximum
+
+{mapping, "mqtt.topic_alias_maximum", "rabbitmq_mqtt.topic_alias_maximum", [
+    {datatype, integer},
+    {validators, ["non_negative_integer"]}
+]}.

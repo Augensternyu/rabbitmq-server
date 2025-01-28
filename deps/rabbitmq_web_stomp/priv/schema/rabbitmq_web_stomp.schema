@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 {mapping, "web_stomp.port", "rabbitmq_web_stomp.port",
@@ -65,7 +65,7 @@
 {mapping, "web_stomp.ssl.cacertfile", "rabbitmq_web_stomp.ssl_config.cacertfile",
     [{datatype, string}, {validators, ["file_accessible"]}]}.
 {mapping, "web_stomp.ssl.password", "rabbitmq_web_stomp.ssl_config.password",
-    [{datatype, string}]}.
+    [{datatype, [tagged_binary, binary]}]}.
 
 {translation,
     "rabbitmq_web_stomp.ssl_config",
@@ -189,3 +189,12 @@ end}.
 
 {mapping, "web_stomp.proxy_protocol", "rabbitmq_web_stomp.proxy_protocol",
     [{datatype, {enum, [true, false]}}]}.
+
+%%
+%% File Handle Cache
+%%
+
+{mapping, "web_stomp.use_file_handle_cache", "rabbitmq_web_stomp.use_file_handle_cache",
+    [
+        {datatype, {enum, [true, false]}}
+    ]}.

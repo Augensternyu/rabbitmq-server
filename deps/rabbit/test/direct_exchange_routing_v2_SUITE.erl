@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module(direct_exchange_routing_v2_SUITE).
 
@@ -61,14 +61,21 @@ end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
 init_per_group(Group = cluster_size_1, Config0) ->
-    Config = rabbit_ct_helpers:set_config(Config0, {rmq_nodes_count, 1}),
+    Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 1},
+                                                    {metadata_store, mnesia}]),
     start_broker(Group, Config);
 init_per_group(Group = cluster_size_2, Config0) ->
-    Config = rabbit_ct_helpers:set_config(Config0, {rmq_nodes_count, 2}),
+    Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 2},
+                                                    {metadata_store, mnesia}]),
+    start_broker(Group, Config);
+init_per_group(Group = cluster_size_3, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 3},
+                                                    {metadata_store, mnesia}]),
     start_broker(Group, Config);
 init_per_group(Group = unclustered_cluster_size_2, Config0) ->
     Config = rabbit_ct_helpers:set_config(Config0, [{rmq_nodes_count, 2},
-                                                    {rmq_nodes_clustered, false}]),
+                                                    {rmq_nodes_clustered, false},
+                                                    {metadata_store, mnesia}]),
     start_broker(Group, Config).
 
 start_broker(Group, Config0) ->
@@ -304,8 +311,8 @@ route_exchange_to_exchange(Config) ->
     bind_queue(Ch, Q2, FanoutX, <<"ignored">>),
 
     publish(Ch, DirectX, RKey),
-    quorum_queue_utils:wait_for_messages(Config, [[Q1, <<"1">>, <<"1">>, <<"0">>]]),
-    quorum_queue_utils:wait_for_messages(Config, [[Q2, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q1, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q2, <<"1">>, <<"1">>, <<"0">>]]),
     ?assertEqual(1, table_size(Config, ?INDEX_TABLE_NAME)),
 
     %% cleanup
@@ -330,7 +337,7 @@ join_cluster(Config) ->
     Servers0 = [Server1, Server2] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Servers = lists:sort(Servers0),
 
-    {_Conn1, Ch1} = rabbit_ct_client_helpers:open_connection_and_channel(Config, Server1),
+    {_Conn1, Ch1} = rabbit_ct_client_helpers:open_connection_and_channel(Config, Server2),
     DirectX = <<"amq.direct">>,
     Q = <<"q">>,
     RKey = <<"k">>,
@@ -339,35 +346,35 @@ join_cluster(Config) ->
     bind_queue(Ch1, Q, DirectX, RKey),
 
     %% Server1 and Server2 are not clustered yet.
-    %% Hence, every node has their own table (copy) and only Server1's table contains the binding.
-    ?assertEqual([Server1], index_table_ram_copies(Config, Server1)),
+    %% Hence, every node has their own table (copy) and only Server2's table contains the binding.
     ?assertEqual([Server2], index_table_ram_copies(Config, Server2)),
-    ?assertEqual(1, table_size(Config, ?INDEX_TABLE_NAME, Server1)),
-    ?assertEqual(0, table_size(Config, ?INDEX_TABLE_NAME, Server2)),
+    ?assertEqual([Server1], index_table_ram_copies(Config, Server1)),
+    ?assertEqual(1, table_size(Config, ?INDEX_TABLE_NAME, Server2)),
+    ?assertEqual(0, table_size(Config, ?INDEX_TABLE_NAME, Server1)),
 
-    ok = rabbit_control_helper:command(stop_app, Server2),
-    %% For the purpose of this test it shouldn't matter whether Server2 is reset. Both should work.
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    %% For the purpose of this test it shouldn't matter whether Server1 is reset. Both should work.
     case erlang:system_time() rem 2 of
         0 ->
-            ok = rabbit_control_helper:command(reset, Server2);
+            ok = rabbit_control_helper:command(reset, Server1);
         1 ->
             ok
     end,
-    ok = rabbit_control_helper:command(join_cluster, Server2, [atom_to_list(Server1)], []),
-    ok = rabbit_control_helper:command(start_app, Server2),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server2)], []),
+    ok = rabbit_control_helper:command(start_app, Server1),
 
-    %% After Server2 joined Server1, the table should be clustered.
-    ?assertEqual(Servers, index_table_ram_copies(Config, Server2)),
-    ?assertEqual(1, table_size(Config, ?INDEX_TABLE_NAME, Server2)),
+    %% After Server1 joined Server2, the table should be clustered.
+    ?assertEqual(Servers, index_table_ram_copies(Config, Server1)),
+    ?assertEqual(1, table_size(Config, ?INDEX_TABLE_NAME, Server1)),
 
-    %% Publishing via Server1 via "direct exchange routing v2" should work.
+    %% Publishing via Server2 via "direct exchange routing v2" should work.
     amqp_channel:call(Ch1, #'confirm.select'{}),
     amqp_channel:register_confirm_handler(Ch1, self()),
     publish(Ch1, DirectX, RKey),
     assert_confirm(),
 
-    %% Publishing via Server2 via "direct exchange routing v2" should work.
-    {_Conn2, Ch2} = rabbit_ct_client_helpers:open_connection_and_channel(Config, Server2),
+    %% Publishing via Server1 via "direct exchange routing v2" should work.
+    {_Conn2, Ch2} = rabbit_ct_client_helpers:open_connection_and_channel(Config, Server1),
     amqp_channel:call(Ch2, #'confirm.select'{}),
     amqp_channel:register_confirm_handler(Ch2, self()),
     publish(Ch2, DirectX, RKey),
@@ -414,7 +421,7 @@ assert_confirm() ->
     receive
         #'basic.ack'{} ->
             ok
-    after 5000 ->
+    after 30_000 ->
               throw(missing_confirm)
     end.
 
@@ -422,7 +429,7 @@ assert_return() ->
     receive
         {#'basic.return'{}, _} ->
             ok
-    after 5000 ->
+    after 30_000 ->
               throw(missing_return)
     end.
 

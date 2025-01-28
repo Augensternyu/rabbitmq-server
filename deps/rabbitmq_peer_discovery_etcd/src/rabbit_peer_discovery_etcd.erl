@@ -4,13 +4,12 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_etcd).
 -behaviour(rabbit_peer_discovery_backend).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("rabbitmq_peer_discovery_common/include/rabbit_peer_discovery.hrl").
 -include("rabbit_peer_discovery_etcd.hrl").
 
@@ -60,9 +59,13 @@ list_nodes() ->
                    {ok, {[], disc}}
            end,
     Fun2 = fun(_Proplist) ->
-                   %% error logging will be done by the client
-                   Nodes = rabbitmq_peer_discovery_etcd_v3_client:list_nodes(),
-                   {ok, {Nodes, disc}}
+                   %% nodes are returned sorted with the create_revision as
+                   %% the first element in the tuple.
+                   %% The node with the lowest create_revision is thus selected
+                   %% based on the assumption that the create_revision remains
+                   %% consistent throughout the lifetime of the etcd key.
+                   [{_, Node} | _] = rabbitmq_peer_discovery_etcd_v3_client:list_nodes(),
+                   {ok, {Node, disc}}
            end,
     rabbit_peer_discovery_util:maybe_backend_configured(?BACKEND_CONFIG_KEY, Fun0, Fun1, Fun2).
 
@@ -93,9 +96,11 @@ unregister() ->
 post_registration() ->
     ok.
 
--spec lock(Node :: atom()) -> {ok, Data :: term()} | {error, Reason :: string()}.
+-spec lock(Nodes :: [node()]) ->
+    {ok, Data :: term()} | {error, Reason :: string()}.
 
-lock(Node) when is_atom(Node) ->
+lock(Nodes) when is_list(Nodes) ->
+    Node = node(),
     case rabbitmq_peer_discovery_etcd_v3_client:lock(Node) of
         {ok, GeneratedKey} -> {ok, GeneratedKey};
         {error, _} = Error -> Error

@@ -12,7 +12,9 @@ def all_beam_files(name = "all_beam_files"):
             "src/collectors/prometheus_process_collector.erl",
             "src/collectors/prometheus_rabbitmq_alarm_metrics_collector.erl",
             "src/collectors/prometheus_rabbitmq_core_metrics_collector.erl",
+            "src/collectors/prometheus_rabbitmq_dynamic_collector.erl",
             "src/collectors/prometheus_rabbitmq_global_metrics_collector.erl",
+            "src/collectors/prometheus_rabbitmq_message_size_metrics_collector.erl",
             "src/rabbit_prometheus_app.erl",
             "src/rabbit_prometheus_dispatcher.erl",
             "src/rabbit_prometheus_handler.erl",
@@ -22,8 +24,8 @@ def all_beam_files(name = "all_beam_files"):
         dest = "ebin",
         erlc_opts = "//:erlc_opts",
         deps = [
-            "//deps/amqp_client:erlang_app",
             "//deps/rabbit_common:erlang_app",
+            "//deps/rabbitmq_web_dispatch:erlang_app",
             "@prometheus//:erlang_app",
         ],
     )
@@ -41,7 +43,9 @@ def all_test_beam_files(name = "all_test_beam_files"):
             "src/collectors/prometheus_process_collector.erl",
             "src/collectors/prometheus_rabbitmq_alarm_metrics_collector.erl",
             "src/collectors/prometheus_rabbitmq_core_metrics_collector.erl",
+            "src/collectors/prometheus_rabbitmq_dynamic_collector.erl",
             "src/collectors/prometheus_rabbitmq_global_metrics_collector.erl",
+            "src/collectors/prometheus_rabbitmq_message_size_metrics_collector.erl",
             "src/rabbit_prometheus_app.erl",
             "src/rabbit_prometheus_dispatcher.erl",
             "src/rabbit_prometheus_handler.erl",
@@ -51,8 +55,8 @@ def all_test_beam_files(name = "all_test_beam_files"):
         dest = "test",
         erlc_opts = "//:test_erlc_opts",
         deps = [
-            "//deps/amqp_client:erlang_app",
             "//deps/rabbit_common:erlang_app",
+            "//deps/rabbitmq_web_dispatch:erlang_app",
             "@prometheus//:erlang_app",
         ],
     )
@@ -81,7 +85,9 @@ def all_srcs(name = "all_srcs"):
             "src/collectors/prometheus_process_collector.erl",
             "src/collectors/prometheus_rabbitmq_alarm_metrics_collector.erl",
             "src/collectors/prometheus_rabbitmq_core_metrics_collector.erl",
+            "src/collectors/prometheus_rabbitmq_dynamic_collector.erl",
             "src/collectors/prometheus_rabbitmq_global_metrics_collector.erl",
+            "src/collectors/prometheus_rabbitmq_message_size_metrics_collector.erl",
             "src/rabbit_prometheus_app.erl",
             "src/rabbit_prometheus_dispatcher.erl",
             "src/rabbit_prometheus_handler.erl",
@@ -114,5 +120,17 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         outs = ["test/rabbit_prometheus_http_SUITE.beam"],
         app_name = "rabbitmq_prometheus",
         erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/amqp_client:erlang_app", "//deps/rabbitmq_ct_helpers:erlang_app"],
+        deps = [
+            "//deps/amqp_client:erlang_app",
+            "//deps/rabbitmq_ct_helpers:erlang_app",
+        ],
+    )
+
+    erlang_bytecode(
+        name = "rabbitmq_prometheus_collector_test_proxy_beam_files",
+        testonly = True,
+        srcs = ["test/rabbitmq_prometheus_collector_test_proxy.erl"],
+        outs = ["test/rabbitmq_prometheus_collector_test_proxy.beam"],
+        app_name = "rabbitmq_prometheus",
+        erlc_opts = "//:test_erlc_opts",
     )

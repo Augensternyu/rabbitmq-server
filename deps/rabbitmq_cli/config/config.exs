@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 # This file is responsible for configuring your application
 # and its dependencies with the aid of the Mix.Config module.
@@ -24,7 +24,7 @@ import Config
 #
 # Or configure a 3rd-party app:
 #
-config :logger, level: :warn, console: [device: :standard_error]
+config :logger, level: :warning, console: [device: :standard_error]
 #
 
 # It is also possible to import configuration files, relative to this

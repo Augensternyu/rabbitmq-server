@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% This module is responsible for loading definition from an HTTPS endpoint.
@@ -14,8 +14,6 @@
 %%  * rabbit_definitions_import_local_filesystem
 %%  * rabbit_definitions_hashing
 -module(rabbit_definitions_import_https).
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -export([
     is_enabled/0,
     load/1,

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% This module is responsible for loading definition from a local filesystem
@@ -15,8 +15,6 @@
 %%  * rabbit_definitions_import_http
 %%  * rabbit_definitions_hashing
 -module(rabbit_definitions_import_local_filesystem).
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -export([
     is_enabled/0,
     %% definition source options
@@ -35,7 +33,7 @@
 
 -import(rabbit_misc, [pget/2, pget/3]).
 -import(rabbit_data_coercion, [to_binary/1]).
--import(rabbit_definitions, [import_raw/1]).
+-import(rabbit_definitions, [import_raw/1, decode/1, validate_definitions/1]).
 
 %%
 %% API
@@ -84,12 +82,20 @@ load_with_hashing(IsDir, Path, PreviousHash, Algo) when is_boolean(IsDir) ->
         [] ->
             rabbit_definitions_hashing:hash(Algo, undefined);
         Defs ->
-            case rabbit_definitions_hashing:hash(Algo, Defs) of
-                PreviousHash -> PreviousHash;
-                Other        ->
-                    rabbit_log:debug("New hash: ~ts", [rabbit_misc:hexify(Other)]),
-                    _ = load_from_local_path(IsDir, Path),
-                    Other
+            case validate_definitions(Defs) of
+                true ->
+                    case rabbit_definitions_hashing:hash(Algo, Defs) of
+                        PreviousHash -> PreviousHash;
+                        Other        ->
+                            rabbit_log:debug("New hash: ~ts", [rabbit_misc:hexify(Other)]),
+                            _ = load_from_local_path(IsDir, Path),
+                            Other
+                    end;
+                false ->
+                    rabbit_log:error("Definitions file at path ~p failed validation. The file must be a valid JSON document "
+                                     "and all virtual host-scoped resources must have a virtual host field to be set. "
+                                     "Definition files exported for a single virtual host CANNOT be imported at boot time", [Path]),
+                    {error, not_json}
             end
     end.
 

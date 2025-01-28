@@ -2,24 +2,24 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(publisher_confirms_parallel_SUITE).
 
 -include_lib("common_test/include/ct.hrl").
--include_lib("kernel/include/file.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(TIMEOUT, 60000).
 
--import(quorum_queue_utils, [wait_for_messages/2]).
+-import(queue_utils, [wait_for_messages/2]).
 
 all() ->
     [
-     {group, publisher_confirm_tests}
+     {group, tests}
     ].
 
 groups() ->
@@ -33,15 +33,10 @@ groups() ->
                              confirm_mandatory_unroutable,
                              confirm_unroutable_message],
     [
-     {publisher_confirm_tests, [],
+     {tests, [],
       [
        {classic_queue, [parallel], PublisherConfirmTests ++ [confirm_nack]},
-       {mirrored_queue, [parallel], PublisherConfirmTests ++ [confirm_nack]},
-       {quorum_queue, [],
-        [
-         {parllel_tests, [parallel], PublisherConfirmTests},
-         confirm_minority
-        ]}
+       {quorum_queue, [parallel], PublisherConfirmTests}
       ]}
     ].
 
@@ -71,28 +66,20 @@ init_per_group(quorum_queue, Config) ->
       Config,
       [{queue_args, [{<<"x-queue-type">>, longstr, <<"quorum">>}]},
        {queue_durable, true}]);
-init_per_group(mirrored_queue, Config) ->
-    rabbit_ct_broker_helpers:set_ha_policy(Config, 0, <<"^max_length.*queue">>,
-        <<"all">>, [{<<"ha-sync-mode">>, <<"automatic">>}]),
-    Config1 = rabbit_ct_helpers:set_config(
-                Config, [{is_mirrored, true},
-                         {queue_args, [{<<"x-queue-type">>, longstr, <<"classic">>}]},
-                         {queue_durable, true}]),
-    rabbit_ct_helpers:run_steps(Config1, []);
-init_per_group(Group, Config) ->
-    case lists:member({group, Group}, all()) of
-        true ->
-            ClusterSize = 3,
-            Config1 = rabbit_ct_helpers:set_config(Config, [
-                {rmq_nodename_suffix, Group},
-                {rmq_nodes_count, ClusterSize}
-              ]),
-            rabbit_ct_helpers:run_steps(Config1,
-              rabbit_ct_broker_helpers:setup_steps() ++
-              rabbit_ct_client_helpers:setup_steps());
-        false ->
-            Config
-    end.
+init_per_group(Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, mnesia}]),
+    init_per_group0(Group, Config).
+
+init_per_group0(Group, Config) ->
+    ClusterSize = 3,
+    Config1 = rabbit_ct_helpers:set_config(Config, [
+                                                    {rmq_nodename_suffix, Group},
+                                                    {rmq_nodes_count, ClusterSize}
+                                                   ]),
+    Config2 = rabbit_ct_helpers:run_steps(Config1,
+                                          rabbit_ct_broker_helpers:setup_steps() ++
+                                          rabbit_ct_client_helpers:setup_steps()),
+    Config2.
 
 end_per_group(Group, Config) ->
     case lists:member({group, Group}, all()) of
@@ -168,7 +155,7 @@ confirm_ack(Config) ->
     receive
         #'basic.ack'{delivery_tag = 1} ->
             ok
-    after 5000 ->
+    after ?TIMEOUT ->
             throw(missing_ack)
     end.
 
@@ -209,13 +196,13 @@ confirm_mandatory_unroutable(Config) ->
     receive
         {#'basic.return'{}, _} ->
             ok
-    after 5000 ->
+    after ?TIMEOUT ->
             throw(missing_return)
     end,
     receive
         #'basic.ack'{delivery_tag = 1} ->
             ok
-    after 5000 ->
+    after ?TIMEOUT ->
             throw(missing_ack)
     end.
 
@@ -231,7 +218,7 @@ confirm_unroutable_message(Config) ->
             throw(unexpected_basic_return);
         #'basic.ack'{delivery_tag = 1} ->
             ok
-    after 5000 ->
+    after ?TIMEOUT ->
             throw(missing_ack)
     end.
 
@@ -265,7 +252,7 @@ confirm_nack1(Config) ->
                         rabbit_channel:do(Ch, #'queue.bind'{
                                                  queue = QName,
                                                  exchange = <<"amq.direct">>,
-                                                 routing_key = "confirms-magic" }),
+                                                 routing_key = <<"confirms-magic">>}),
                         receive #'queue.bind_ok'{} -> ok
                         after ?TIMEOUT -> throw(failed_to_bind_queue)
                         end
@@ -284,17 +271,14 @@ confirm_nack1(Config) ->
         #'confirm.select_ok'{} -> ok
     after ?TIMEOUT -> throw(failed_to_enable_confirms)
     end,
+    %% stop the queue
+    ok = gen_server:stop(QPid1, shutdown, 5000),
     %% Publish a message
     rabbit_channel:do(Ch, #'basic.publish'{exchange = <<"amq.direct">>,
-                                           routing_key = "confirms-magic"
+                                           routing_key = <<"confirms-magic">>
                                           },
                       rabbit_basic:build_content(
                         #'P_basic'{delivery_mode = 2}, <<"">>)),
-    %% We must not kill the queue before the channel has processed the
-    %% 'publish'.
-    ok = rabbit_channel:flush(Ch),
-    %% Crash the queue
-    QPid1 ! boom,
     %% Wait for a nack
     receive
         #'basic.nack'{} -> ok;
@@ -310,32 +294,6 @@ confirm_nack1(Config) ->
     ok = rabbit_channel:shutdown(Ch),
     passed.
 
-%% The closest to a nack behaviour that we can get on quorum queues is not answering while
-%% the cluster is in minority. Once the cluster recovers, a 'basic.ack' will be issued.
-confirm_minority(Config) ->
-    [_A, B, C] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
-    QName = ?config(queue_name, Config),
-    declare_queue(Ch, Config, QName),
-    ok = rabbit_ct_broker_helpers:stop_node(Config, B),
-    ok = rabbit_ct_broker_helpers:stop_node(Config, C),
-    amqp_channel:call(Ch, #'confirm.select'{}),
-    amqp_channel:register_confirm_handler(Ch, self()),
-    publish(Ch, QName, [<<"msg1">>]),
-    receive
-        #'basic.nack'{} -> ok;
-        #'basic.ack'{} -> throw(unexpected_ack)
-    after 120000 ->
-            ok
-    end,
-    ok = rabbit_ct_broker_helpers:start_node(Config, B),
-    publish(Ch, QName, [<<"msg2">>]),
-    receive
-        #'basic.nack'{} -> throw(unexpected_nack);
-        #'basic.ack'{} -> ok
-    after 60000 ->
-            throw(missing_ack)
-    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%
 %% Test helpers
@@ -367,13 +325,6 @@ consume(Ch, QName, Payloads) ->
 consume_empty(Ch, QName) ->
     #'basic.get_empty'{} = amqp_channel:call(Ch, #'basic.get'{queue = QName}).
 
-sync_mirrors(QName, Config) ->
-    case ?config(is_mirrored, Config) of
-        true ->
-            rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, [<<"sync_queue">>, QName]);
-        _ -> ok
-    end.
-
 receive_many([]) ->
     ok;
 receive_many(DTags) ->
@@ -382,6 +333,6 @@ receive_many(DTags) ->
             receive_many(DTags -- lists:seq(1, DTag));
         #'basic.ack'{delivery_tag = DTag, multiple = false} ->
             receive_many(DTags -- [DTag])
-    after 5000 ->
+    after ?TIMEOUT ->
             throw(missing_ack)
     end.

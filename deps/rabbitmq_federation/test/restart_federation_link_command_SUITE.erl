@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(restart_federation_link_command_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 -compile(export_all).
@@ -88,7 +87,7 @@ run(Config) ->
               ok = ?CMD:run([Id], Opts)
       end,
       [rabbit_federation_test_util:q(<<"upstream">>),
-       rabbit_federation_test_util:q(<<"fed.downstream">>)]).
+       rabbit_federation_test_util:q(<<"fed1.downstream">>)]).
 
 run_not_found(Config) ->
     [A] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),

@@ -2,13 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_peer_discovery_classic_config).
 -behaviour(rabbit_peer_discovery_backend).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([list_nodes/0, supports_registration/0, register/0, unregister/0,
          post_registration/0, lock/1, unlock/1]).
@@ -22,15 +20,49 @@
 
 list_nodes() ->
     case application:get_env(rabbit, cluster_nodes, {[], disc}) of
-        {_Nodes, _NodeType} = Pair -> {ok, Pair};
-        Nodes when is_list(Nodes)  -> {ok, {Nodes, disc}}
+        {Nodes, NodeType} ->
+            check_local_node(Nodes),
+            check_duplicates(Nodes),
+            {ok, {add_this_node(Nodes), NodeType}};
+        Nodes when is_list(Nodes) ->
+            check_local_node(Nodes),
+            check_duplicates(Nodes),
+            {ok, {add_this_node(Nodes), disc}}
     end.
 
--spec lock(Node :: node()) -> {ok, {{ResourceId :: string(), LockRequesterId :: node()}, Nodes :: [node()]}} |
-                              {error, Reason :: string()}.
+add_this_node(Nodes) ->
+    ThisNode = node(),
+    case lists:member(ThisNode, Nodes) of
+        true  -> Nodes;
+        false -> [ThisNode | Nodes]
+    end.
 
-lock(Node) ->
-  {ok, {Nodes, _NodeType}} = list_nodes(),
+check_duplicates(Nodes) ->
+    case (length(lists:usort(Nodes)) == length(Nodes)) of
+        true ->
+            ok;
+        false ->
+            rabbit_log:warning("Classic peer discovery backend: list of "
+                               "nodes contains duplicates ~0tp",
+                               [Nodes])
+    end.
+
+check_local_node(Nodes) ->
+    case lists:member(node(), Nodes) of
+        true ->
+            ok;
+        false ->
+            rabbit_log:warning("Classic peer discovery backend: list of "
+                               "nodes does not contain the local node ~0tp",
+                               [Nodes])
+    end.
+
+-spec lock(Nodes :: [node()]) ->
+    {ok, {{ResourceId :: string(), LockRequesterId :: node()}, Nodes :: [node()]}} |
+    {error, Reason :: string()}.
+
+lock(Nodes) ->
+  Node = node(),
   case lists:member(Node, Nodes) of
     false when Nodes =/= [] ->
       rabbit_log:warning("Local node ~ts is not part of configured nodes ~tp. "

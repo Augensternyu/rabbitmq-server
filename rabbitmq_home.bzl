@@ -1,6 +1,6 @@
+load("@rules_erlang//:ct.bzl", "additional_file_dest_relative_path")
 load("@rules_erlang//:erlang_app_info.bzl", "ErlangAppInfo", "flat_deps")
 load("@rules_erlang//:util.bzl", "path_join")
-load("@rules_erlang//:ct.bzl", "additional_file_dest_relative_path")
 
 RabbitmqHomeInfo = provider(
     doc = "An assembled RABBITMQ_HOME dir",
@@ -53,8 +53,8 @@ def _plugins_dir_links(ctx, plugin):
 
     for f in lib_info.beam:
         if f.is_directory:
-            if f.basename != "ebin":
-                fail("{} contains a directory in 'beam' that is not an ebin dir".format(lib_info.lib_name))
+            if len(lib_info.beam) != 1:
+                fail("ErlangAppInfo.beam must be a collection of files, or a single ebin dir: {} {}".format(lib_info.app_name, lib_info.beam))
             o = ctx.actions.declare_directory(path_join(plugin_path, "ebin"))
         else:
             o = ctx.actions.declare_file(path_join(plugin_path, "ebin", f.basename))
@@ -87,7 +87,7 @@ def _impl(ctx):
         source_scripts = ctx.files._scripts_windows
     scripts = [_copy_script(ctx, script) for script in source_scripts]
 
-    escripts = [copy_escript(ctx, escript) for escript in ctx.files._scripts]
+    escripts = [copy_escript(ctx, escript) for escript in ctx.files._escripts]
 
     plugins = flatten([_plugins_dir_links(ctx, plugin) for plugin in plugins])
 
@@ -108,6 +108,18 @@ def _impl(ctx):
     ]
 
 RABBITMQ_HOME_ATTRS = {
+    "_escripts": attr.label_list(
+        default = [
+            "//deps/rabbit:scripts/rabbitmq-diagnostics",
+            "//deps/rabbit:scripts/rabbitmq-plugins",
+            "//deps/rabbit:scripts/rabbitmq-queues",
+            "//deps/rabbit:scripts/rabbitmq-streams",
+            "//deps/rabbit:scripts/rabbitmq-upgrade",
+            "//deps/rabbit:scripts/rabbitmqctl",
+            "//deps/rabbit:scripts/vmware-rabbitmq",
+        ],
+        allow_files = True,
+    ),
     "_scripts": attr.label_list(
         default = [
             "//deps/rabbit:scripts/rabbitmq-defaults",

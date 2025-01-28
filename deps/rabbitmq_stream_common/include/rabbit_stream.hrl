@@ -1,3 +1,19 @@
+%% The contents of this file are subject to the Mozilla Public License
+%% Version 2.0 (the "License"); you may not use this file except in
+%% compliance with the License. You may obtain a copy of the License
+%% at https://www.mozilla.org/en-US/MPL/2.0/
+%%
+%% Software distributed under the License is distributed on an "AS IS"
+%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
+%% the License for the specific language governing rights and
+%% limitations under the License.
+%%
+%% The Original Code is RabbitMQ.
+%%
+%% The Initial Developer of the Original Code is Pivotal Software, Inc.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
+%%
+
 -define(COMMAND_DECLARE_PUBLISHER, 1).
 -define(COMMAND_PUBLISH, 2).
 -define(COMMAND_PUBLISH_CONFIRM, 3).
@@ -26,6 +42,8 @@
 -define(COMMAND_CONSUMER_UPDATE, 26).
 -define(COMMAND_EXCHANGE_COMMAND_VERSIONS, 27).
 -define(COMMAND_STREAM_STATS, 28).
+-define(COMMAND_CREATE_SUPER_STREAM, 29).
+-define(COMMAND_DELETE_SUPER_STREAM, 30).
 
 -define(REQUEST, 0).
 -define(RESPONSE, 1).
@@ -52,7 +70,8 @@
 -define(RESPONSE_CODE_PRECONDITION_FAILED, 17).
 -define(RESPONSE_CODE_PUBLISHER_DOES_NOT_EXIST, 18).
 -define(RESPONSE_CODE_NO_OFFSET, 19).
-
+-define(RESPONSE_SASL_CANNOT_CHANGE_MECHANISM, 20).
+-define(RESPONSE_SASL_CANNOT_CHANGE_USERNAME, 21).
 
 -define(OFFSET_TYPE_NONE, 0).
 -define(OFFSET_TYPE_FIRST, 1).
@@ -70,6 +89,8 @@
 
 -define(INFO_ITEMS,
   [conn_name,
+    pid,
+    node,
     port,
     peer_port,
     host,
@@ -95,6 +116,7 @@
 
 -define(CONSUMER_INFO_ITEMS, [
   connection_pid,
+  node,
   subscription_id,
   stream,
   messages_consumed,
@@ -108,6 +130,7 @@
 
 -define(PUBLISHER_INFO_ITEMS, [
   connection_pid,
+  node,
   publisher_id,
   stream,
   reference,
@@ -129,4 +152,4 @@
   state
 ]).
 
--define(STREAM_GUIDE_URL, <<"https://rabbitmq.com/stream.html">>).
+-define(STREAMS_GUIDE_URL, <<"https://rabbitmq.com/docs/streams">>).

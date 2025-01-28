@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2023-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(runtime_parameters_SUITE).
@@ -55,7 +55,7 @@ test_limits(Config) ->
 test_limits1(_Config) ->
     dummy_runtime_parameters:register(),
     application:set_env(rabbit, runtime_parameters, [{limits, [{<<"test">>, 1}]}]),
-    E  = {error_string, "Validation failed\n\ncomponent test is limited to 1 per node\n"},
+    E  = {error_string, "Validation failed\n\ncomponent test is limited to 1\n"},
     ok = rabbit_runtime_parameters:set_any(<<"/">>, <<"test">>, <<"good">>, <<"">>, none),
     E  = rabbit_runtime_parameters:set_any(<<"/">>, <<"test">>, <<"good">>, <<"">>, none),
     dummy_runtime_parameters:unregister().

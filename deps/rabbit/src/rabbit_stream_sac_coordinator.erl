@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is Pivotal Software, Inc.
-%% Copyright (c) 2021-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stream_sac_coordinator).
@@ -40,6 +40,8 @@
          consumer_groups/3,
          group_consumers/5,
          overview/1]).
+
+-import(rabbit_stream_coordinator, [ra_local_query/1]).
 
 %% Single Active Consumer API
 -spec register_consumer(binary(),
@@ -129,9 +131,7 @@ process_command(Cmd) ->
                          {ok,
                           [term()] | {error, atom()}}.
 consumer_groups(VirtualHost, InfoKeys) ->
-    case ra:local_query({rabbit_stream_coordinator,
-                         node()},
-                        fun(State) ->
+    case ra_local_query(fun(State) ->
                                 SacState =
                                 rabbit_stream_coordinator:sac_state(State),
                                 consumer_groups(VirtualHost,
@@ -152,9 +152,7 @@ consumer_groups(VirtualHost, InfoKeys) ->
                          {ok, [term()]} |
                          {error, atom()}.
 group_consumers(VirtualHost, Stream, Reference, InfoKeys) ->
-    case ra:local_query({rabbit_stream_coordinator,
-                         node()},
-                        fun(State) ->
+    case ra_local_query(fun(State) ->
                                 SacState =
                                 rabbit_stream_coordinator:sac_state(State),
                                 group_consumers(VirtualHost,
@@ -629,45 +627,22 @@ handle_consumer_removal(Group0, Consumer, Stream, ConsumerName) ->
             end
     end.
 
-message_type() ->
-    case has_unblock_group_support() of
-        true ->
-            map;
-        false ->
-            tuple
-    end.
-
 notify_consumer_effect(Pid, SubId, Stream, Name, Active) ->
     notify_consumer_effect(Pid, SubId, Stream, Name, Active, false).
 
-notify_consumer_effect(Pid, SubId, Stream, Name, Active, SteppingDown) ->
-    notify_consumer_effect(Pid, SubId, Stream, Name, Active, SteppingDown, message_type()).
-
-notify_consumer_effect(Pid, SubId, _Stream, _Name, Active, false = _SteppingDown, tuple) ->
-    mod_call_effect(Pid,
-                    {sac,
-                     {{subscription_id, SubId},
-                      {active, Active},
-                      {extra, []}}});
-notify_consumer_effect(Pid, SubId, _Stream, _Name, Active, true = _SteppingDown, tuple) ->
-    mod_call_effect(Pid,
-                    {sac,
-                     {{subscription_id, SubId},
-                      {active, Active},
-                      {extra, [{stepping_down, true}]}}});
-notify_consumer_effect(Pid, SubId, Stream, Name, Active, false = _SteppingDown, map) ->
+notify_consumer_effect(Pid, SubId, Stream, Name, Active, false = _SteppingDown) ->
     mod_call_effect(Pid,
                     {sac, #{subscription_id => SubId,
                             stream => Stream,
                             consumer_name => Name,
                             active => Active}});
-notify_consumer_effect(Pid, SubId, Stream, Name, Active, true = _SteppingDown, map) ->
+notify_consumer_effect(Pid, SubId, Stream, Name, Active, true = SteppingDown) ->
     mod_call_effect(Pid,
                     {sac, #{subscription_id => SubId,
                             stream => Stream,
                             consumer_name => Name,
                             active => Active,
-                            stepping_down => true}}).
+                            stepping_down => SteppingDown}}).
 
 maybe_create_group(VirtualHost,
                    Stream,
@@ -776,6 +751,3 @@ mod_call_effect(Pid, Msg) ->
 send_message(ConnectionPid, Msg) ->
     ConnectionPid ! Msg,
     ok.
-
-has_unblock_group_support() ->
-    rabbit_feature_flags:is_enabled(stream_sac_coordinator_unblock_group).

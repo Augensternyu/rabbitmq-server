@@ -110,6 +110,7 @@ def all_srcs(name = "all_srcs"):
 
     filegroup(
         name = "priv",
+        srcs = ["priv/schema/rabbitmq_shovel.schema"],
     )
 
     filegroup(
@@ -170,7 +171,6 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         outs = ["test/amqp10_dynamic_SUITE.beam"],
         app_name = "rabbitmq_shovel",
         erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/amqp_client:erlang_app"],
     )
     erlang_bytecode(
         name = "amqp10_shovel_SUITE_beam_files",
@@ -226,6 +226,15 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         deps = ["//deps/rabbit_common:erlang_app"],
     )
     erlang_bytecode(
+        name = "rolling_upgrade_SUITE_beam_files",
+        testonly = True,
+        srcs = ["test/rolling_upgrade_SUITE.erl"],
+        outs = ["test/rolling_upgrade_SUITE.beam"],
+        app_name = "rabbitmq_shovel",
+        erlc_opts = "//:test_erlc_opts",
+        deps = ["//deps/amqp_client:erlang_app", "@khepri//:erlang_app"],
+    )
+    erlang_bytecode(
         name = "shovel_status_command_SUITE_beam_files",
         testonly = True,
         srcs = ["test/shovel_status_command_SUITE.erl"],
@@ -239,6 +248,14 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         testonly = True,
         srcs = ["test/shovel_test_utils.erl"],
         outs = ["test/shovel_test_utils.beam"],
+        app_name = "rabbitmq_shovel",
+        erlc_opts = "//:test_erlc_opts",
+    )
+    erlang_bytecode(
+        name = "amqp10_inter_cluster_SUITE_beam_files",
+        testonly = True,
+        srcs = ["test/amqp10_inter_cluster_SUITE.erl"],
+        outs = ["test/amqp10_inter_cluster_SUITE.beam"],
         app_name = "rabbitmq_shovel",
         erlc_opts = "//:test_erlc_opts",
     )

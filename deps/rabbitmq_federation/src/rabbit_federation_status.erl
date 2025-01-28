@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%%  Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%%  Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 %%
 
 -module(rabbit_federation_status).
@@ -13,7 +13,7 @@
 
 -export([start_link/0]).
 
--export([report/4, remove_exchange_or_queue/1, remove/2, status/0, lookup/1]).
+-export([report/4, remove_exchange_or_queue/1, remove/2, status/0, status/1, lookup/1]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
@@ -41,7 +41,10 @@ remove(Upstream, XorQName) ->
     gen_server:call(?SERVER, {remove, Upstream, XorQName}, infinity).
 
 status() ->
-    gen_server:call(?SERVER, status, infinity).
+    status(infinity).
+
+status(Timeout) ->
+    gen_server:call(?SERVER, status, Timeout).
 
 lookup(Id) ->
     gen_server:call(?SERVER, {lookup, Id}, infinity).

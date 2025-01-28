@@ -2,63 +2,42 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_db_maintenance).
 
+-include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
+-include("include/rabbit_khepri.hrl").
+
 -export([
-         setup_schema/0,
+         table_definitions/0,
          set/1,
          get/1,
          get_consistent/1
         ]).
 
--type mnesia_table() :: atom().
+-export([
+         khepri_maintenance_path/1
+        ]).
 
 -define(TABLE, rabbit_node_maintenance_states).
 
 %% -------------------------------------------------------------------
-%% setup_schema().
+%% table_definitions().
 %% -------------------------------------------------------------------
 
--spec setup_schema() -> ok.
-%% @doc Creates the internal schema used by the selected metadata store
-%%
-%% @private
+-spec table_definitions() -> [Def] when
+      Def :: {Name :: atom(), term()}.
 
-setup_schema() ->
-    rabbit_db:run(
-      #{mnesia => fun() -> setup_schema_in_mnesia() end
-       }).
-
-setup_schema_in_mnesia() ->
-    TableName = status_table_name(),
-    rabbit_log:info(
-      "Creating table ~ts for maintenance mode status",
-      [TableName]),
-    try
-        _ = rabbit_table:create(
-              TableName,
-              status_table_definition())
-    catch throw:Reason  ->
-            rabbit_log:error(
-              "Failed to create maintenance status table: ~tp",
-              [Reason])
-    end.
-
--spec status_table_name() -> mnesia_table().
-status_table_name() ->
-    ?TABLE.
-
--spec status_table_definition() -> list().
-status_table_definition() ->
-    maps:to_list(#{
-        record_name => node_maintenance_state,
-        attributes  => record_info(fields, node_maintenance_state)
-    }).
+table_definitions() ->
+    [{?TABLE, maps:to_list(#{
+                             record_name => node_maintenance_state,
+                             attributes  => record_info(fields, node_maintenance_state),
+                             match => #node_maintenance_state{_ = '_'}
+                            })}].
 
 %% -------------------------------------------------------------------
 %% set().
@@ -72,8 +51,9 @@ status_table_definition() ->
 %% @private
 
 set(Status) ->
-    rabbit_db:run(
-      #{mnesia => fun() -> set_in_mnesia(Status) end
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> set_in_mnesia(Status) end,
+        khepri => fun() -> set_in_khepri(Status) end
        }).
 
 set_in_mnesia(Status) ->
@@ -99,6 +79,18 @@ set_in_mnesia(Status) ->
         _            -> false
     end.
 
+set_in_khepri(Status) ->
+    Node = node(),
+    Path = khepri_maintenance_path(Node),
+    Record = #node_maintenance_state{
+                node   = Node,
+                status = Status
+               },
+    case rabbit_khepri:put(Path, Record) of
+        ok -> true;
+        _ -> false
+    end.
+
 %% -------------------------------------------------------------------
 %% get().
 %% -------------------------------------------------------------------
@@ -113,8 +105,9 @@ set_in_mnesia(Status) ->
 %% @private
 
 get(Node) ->
-    rabbit_db:run(
-      #{mnesia => fun() -> get_in_mnesia(Node) end
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> get_in_mnesia(Node) end,
+        khepri => fun() -> get_in_khepri(Node) end
        }).
 
 get_in_mnesia(Node) ->
@@ -125,8 +118,17 @@ get_in_mnesia(Node) ->
         _   -> undefined
     end.
 
+get_in_khepri(Node) ->
+    Path = khepri_maintenance_path(Node),
+    case rabbit_khepri:get(Path) of
+        {ok, #node_maintenance_state{status = Status}} ->
+            Status;
+        _ ->
+            undefined
+    end.
+
 %% -------------------------------------------------------------------
-%% get().
+%% get_consistent().
 %% -------------------------------------------------------------------
 
 -spec get_consistent(Node) -> Status when
@@ -139,8 +141,9 @@ get_in_mnesia(Node) ->
 %% @private
 
 get_consistent(Node) ->
-    rabbit_db:run(
-      #{mnesia => fun() -> get_consistent_in_mnesia(Node) end
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> get_consistent_in_mnesia(Node) end,
+        khepri => fun() -> get_consistent_in_khepri(Node) end
        }).
 
 get_consistent_in_mnesia(Node) ->
@@ -151,3 +154,20 @@ get_consistent_in_mnesia(Node) ->
         {atomic, _}  -> undefined;
         {aborted, _Reason} -> undefined
     end.
+
+get_consistent_in_khepri(Node) ->
+    Path = khepri_maintenance_path(Node),
+    Options = #{favor => consistency},
+    case rabbit_khepri:get(Path, Options) of
+        {ok, #node_maintenance_state{status = Status}} ->
+            Status;
+        _ ->
+            undefined
+    end.
+
+%% -------------------------------------------------------------------
+%% Khepri paths
+%% -------------------------------------------------------------------
+
+khepri_maintenance_path(Node) when ?IS_KHEPRI_PATH_CONDITION(Node) ->
+    ?RABBITMQ_KHEPRI_MAINTENANCE_PATH(Node).

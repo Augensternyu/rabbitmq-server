@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_access_control).
@@ -10,9 +10,10 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([check_user_pass_login/2, check_user_login/2, check_user_loopback/2,
-         check_vhost_access/4, check_resource_access/4, check_topic_access/4]).
+         check_vhost_access/4, check_resource_access/4, check_topic_access/4,
+         check_user_id/2]).
 
--export([permission_cache_can_expire/1, update_state/2]).
+-export([permission_cache_can_expire/1, update_state/2, expiry_timestamp/1]).
 
 %%----------------------------------------------------------------------------
 
@@ -53,7 +54,7 @@ check_user_login(Username, AuthProps) ->
                             rabbit_log:debug("User '~ts' authenticated successfully by backend ~ts", [Username2, Mod]),
                             user(ModNUser, {ok, [{Mod, Impl}], []});
                         Else ->
-                            rabbit_log:debug("User '~ts' failed authenticatation by backend ~ts", [Username, Mod]),
+                            rabbit_log:debug("User '~ts' failed authentication by backend ~ts", [Username, Mod]),
                             Else
                     end;
                 (_, {ok, User}) ->
@@ -61,8 +62,8 @@ check_user_login(Username, AuthProps) ->
                     {ok, User}
             end,
             {refused, Username, "No modules checked '~ts'", [Username]}, Modules)
-        catch 
-            Type:Error:Stacktrace -> 
+        catch
+            Type:Error:Stacktrace ->
                 rabbit_log:debug("User '~ts' authentication failed with ~ts:~tp:~n~tp", [Username, Type, Error, Stacktrace]),
                 {refused, Username, "User '~ts' authentication failed with internal error. "
                                     "Enable debug logs to see the real error.", [Username]}
@@ -188,7 +189,7 @@ check_resource_access(User = #user{username       = Username,
               check_access(
                 fun() -> Module:check_resource_access(
                            auth_user(User, Impl), Resource, Permission, Context) end,
-                Module, "~s access to ~s refused for user '~s'",
+                Module, "~s access to ~ts refused for user '~ts'",
                 [Permission, rabbit_misc:rs(Resource), Username]);
          (_, Else) -> Else
       end, ok, Modules).
@@ -201,7 +202,7 @@ check_topic_access(User = #user{username = Username,
             check_access(
                 fun() -> Module:check_topic_access(
                     auth_user(User, Impl), Resource, Permission, Context) end,
-                Module, "~s access to topic '~s' in exchange ~s refused for user '~s'",
+                Module, "~s access to topic '~ts' in exchange ~ts refused for user '~ts'",
                 [Permission, maps:get(routing_key, Context), rabbit_misc:rs(Resource), Username]);
             (_, Else) -> Else
         end, ok, Modules).
@@ -222,8 +223,33 @@ check_access(Fun, Module, ErrStr, ErrArgs, ErrName) ->
             rabbit_misc:protocol_error(ErrName, FullErrStr, FullErrArgs)
     end.
 
+-spec check_user_id(mc:state(), rabbit_types:user()) ->
+    ok | {refused, string(), [term()]}.
+check_user_id(Message, ActualUser) ->
+    case mc:user_id(Message) of
+        undefined ->
+            ok;
+        {binary, ClaimedUserName} ->
+            check_user_id0(ClaimedUserName, ActualUser)
+    end.
+
+check_user_id0(Username, #user{username = Username}) ->
+    ok;
+check_user_id0(_, #user{authz_backends = [{rabbit_auth_backend_dummy, _}]}) ->
+    ok;
+check_user_id0(ClaimedUserName, #user{username = ActualUserName,
+                                      tags = Tags}) ->
+    case lists:member(impersonator, Tags) of
+        true ->
+            ok;
+        false ->
+            {refused,
+             "user_id property set to '~ts' but authenticated user was '~ts'",
+             [ClaimedUserName, ActualUserName]}
+    end.
+
 -spec update_state(User :: rabbit_types:user(), NewState :: term()) ->
-    {'ok', rabbit_types:auth_user()} |
+    {'ok', rabbit_types:user()} |
     {'refused', string()} |
     {'error', any()}.
 
@@ -232,15 +258,16 @@ update_state(User = #user{authz_backends = Backends0}, NewState) ->
     %% backends is in reverse order from the original list.
     Backends = lists:foldl(
                 fun({Module, Impl}, {ok, Acc}) ->
-                        case Module:state_can_expire() of
-                          true  ->
-                            case Module:update_state(auth_user(User, Impl), NewState) of
+                        AuthUser = auth_user(User, Impl),
+                        case Module:expiry_timestamp(AuthUser) of
+                          never ->
+                            {ok, [{Module, Impl} | Acc]};
+                          _  ->
+                            case Module:update_state(AuthUser, NewState) of
                               {ok, #auth_user{impl = Impl1}} ->
                                 {ok, [{Module, Impl1} | Acc]};
                               Else -> Else
-                            end;
-                          false ->
-                            {ok, [{Module, Impl} | Acc]}
+                            end
                         end;
                    (_, {error, _} = Err)      -> Err;
                    (_, {refused, _, _} = Err) -> Err
@@ -254,5 +281,19 @@ update_state(User = #user{authz_backends = Backends0}, NewState) ->
 
 %% Returns true if any of the backends support credential expiration,
 %% otherwise returns false.
-permission_cache_can_expire(#user{authz_backends = Backends}) ->
-    lists:any(fun ({Module, _State}) -> Module:state_can_expire() end, Backends).
+permission_cache_can_expire(User) ->
+    expiry_timestamp(User) =/= never.
+
+-spec expiry_timestamp(User :: rabbit_types:user()) -> integer() | never.
+expiry_timestamp(User = #user{authz_backends = Modules}) ->
+    lists:foldl(fun({Module, Impl}, Ts0) ->
+                        case Module:expiry_timestamp(auth_user(User, Impl)) of
+                            Ts1 when is_integer(Ts0) andalso is_integer(Ts1)
+                                     andalso Ts1 > Ts0 ->
+                                Ts0;
+                            Ts1 when is_integer(Ts1) ->
+                                Ts1;
+                            _ ->
+                                Ts0
+                        end
+                end, never, Modules).

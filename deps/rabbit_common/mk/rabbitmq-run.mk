@@ -19,40 +19,30 @@ TEST_TMPDIR ?= $(TMPDIR)/rabbitmq-test-instances
 endif
 
 # Location of the scripts controlling the broker.
-RABBITMQ_SCRIPTS_DIR ?= $(CURDIR)/sbin
+RABBITMQ_SCRIPTS_DIR ?= $(CLI_SCRIPTS_DIR)
 
 ifeq ($(PLATFORM),msys2)
 RABBITMQ_PLUGINS ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-plugins.bat
 RABBITMQ_SERVER ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-server.bat
 RABBITMQCTL ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmqctl.bat
+RABBITMQ_UPGRADE ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-upgrade.bat
 else
 RABBITMQ_PLUGINS ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-plugins
 RABBITMQ_SERVER ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-server
 RABBITMQCTL ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmqctl
+RABBITMQ_UPGRADE ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-upgrade
 endif
 
-export RABBITMQ_SCRIPTS_DIR RABBITMQCTL RABBITMQ_PLUGINS RABBITMQ_SERVER
+export RABBITMQ_SCRIPTS_DIR RABBITMQCTL RABBITMQ_PLUGINS RABBITMQ_SERVER RABBITMQ_UPGRADE
 
 # We export MAKE to be sure scripts and tests use the proper command.
 export MAKE
 
 # We need to pass the location of codegen to the Java client ant
-# process.
+# process. @todo Delete?
 CODEGEN_DIR = $(DEPS_DIR)/rabbitmq_codegen
 PYTHONPATH = $(CODEGEN_DIR)
 export PYTHONPATH
-
-ANT ?= ant
-ANT_FLAGS += -Dmake.bin=$(MAKE) \
-	     -DUMBRELLA_AVAILABLE=true \
-	     -Drabbitmqctl.bin=$(RABBITMQCTL) \
-	     -Dsibling.codegen.dir=$(CODEGEN_DIR)
-ifeq ($(PROJECT),rabbitmq_test)
-ANT_FLAGS += -Dsibling.rabbitmq_test.dir=$(CURDIR)
-else
-ANT_FLAGS += -Dsibling.rabbitmq_test.dir=$(DEPS_DIR)/rabbitmq_test
-endif
-export ANT ANT_FLAGS
 
 node_tmpdir = $(TEST_TMPDIR)/$(1)
 node_pid_file = $(call node_tmpdir,$(1))/$(1).pid
@@ -96,16 +86,15 @@ RABBITMQ_ENABLED_PLUGINS_FILE ?= $(call node_enabled_plugins_file,$(RABBITMQ_NOD
 RABBITMQ_LOG ?= debug,+color
 export RABBITMQ_LOG
 
-# erlang.mk adds dependencies' ebin directory to ERL_LIBS. This is
-# a sane default, but we prefer to rely on the .ez archives in the
-# `plugins` directory so the plugin code is executed. The `plugins`
+ifdef PLUGINS_FROM_DEPS_DIR
+RMQ_PLUGINS_DIR = $(DEPS_DIR)
+DIST_ERL_LIBS = $(ERL_LIBS)
+else
+RMQ_PLUGINS_DIR = $(DIST_DIR)
+# We do not want to add apps/ or deps/ to ERL_LIBS
+# when running the release from dist. The `plugins`
 # directory is added to ERL_LIBS by rabbitmq-env.
 DIST_ERL_LIBS = $(patsubst :%,%,$(patsubst %:,%,$(subst :$(APPS_DIR):,:,$(subst :$(DEPS_DIR):,:,:$(ERL_LIBS):))))
-
-ifdef PLUGINS_FROM_DEPS_DIR
-RMQ_PLUGINS_DIR=$(DEPS_DIR)
-else
-RMQ_PLUGINS_DIR=$(CURDIR)/$(DIST_DIR)
 endif
 
 node_plugins_dir = $(if $(RABBITMQ_PLUGINS_DIR),$(RABBITMQ_PLUGINS_DIR),$(if $(EXTRA_PLUGINS_DIR),$(EXTRA_PLUGINS_DIR):$(RMQ_PLUGINS_DIR),$(RMQ_PLUGINS_DIR)))
@@ -126,7 +115,7 @@ RABBITMQ_STREAM_DIR="$(call node_stream_dir,$(2))" \
 RABBITMQ_FEATURE_FLAGS_FILE="$(call node_feature_flags_file,$(2))" \
 RABBITMQ_PLUGINS_DIR="$(call node_plugins_dir)" \
 RABBITMQ_PLUGINS_EXPAND_DIR="$(call node_plugins_expand_dir,$(2))" \
-RABBITMQ_SERVER_START_ARGS="-ra wal_sync_method sync $(RABBITMQ_SERVER_START_ARGS)" \
+RABBITMQ_SERVER_START_ARGS="$(RABBITMQ_SERVER_START_ARGS)" \
 RABBITMQ_ENABLED_PLUGINS="$(RABBITMQ_ENABLED_PLUGINS)"
 endef
 
@@ -175,6 +164,9 @@ $(if $(RABBITMQ_NODE_PORT),      {tcp_listeners$(comma) [$(RABBITMQ_NODE_PORT)]}
   {rabbitmq_management, [
 $(if $(RABBITMQ_NODE_PORT),      {listener$(comma) [{port$(comma) $(shell echo "$$(($(RABBITMQ_NODE_PORT) + 10000))")}]},)
     ]},
+  {rabbitmq_web_amqp, [
+$(if $(RABBITMQ_NODE_PORT),      {tcp_config$(comma) [{port$(comma) $(shell echo "$$((15678 + $(RABBITMQ_NODE_PORT) - 5672))")}]},)
+    ]},
   {rabbitmq_mqtt, [
 $(if $(RABBITMQ_NODE_PORT),      {tcp_listeners$(comma) [$(shell echo "$$((1883 + $(RABBITMQ_NODE_PORT) - 5672))")]},)
     ]},
@@ -200,8 +192,7 @@ $(if $(RABBITMQ_NODE_PORT),      {tcp_listeners$(comma) [$(shell echo "$$((5552 
 $(if $(RABBITMQ_NODE_PORT),      {tcp_config$(comma) [{port$(comma) $(shell echo "$$((15692 + $(RABBITMQ_NODE_PORT) - 5672))")}]},)
     ]},
   {ra, [
-      {data_dir, "$(RABBITMQ_QUORUM_DIR)"},
-      {wal_sync_method, sync}
+      {data_dir, "$(RABBITMQ_QUORUM_DIR)"}
     ]},
   {osiris, [
       {data_dir, "$(RABBITMQ_STREAM_DIR)"}
@@ -238,8 +229,7 @@ define test_rabbitmq_config_with_tls
         ]}
   ]},
   {ra, [
-      {data_dir, "$(RABBITMQ_QUORUM_DIR)"},
-      {wal_sync_method, sync}
+      {data_dir, "$(RABBITMQ_QUORUM_DIR)"}
     ]},
   {osiris, [
       {data_dir, "$(RABBITMQ_STREAM_DIR)"}
@@ -318,7 +308,7 @@ REDIRECT_STDIO = > $(RABBITMQ_LOG_BASE)/startup_log \
 		 2> $(RABBITMQ_LOG_BASE)/startup_err
 endif
 
-RMQCTL_WAIT_TIMEOUT ?= 60
+RMQCTL_WAIT_TIMEOUT ?= 60000
 
 start-background-node: node-tmpdir $(DIST_TARGET)
 	$(BASIC_SCRIPT_ENV_SETTINGS) \
@@ -369,7 +359,18 @@ stop-node:
 NODES ?= 3
 
 start-brokers start-cluster: $(DIST_TARGET)
-	@for n in $$(seq $(NODES)); do \
+	@if test '$@' = 'start-cluster'; then \
+		for n in $$(seq $(NODES)); do \
+			nodename="rabbit-$$n@$(HOSTNAME)"; \
+			if test "$$nodeslist"; then \
+				nodeslist="$$nodeslist,'$$nodename'"; \
+			else \
+				nodeslist="'$$nodename'"; \
+			fi; \
+		done; \
+		cluster_nodes_arg="-rabbit cluster_nodes [$$nodeslist]"; \
+	fi; \
+	for n in $$(seq $(NODES)); do \
 		nodename="rabbit-$$n@$(HOSTNAME)"; \
 		$(MAKE) start-background-broker \
 		  NOBUILD=1 \
@@ -386,25 +387,84 @@ start-brokers start-cluster: $(DIST_TARGET)
 		  -rabbitmq_web_stomp_examples listener [{port,$$((61633 + $$n - 1))}] \
 		  -rabbitmq_prometheus tcp_config [{port,$$((15692 + $$n - 1))}] \
 		  -rabbitmq_stream tcp_listeners [$$((5552 + $$n - 1))] \
-		  "; \
-		if test '$@' = 'start-cluster' && test "$$nodename1"; then \
-			ERL_LIBS="$(DIST_ERL_LIBS)" \
-			  $(RABBITMQCTL) -n "$$nodename" stop_app; \
-			ERL_LIBS="$(DIST_ERL_LIBS)" \
-			  $(RABBITMQCTL) -n "$$nodename" join_cluster "$$nodename1"; \
-			ERL_LIBS="$(DIST_ERL_LIBS)" \
-			  $(RABBITMQCTL) -n "$$nodename" start_app; \
-		else \
-			nodename1=$$nodename; \
-		fi; \
-	done
+		  $$cluster_nodes_arg \
+		  " & \
+	done; \
+	wait
 
 stop-brokers stop-cluster:
 	@for n in $$(seq $(NODES) -1 1); do \
 		nodename="rabbit-$$n@$(HOSTNAME)"; \
 		$(MAKE) stop-node \
+		  RABBITMQ_NODENAME="$$nodename" & \
+	done; \
+	wait
+
+NODES ?= 3
+
+# Rolling restart similar to what the Kubernetes Operator does
+restart-cluster:
+	@for n in $$(seq $(NODES) -1 1); do \
+		nodename="rabbit-$$n@$(HOSTNAME)"; \
+		$(RABBITMQ_UPGRADE) -n "$$nodename" await_online_quorum_plus_one -t 604800 && \
+			$(RABBITMQ_UPGRADE) -n "$$nodename" drain; \
+		$(MAKE) stop-node \
 		  RABBITMQ_NODENAME="$$nodename"; \
-	done
+		$(MAKE) start-background-broker \
+		  NOBUILD=1 \
+		  RABBITMQ_NODENAME="$$nodename" \
+		  RABBITMQ_NODE_PORT="$$((5672 + $$n - 1))" \
+		  RABBITMQ_SERVER_START_ARGS=" \
+		  -rabbit loopback_users [] \
+		  -rabbitmq_management listener [{port,$$((15672 + $$n - 1))}] \
+		  -rabbitmq_mqtt tcp_listeners [$$((1883 + $$n - 1))] \
+		  -rabbitmq_web_mqtt tcp_config [{port,$$((1893 + $$n - 1))}] \
+		  -rabbitmq_web_mqtt_examples listener [{port,$$((1903 + $$n - 1))}] \
+		  -rabbitmq_stomp tcp_listeners [$$((61613 + $$n - 1))] \
+		  -rabbitmq_web_stomp tcp_config [{port,$$((61623 + $$n - 1))}] \
+		  -rabbitmq_web_stomp_examples listener [{port,$$((61633 + $$n - 1))}] \
+		  -rabbitmq_prometheus tcp_config [{port,$$((15692 + $$n - 1))}] \
+		  -rabbitmq_stream tcp_listeners [$$((5552 + $$n - 1))] \
+		  "; \
+		  $(RABBITMQCTL) -n "$$nodename" await_online_nodes $(NODES) || exit 1; \
+	done; \
+	wait
+
+# --------------------------------------------------------------------
+# Code reloading.
+#
+# For `make run-broker` either do:
+# * make RELOAD=1
+# * make all reload-broker        (can't do this alongside -j flag)
+# * make && make reload-broker    (fine with -j flag)
+#
+# Or if recompiling a specific application:
+# * make -C deps/rabbit RELOAD=1
+#
+# For `make start-cluster` use the `reload-cluster` target.
+# Same constraints apply as with `reload-broker`:
+# * make all reload-cluster
+# * make && make reload-cluster
+# --------------------------------------------------------------------
+
+reload-broker:
+	$(exec_verbose) ERL_LIBS="$(DIST_ERL_LIBS)" \
+		$(RABBITMQCTL) -n $(RABBITMQ_NODENAME) \
+		eval "io:format(\"~p~n\", [c:lm()])."
+
+ifeq ($(MAKELEVEL),0)
+ifdef RELOAD
+all:: reload-broker
+endif
+endif
+
+reload-cluster:
+	@for n in $$(seq $(NODES) -1 1); do \
+		nodename="rabbit-$$n@$(HOSTNAME)"; \
+		$(MAKE) reload-broker \
+			RABBITMQ_NODENAME="$$nodename" & \
+	done; \
+	wait
 
 # --------------------------------------------------------------------
 # Used by testsuites.
