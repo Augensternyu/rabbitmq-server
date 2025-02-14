@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 defmodule SetUserLimitsCommandTest do
   use ExUnit.Case, async: false
@@ -115,7 +115,7 @@ defmodule SetUserLimitsCommandTest do
     assert @command.run(
              [context[:user], "{\"foo\":\"bar\"}"],
              context[:opts]
-           ) == {:error_string, 'Unrecognised terms [{<<"foo">>,<<"bar">>}] in user-limits'}
+           ) == {:error_string, ~c"Unrecognised terms [{<<\"foo\">>,<<\"bar\">>}] in user-limits"}
 
     assert get_user_limits(context[:user]) == %{}
   end

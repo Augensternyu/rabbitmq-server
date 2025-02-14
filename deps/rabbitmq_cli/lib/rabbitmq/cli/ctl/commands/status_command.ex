@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
   alias RabbitMQ.CLI.Core.DocGuide
@@ -39,7 +39,8 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
         :ok
 
       false ->
-        {:validation_failure, "unit '#{unit}' is not supported. Please use one of: bytes, mb, gb"}
+        {:validation_failure,
+         "unit '#{unit}' is not supported. Please use one of: bytes, mb, mib, gb, gib, tb, tib"}
     end
   end
 
@@ -100,7 +101,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
         product_version_section ++
         [
           "RabbitMQ version: #{m[:rabbitmq_version]}",
-          "RabbitMQ release series support status: #{m[:release_series_support_status]}",
+          "RabbitMQ release series support status: see https://www.rabbitmq.com/release-information",
           "Node name: #{node_name}",
           "Erlang configuration: #{m[:erlang_version]}",
           "Crypto library: #{m[:crypto_lib_version]}",
@@ -141,6 +142,18 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
           xs -> alarm_lines(xs, node_name)
         end
 
+    IO.inspect(m[:tags])
+
+    tags_section =
+      [
+        "\n#{bright("Tags")}\n"
+      ] ++
+        case m[:tags] do
+          nil -> ["(none)"]
+          [] -> ["(none)"]
+          xs -> tag_lines(xs)
+        end
+
     breakdown = compute_relative_values(m[:memory])
     memory_calculation_strategy = to_atom(m[:vm_memory_calculation_strategy])
     total_memory = get_in(m[:memory], [:total, memory_calculation_strategy])
@@ -165,8 +178,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
 
     file_descriptors = [
       "\n#{bright("File Descriptors")}\n",
-      "Total: #{m[:file_descriptors][:total_used]}, limit: #{m[:file_descriptors][:total_limit]}",
-      "Sockets: #{m[:file_descriptors][:sockets_used]}, limit: #{m[:file_descriptors][:sockets_limit]}"
+      "Total: #{m[:file_descriptors][:total_used]}, limit: #{m[:file_descriptors][:total_limit]}"
     ]
 
     disk_space_section = [
@@ -198,6 +210,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
         config_section ++
         log_section ++
         alarms_section ++
+        tags_section ++
         memory_section ++
         file_descriptors ++ disk_space_section ++ totals_section ++ listeners_section
 
@@ -212,7 +225,10 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
 
   def usage_additional() do
     [
-      ["--unit <bytes | mb | gb>", "byte multiple (bytes, megabytes, gigabytes) to use"],
+      [
+        "--unit <bytes | mb | mib | gb | gib>",
+        "byte multiple (bytes, megabytes, gigabytes) to use"
+      ],
       ["--formatter <json | erlang>", "alternative formatter (JSON, Erlang terms)"]
     ]
   end
@@ -248,7 +264,6 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
       rabbitmq_version: Keyword.get(result, :rabbitmq_version) |> to_string,
       erlang_version: Keyword.get(result, :erlang_version) |> to_string |> String.trim_trailing(),
       crypto_lib_version: crypto_lib_version,
-      release_series_support_status: Keyword.get(result, :release_series_support_status, true),
       uptime: Keyword.get(result, :uptime),
       is_under_maintenance: Keyword.get(result, :is_under_maintenance, false),
       processes: Enum.into(Keyword.get(result, :processes), %{}),
@@ -262,6 +277,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
       disk_free: Keyword.get(result, :disk_free),
       file_descriptors: Enum.into(Keyword.get(result, :file_descriptors), %{}),
       alarms: Keyword.get(result, :alarms),
+      tags: Keyword.get(result, :tags, []),
       listeners: listener_maps(Keyword.get(result, :listeners, [])),
       memory: Keyword.get(result, :memory) |> Enum.into(%{}),
       data_directory: Keyword.get(result, :data_directory) |> to_string,
@@ -280,6 +296,12 @@ defmodule RabbitMQ.CLI.Ctl.Commands.StatusCommand do
       n when is_integer(n) -> n
       _ -> :undefined
     end
+  end
+
+  defp tag_lines(mapping) do
+    Enum.map(mapping, fn {key, value} ->
+      "#{key}: #{value}"
+    end)
   end
 
   def space_as_iu_or_unknown(value, unit) do

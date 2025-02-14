@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% This original One True Health Check™ has been deprecated as too coarse-grained,
@@ -41,7 +41,7 @@ to_json(ReqData, Context) ->
               end,
     case rabbit_health_check:node(Node, Timeout) of
         ok ->
-            rabbit_mgmt_util:reply([{status, ok}], ReqData, Context);
+            rabbit_mgmt_util:reply(#{status => ok}, ReqData, Context);
         {badrpc, timeout} ->
             ErrMsg = rabbit_mgmt_format:print("node ~tp health check timed out", [Node]),
             failure(ErrMsg, ReqData, Context);

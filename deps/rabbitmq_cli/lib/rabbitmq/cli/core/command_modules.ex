@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Core.CommandModules do
   alias RabbitMQ.CLI.Core.{Config, DataCoercion, Helpers}
@@ -69,7 +69,7 @@ defmodule RabbitMQ.CLI.Core.CommandModules do
           {:ok, enabled_plugins_file} = PluginsHelpers.enabled_plugins_file(opts)
           require Logger
 
-          Logger.warn(
+          Logger.warning(
             "Unable to read the enabled plugins file.\n" <>
               "  Reason: #{inspect(err)}\n" <>
               "  Commands provided by plugins will not be available.\n" <>

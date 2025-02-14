@@ -2,34 +2,41 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_exchange).
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("rabbit_common/include/rabbit_framing.hrl").
 
 -export([recover/1, policy_changed/2, callback/4, declare/7,
          assert_equivalence/6, assert_args_equivalence/2, check_type/1, exists/1,
          lookup/1, lookup_many/1, lookup_or_die/1, list/0, list/1, lookup_scratch/2,
          update_scratch/3, update_decorators/2, immutable/1,
          info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4,
-         route/2, delete/3, validate_binding/2, count/0]).
+         route/2, route/3, delete/3, validate_binding/2, count/0,
+         ensure_deleted/3, delete_all/2]).
 -export([list_names/0]).
 -export([serialise_events/1]).
 -export([serial/1, peek_serial/1]).
 
 %%----------------------------------------------------------------------------
 
--export_type([name/0, type/0]).
+-deprecated([{route, 2, "Use route/3 instead"}]).
+
+-export_type([name/0, type/0, route_opts/0, route_infos/0, route_return/0]).
 -type name() :: rabbit_types:exchange_name().
 -type type() :: rabbit_types:exchange_type().
--type fun_name() :: atom().
+-type route_opts() :: #{return_binding_keys => boolean()}.
+-type route_infos() :: #{binding_keys => #{rabbit_types:binding_key() => true}}.
+-type route_return() :: list(rabbit_amqqueue:name() |
+                             {rabbit_amqqueue:name(), route_infos()} |
+                             {virtual_reply_queue, binary()}).
 
 %%----------------------------------------------------------------------------
 
 -define(INFO_KEYS, [name, type, durable, auto_delete, internal, arguments,
                     policy, user_who_performed_action]).
+-define(DEFAULT_EXCHANGE_NAME, <<>>).
 
 -spec recover(rabbit_types:vhost()) -> [name()].
 
@@ -38,7 +45,7 @@ recover(VHost) ->
     [XName || #exchange{name = XName} <- Xs].
 
 -spec callback
-        (rabbit_types:exchange(), fun_name(), atom(), [any()]) -> 'ok'.
+        (rabbit_types:exchange(), FunName :: atom(), atom(), [any()]) -> 'ok'.
 
 callback(X = #exchange{decorators = Decorators, name = XName}, Fun, Serial, Args) ->
     case Fun of
@@ -85,10 +92,16 @@ serial(X) ->
         true -> rabbit_db_exchange:next_serial(X#exchange.name)
     end.
 
--spec declare
-        (name(), type(), boolean(), boolean(), boolean(),
-         rabbit_framing:amqp_table(), rabbit_types:username())
-        -> rabbit_types:exchange().
+-spec declare(Name, Type, Durable, AutoDelete, Internal, Args, Username) ->
+    Ret when
+      Name :: name(),
+      Type :: type(),
+      Durable :: boolean(),
+      AutoDelete :: boolean(),
+      Internal :: boolean(),
+      Args :: rabbit_framing:amqp_table(),
+      Username :: rabbit_types:username(),
+      Ret :: {ok, rabbit_types:exchange()} | {error, timeout}.
 
 declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
     X = rabbit_exchange_decorator:set(
@@ -115,16 +128,16 @@ declare(XName, Type, Durable, AutoDelete, Internal, Args, Username) ->
                     Serial = serial(Exchange),
                     ok = callback(X, create, Serial, [Exchange]),
                     rabbit_event:notify(exchange_created, info(Exchange)),
-                    Exchange;
+                    {ok, Exchange};
                 {existing, Exchange} ->
-                    Exchange;
-                Err ->
+                    {ok, Exchange};
+                {error, timeout} = Err ->
                     Err
             end;
         _ ->
             rabbit_log:warning("ignoring exchange.declare for exchange ~tp,
                                 exchange.delete in progress~n.", [XName]),
-            X
+            {ok, X}
     end.
 
 %% Used with binaries sent over the wire; the type may not exist.
@@ -136,11 +149,11 @@ check_type(TypeBin) ->
     case rabbit_registry:binary_to_type(rabbit_data_coercion:to_binary(TypeBin)) of
         {error, not_found} ->
             rabbit_misc:protocol_error(
-              command_invalid, "unknown exchange type '~ts'", [TypeBin]);
+              precondition_failed, "unknown exchange type '~ts'", [TypeBin]);
         T ->
             case rabbit_registry:lookup_module(exchange, T) of
                 {error, not_found} -> rabbit_misc:protocol_error(
-                                        command_invalid,
+                                        precondition_failed,
                                         "invalid exchange type '~ts'", [T]);
                 {ok, _Module}      -> T
             end
@@ -214,13 +227,10 @@ list() ->
 count() ->
     rabbit_db_exchange:count().
 
--spec list_names() -> [rabbit_exchange:name()].
+-spec list_names() -> [name()].
 
 list_names() ->
     rabbit_db_exchange:list().
-
-%% Not dirty_match_object since that would not be transactional when used in a
-%% tx context
 
 -spec list(rabbit_types:vhost()) -> [rabbit_types:exchange()].
 
@@ -338,41 +348,58 @@ info_all(VHostPath, Items, Ref, AggregatorPid) ->
     rabbit_control_misc:emitting_map(
       AggregatorPid, Ref, fun(X) -> info(X, Items) end, list(VHostPath)).
 
-%% rabbit_types:delivery() is more strict than #delivery{}, some
-%% fields can't be undefined. But there are places where
-%% rabbit_exchange:route/2 is called with the absolutely bare delivery
-%% like #delivery{message = #basic_message{routing_keys = [...]}}
--spec route(rabbit_types:exchange(), #delivery{})
-                 -> [rabbit_amqqueue:name()].
+-spec route(rabbit_types:exchange(), mc:state()) ->
+    [rabbit_amqqueue:name() | {virtual_reply_queue, binary()}].
+route(Exchange, Message) ->
+    route(Exchange, Message, #{}).
 
-route(#exchange{name = #resource{virtual_host = VHost, name = RName} = XName,
-                decorators = Decorators} = X,
-      #delivery{message = #basic_message{routing_keys = RKs}} = Delivery) ->
-    case RName of
-        <<>> ->
-            RKsSorted = lists:usort(RKs),
-            [rabbit_channel:deliver_reply(RK, Delivery) ||
-             RK <- RKsSorted, virtual_reply_queue(RK)],
-            [rabbit_misc:r(VHost, queue, RK) || RK <- RKsSorted,
-                                                not virtual_reply_queue(RK)];
+-spec route(rabbit_types:exchange(), mc:state(), route_opts()) ->
+    route_return().
+route(#exchange{name = #resource{name = ?DEFAULT_EXCHANGE_NAME,
+                                 virtual_host = VHost}},
+      Message, _Opts) ->
+    RKs0 = mc:routing_keys(Message),
+    RKs = lists:usort(RKs0),
+    [begin
+         case virtual_reply_queue(RK) of
+             false ->
+                 rabbit_misc:r(VHost, queue, RK);
+             true ->
+                 {virtual_reply_queue, RK}
+         end
+     end
+     || RK <- RKs];
+route(X = #exchange{name = XName,
+                    decorators = Decorators},
+      Message, Opts) ->
+    Decs = rabbit_exchange_decorator:select(route, Decorators),
+    QNamesToBKeys = route1(Message, Decs, Opts, {[X], XName, #{}}),
+    case Opts of
+        #{return_binding_keys := true} ->
+            maps:fold(fun(QName, BindingKeys, L) ->
+                              [{QName, #{binding_keys => BindingKeys}} | L]
+                      end, [], QNamesToBKeys);
         _ ->
-            Decs = rabbit_exchange_decorator:select(route, Decorators),
-            lists:usort(route1(Delivery, Decs, {[X], XName, []}))
+            maps:keys(QNamesToBKeys)
     end.
 
 virtual_reply_queue(<<"amq.rabbitmq.reply-to.", _/binary>>) -> true;
 virtual_reply_queue(_)                                      -> false.
 
-route1(_, _, {[], _, QNames}) ->
+route1(_, _, _, {[], _, QNames}) ->
     QNames;
-route1(Delivery, Decorators,
+route1(Message, Decorators, Opts,
        {[X = #exchange{type = Type} | WorkList], SeenXs, QNames}) ->
-    ExchangeDests  = (type_to_module(Type)):route(X, Delivery),
-    DecorateDests  = process_decorators(X, Decorators, Delivery),
+    {Route, Arity} = type_to_route_fun(Type),
+    ExchangeDests = case Arity of
+                        2 -> Route(X, Message);
+                        3 -> Route(X, Message, Opts)
+                    end,
+    DecorateDests  = process_decorators(X, Decorators, Message),
     AlternateDests = process_alternate(X, ExchangeDests),
-    route1(Delivery, Decorators,
+    route1(Message, Decorators, Opts,
            lists:foldl(fun process_route/2, {WorkList, SeenXs, QNames},
-                       AlternateDests ++ DecorateDests  ++ ExchangeDests)).
+                       AlternateDests ++ DecorateDests ++ ExchangeDests)).
 
 process_alternate(X = #exchange{name = XName}, []) ->
     case rabbit_policy:get_arg(
@@ -385,8 +412,8 @@ process_alternate(_X, _Results) ->
 
 process_decorators(_, [], _) -> %% optimisation
     [];
-process_decorators(X, Decorators, Delivery) ->
-    lists:append([Decorator:route(X, Delivery) || Decorator <- Decorators]).
+process_decorators(X, Decorators, Message) ->
+    lists:append([Decorator:route(X, Message) || Decorator <- Decorators]).
 
 process_route(#resource{kind = exchange} = XName,
               {_WorkList, XName, _QNames} = Acc) ->
@@ -403,8 +430,20 @@ process_route(#resource{kind = exchange} = XName,
                   gb_sets:add_element(XName, SeenXs), QNames}
     end;
 process_route(#resource{kind = queue} = QName,
-              {WorkList, SeenXs, QNames}) ->
-    {WorkList, SeenXs, [QName | QNames]}.
+              {WorkList, SeenXs, QNames0}) ->
+    QNames = case QNames0 of
+                 #{QName := _} -> QNames0;
+                 #{} -> QNames0#{QName => #{}}
+             end,
+    {WorkList, SeenXs, QNames};
+process_route({#resource{kind = queue} = QName, BindingKey},
+              {WorkList, SeenXs, QNames0})
+  when is_binary(BindingKey) ->
+    QNames = maps:update_with(QName,
+                              fun(BKeys) -> BKeys#{BindingKey => true} end,
+                              #{BindingKey => true},
+                              QNames0),
+    {WorkList, SeenXs, QNames}.
 
 cons_if_present(XName, L) ->
     case lookup(XName) of
@@ -414,9 +453,13 @@ cons_if_present(XName, L) ->
 
 -spec delete
         (name(),  'true', rabbit_types:username()) ->
-                    'ok'| rabbit_types:error('not_found' | 'in_use');
+                    'ok' |
+                    rabbit_types:error('not_found' | 'in_use') |
+                    rabbit_khepri:timeout_error();
         (name(), 'false', rabbit_types:username()) ->
-                    'ok' | rabbit_types:error('not_found').
+                    'ok' |
+                    rabbit_types:error('not_found') |
+                    rabbit_khepri:timeout_error().
 
 delete(XName, IfUnused, Username) ->
     try
@@ -427,13 +470,15 @@ delete(XName, IfUnused, Username) ->
         _ = rabbit_runtime_parameters:set(XName#resource.virtual_host,
                                       ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
                                       XName#resource.name, true, Username),
-        Deletions = process_deletions(rabbit_db_exchange:delete(XName, IfUnused)),
-        case Deletions of
-            {error, _} ->
-                Deletions;
-            _ ->
-                rabbit_binding:notify_deletions(Deletions, Username),
-                ok
+        case rabbit_db_exchange:delete(XName, IfUnused) of
+            {deleted, #exchange{name = XName} = X, Bs, Deletions} ->
+                Deletions1 = rabbit_binding:add_deletion(
+                               XName, X, deleted, Bs, Deletions),
+                ok = rabbit_binding:process_deletions(Deletions1),
+                ok = rabbit_binding:notify_deletions(Deletions1, Username),
+                ok;
+            {error, _} = Err ->
+                Err
         end
     after
         rabbit_runtime_parameters:clear(XName#resource.virtual_host,
@@ -441,12 +486,36 @@ delete(XName, IfUnused, Username) ->
                                         XName#resource.name, Username)
     end.
 
-process_deletions({error, _} = E) ->
-    E;
-process_deletions({deleted, #exchange{name = XName} = X, Bs, Deletions}) ->
-    rabbit_binding:process_deletions(
-      rabbit_binding:add_deletion(
-        XName, {X, deleted, Bs}, Deletions)).
+-spec delete_all(VHostName, ActingUser) -> Ret when
+      VHostName :: vhost:name(),
+      ActingUser :: rabbit_types:username(),
+      Ret :: ok.
+
+delete_all(VHostName, ActingUser) ->
+    {ok, Deletions} = rabbit_db_exchange:delete_all(VHostName),
+    ok = rabbit_binding:process_deletions(Deletions),
+    ok = rabbit_binding:notify_deletions(Deletions, ActingUser),
+    ok.
+
+-spec ensure_deleted(ExchangeName, IfUnused, Username) -> Ret when
+      ExchangeName :: name(),
+      IfUnused :: boolean(),
+      Username :: rabbit_types:username(),
+      Ret :: ok |
+             rabbit_types:error('in_use') |
+             rabbit_khepri:timeout_error().
+%% @doc A wrapper around `delete/3' which returns `ok' in the case that the
+%% exchange did not exist at time of deletion.
+
+ensure_deleted(XName, IfUnused, Username) ->
+    case delete(XName, IfUnused, Username) of
+        ok ->
+            ok;
+        {error, not_found} ->
+            ok;
+        {error, _} = Err ->
+            Err
+    end.
 
 -spec validate_binding
         (rabbit_types:exchange(), rabbit_types:binding())
@@ -477,4 +546,18 @@ type_to_module(T) ->
             end;
         Module ->
             Module
+    end.
+
+type_to_route_fun(T) ->
+    case persistent_term:get(T, undefined) of
+        undefined ->
+            XMod = type_to_module(T),
+            FunArity = case erlang:function_exported(XMod, route, 3) of
+                           true -> {fun XMod:route/3, 3};
+                           false -> {fun XMod:route/2, 2}
+                       end,
+            persistent_term:put(T, FunArity),
+            FunArity;
+        FunArity ->
+            FunArity
     end.

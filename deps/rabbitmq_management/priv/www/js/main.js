@@ -1,48 +1,70 @@
 
-$(document).ready(function() {
-   var url_string = window.location.href;
-   var url = new URL(url_string);
-   var error = url.searchParams.get('error');
-   if (error) {
-     renderWarningMessageInLoginStatus(fmt_escape_html(error));
-   } else {
-      if (oauth.enabled) {
-        startWithOAuthLogin();
-      } else {
-        startWithLoginPage();
-      }
+$(document).ready(function() {    
+  var url_string = window.location.href;
+  var url = new URL(url_string);
+  var error = url.searchParams.get('error');
+  if (error) {
+    if (oauth.enabled) {
+      renderWarningMessageInLoginStatus(oauth, fmt_escape_html(error));
     }
+  } else {
+    if (oauth.enabled) {
+      startWithOAuthLogin(oauth);
+    } else {
+      startWithLoginPage();
+      }
+  }
 });
 
 function startWithLoginPage() {
   replace_content('outer', format('login', {}));
   start_app_login();
 }
-function startWithOAuthLogin () {
-  if (!oauth.logged_in) {
-    if (oauth.sp_initiated) {
-      get(oauth.readiness_url, 'application/json', function (req) {
-        if (req.status !== 200) {
-          renderWarningMessageInLoginStatus(oauth.authority + ' does not appear to be a running OAuth2.0 instance or may not have a trusted SSL certificate')
-        } else {
-          replace_content('outer', format('login_oauth', {}))
-          start_app_login()
-        }
-      })
-    } else {
-      replace_content('outer', format('login_oauth', {}))
-      start_app_login()
+function removeDuplicates(array){
+  let output = []
+  for(let item of array) {
+    if(!output.includes(item)) {
+      output.push(item)
     }
+  }
+  return output
+}
+
+
+function startWithOAuthLogin (oauth) {
+  store_pref("oauth-return-to", window.location.hash);
+
+  if (!oauth.logged_in) {
+    hasAnyResourceServerReady(oauth, (oauth, warnings) => {  render_login_oauth(oauth, warnings); start_app_login(); })
   } else {
     start_app_login()
   }
 }
+function render_login_oauth(oauth, messages) {
+  let formatData = {}
+  formatData.warnings = []
+  formatData.notAuthorized = false
+  formatData.resource_servers = oauth.resource_servers
+  formatData.declared_resource_servers_count = oauth.declared_resource_servers_count
+  formatData.oauth_disable_basic_auth = oauth.oauth_disable_basic_auth
 
-function renderWarningMessageInLoginStatus (message) {
-  replace_content('outer', format('login_oauth', {}))
-  replace_content('login-status', '<p class="warning">' + message + '</p> <button id="loginWindow" onclick="oauth_initiateLogin()">Click here to log in</button>')
+  if (Array.isArray(messages)) {
+    formatData.warnings = messages
+  } else if (typeof messages == "string") {
+    formatData.warnings = [messages]
+    formatData.notAuthorized = messages == "Not authorized"
+  }
+  replace_content('outer', format('login_oauth', formatData))
+
+  setup_visibility()
+  $('#login').off('click', 'div.section h2, div.section-hidden h2');
+  $('#login').on('click', 'div.section h2, div.section-hidden h2', function() {
+          toggle_visibility($(this));
+      });
 }
-
+function renderWarningMessageInLoginStatus(oauth, message) {
+  render_login_oauth(oauth, message)
+}
 
 function dispatcher_add(fun) {
     dispatcher_modules.push(fun);
@@ -70,14 +92,14 @@ function start_app_login () {
   app = new Sammy.Application(function () {
     this.get('/', function () {})
     this.get('#/', function () {})
-    if (!oauth.enabled) {
+    if (!oauth.enabled || !oauth.oauth_disable_basic_auth) {
       this.put('#/login', function() {
         set_basic_auth(this.params['username'], this.params['password'])
         check_login()
       });
     }
   })
-  // TODO REFACTOR: this code can be simplified
+  
   if (oauth.enabled) {
     if (has_auth_credentials()) {
       check_login();
@@ -97,25 +119,37 @@ function check_login () {
   if (user == false || user.error) {
     clear_auth();
     if (oauth.enabled) {
-      hide_popup_warn();
-      renderWarningMessageInLoginStatus('Not authorized');
+      renderWarningMessageInLoginStatus(oauth, 'Not authorized');
     } else {
       replace_content('login-status', '<p>Login failed</p>');
     }
     return false;
   }
-
+  check_version()
   hide_popup_warn()
   replace_content('outer', format('layout', {}))
   var user_login_session_timeout = parseInt(user.login_session_timeout)
   if (!isNaN(user_login_session_timeout)) {
     update_login_session_timeout(user_login_session_timeout)
   }
-  setup_global_vars()
+
+  ui_data_model.vhosts = JSON.parse(sync_get('/vhosts'));
+  ac.update(user, ui_data_model)
+  if (ac.isMonitoringUser()) {
+    ui_data_model.nodes = JSON.parse(sync_get('/nodes'))
+  }
+  var overview = JSON.parse(sync_get('/overview'))
+
+  display.update(overview, ui_data_model)
+
+  setup_global_vars(overview)
+
   setup_constant_events()
   update_vhosts()
   update_interval()
   setup_extensions()
+
+
   return true
 }
 
@@ -183,17 +217,18 @@ function setup_constant_events() {
 }
 
 function update_vhosts() {
-    var vhosts = JSON.parse(sync_get('/vhosts'));
-    vhosts_interesting = vhosts.length > 1;
-    if (vhosts_interesting)
+    if (display.vhosts) {
         $('#vhost-form').show();
-    else
+        $('li#vhost').show();
+    }else {
         $('#vhost-form').hide();
+        $('li#vhost').hide();
+    }
     var select = $('#show-vhost').get(0);
-    select.options.length = vhosts.length + 1;
+    select.options.length = ui_data_model.vhosts.length + 1;
     var index = 0;
-    for (var i = 0; i < vhosts.length; i++) {
-        var vhost = vhosts[i].name;
+    for (var i = 0; i < ui_data_model.vhosts.length; i++) {
+        var vhost = ui_data_model.vhosts[i].name;
         select.options[i + 1] = new Option(vhost, vhost);
         if (vhost == current_vhost) index = i + 1;
     }
@@ -219,6 +254,7 @@ function dynamic_load(filename) {
     element.setAttribute('type', 'text/javascript');
     element.setAttribute('src', 'js/' + filename);
     document.getElementsByTagName('head')[0].appendChild(element);
+    return element;
 }
 
 function update_interval() {
@@ -246,16 +282,39 @@ function update_interval() {
 function go_to(url) {
     this.location = url;
 }
-
+function go_to_home() {
+    // location.href = rabbit_path_prefix() + "/"
+    location.href =  "/"
+  }
+  
 function set_timer_interval(interval) {
     timer_interval = interval;
     reset_timer();
 }
 
 function reset_timer() {
-    clearInterval(timer);
+    if (timer != null) {
+        clearInterval(timer);
+    }
     if (timer_interval != null) {
         timer = setInterval(partial_update, timer_interval);
+    }
+}
+
+function pause_auto_refresh() {
+    if (typeof globalThis.rmq_webui_auto_refresh_paused == 'undefined')
+        globalThis.rmq_webui_auto_refresh_paused = 0;
+
+    globalThis.rmq_webui_auto_refresh_paused++;
+    if (timer != null) {
+        clearInterval(timer);
+    }
+}
+
+function resume_auto_refresh() {
+    globalThis.rmq_webui_auto_refresh_paused--;
+    if (globalThis.rmq_webui_auto_refresh_paused == 0) {
+        reset_timer();
     }
 }
 
@@ -293,6 +352,7 @@ function update() {
     clearInterval(timer);
     with_update(function(html) {
             update_navigation();
+            update_warnings();
             replace_content('main', html);
             postprocess();
             postprocess_partial();
@@ -344,13 +404,15 @@ function update_navigation() {
         var selected = false;
         if (contains_current_highlight(val)) {
             selected = true;
-            if (!leaf(val)) {
-                descend = nav(val);
+            if (!leaf(val) && val[2] && ac.canAccessVhosts()) {
+                descend = nav(val)
             }
         }
         if (show(path)) {
-            l1 += '<li><a href="' + nav(path) + '"' +
-                (selected ? ' class="selected"' : '') + '>' + k + '</a></li>';
+          if (val.length < 3 || ( val[2] && ac.canAccessVhosts() )) {
+            l1 += '<li id="' + navigation_tab_id(k) + '"><a href="' + nav(path) + '"' +
+                (selected ? ' class="selected"' : '') + '>' + k + '</a></li>'
+          }
         }
     }
 
@@ -366,12 +428,56 @@ function update_navigation() {
     replace_content('rhs', l2);
 }
 
+function update_warnings() {
+    feature_flags = JSON.parse(sync_get('/feature-flags'));
+    var needs_enabling = false;
+    for (var i = 0; i < feature_flags.length; i++) {
+         var feature_flag = feature_flags[i];
+         if (feature_flag.state == "disabled" && feature_flag.stability != "experimental") {
+             needs_enabling = true;
+         }
+    }
+    deprecated_features = JSON.parse(sync_get('/deprecated-features/used'));
+    var needs_deprecating = false;
+    if (deprecated_features.length > 0) {
+        needs_deprecating = true;
+    }
+    var l1 = '<p class="warning">';
+    if (needs_enabling) {
+        l1 += '<span>&#9888;</span> All stable feature flags must be enabled after completing an upgrade. <a href="https://www.rabbitmq.com/feature-flags.html">[Learn more]</a>';
+    }
+    if (needs_deprecating) {
+        if (needs_enabling) {
+            l1 += '<br/>'
+        }
+        l1 += '<span>&#9888;</span> Deprecated features are being used. <a href="https://www.rabbitmq.com/feature-flags.html">[Learn more]</a>'
+    }
+    l1 += '</p>';
+    if (needs_enabling || needs_deprecating) {
+      $('#main').addClass('with-warnings');
+      $('#rhs').addClass('with-warnings');
+      replace_content('warnings', l1);
+  } else {
+      $('#main').removeClass('with-warnings');
+      $('#rhs').removeClass('with-warnings');
+  }
+}
+
+function navigation_tab_id(value) {
+    return value.toLowerCase().replaceAll(/\s/g, "-")
+}
+
 function nav(pair) {
     return pair[0];
 }
 
 function show(pair) {
-    return jQuery.inArray(pair[1], user_tags) != -1;
+    var hasUserTag = jQuery.inArray(pair[1], user_tags) != -1
+    if (pair.length > 2 && pair[2]) {
+      return hasUserTag && ac.canAccessVhosts()
+    } else {
+      return hasUserTag
+    }
 }
 
 function leaf(pair) {
@@ -545,9 +651,13 @@ function show_popup(type, text, _mode) {
     hide();
     $('#outer').after(format('popup', {'type': type, 'text': text}));
     $(cssClass).fadeIn(100);
-    $(cssClass + ' span').on('click', function () {
+
+    var closeButtonCssClass = cssClass + ' span';
+    $('div#outer,' + closeButtonCssClass).on('click', function(event) {
+      if ($(event.target).eq($(closeButtonCssClass)) || !$(event.target).closest(cssClass).length) {
         $('.popup-owner').removeClass('popup-owner');
         hide();
+      }
     });
 }
 
@@ -602,6 +712,10 @@ function postprocess() {
             return confirm("Are you sure? This object cannot be recovered " +
                            "after deletion.");
         });
+
+    $('form.enable-feature-flag').on('submit', function() {
+                    full_refresh();
+    });
 
     $('label').map(function() {
             if ($(this).attr('for') == '') {
@@ -733,13 +847,31 @@ function postprocess() {
     update_multifields();
 }
 
+function is_valid_regexp(value) {
+    try {
+        var _ = new RegExp(value, 'i');
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function url_pagination_template_context(template, context, defaultPage, defaultPageSize){
     var page_number_request = fmt_page_number_request(context, defaultPage);
     var page_size = fmt_page_size_request(context, defaultPageSize);
     var name_request = fmt_filter_name_request(context, "");
     var use_regex = fmt_regex_request(context, "") == "checked";
     if (use_regex) {
-        name_request = esc(name_request);
+        // rabbitmq/rabbitmq-server#8008: if the expression cannot be compiled to a reg exp,
+        // assume a regular text filter
+        var valid_regexp = is_valid_regexp(name_request);
+        if (!valid_regexp) {
+            show_popup('warn', fmt_escape_html(`Filter expression '${name_request}' is not a valid regular expression, will perform a regular text query`));
+            use_regex = false;
+        }
+        if (use_regex && valid_regexp) {
+            name_request = esc(name_request);
+        }
     }
     return  '/' + template +
         '?page=' +  page_number_request +
@@ -1224,13 +1356,14 @@ function get(url, accept, callback) {
   var req = new XMLHttpRequest();
   req.open("GET", url);
   req.setRequestHeader("Accept", accept);
-  req.send();
 
   req.onreadystatechange = function() {
     if (req.readyState == XMLHttpRequest.DONE) {
       callback(req);
     }
   };
+  req.send();
+
 }
 
 function sync_get(path) {
@@ -1292,16 +1425,16 @@ function sync_req(type, params0, path_template, options) {
         else
             // rabbitmq/rabbitmq-management#732
             // https://developer.mozilla.org/en-US/docs/Glossary/Truthy
-            return {result: true, http_status: req.status, req_params: params};
+            return {result: true, http_status: req.status, req_params: params, responseText: req.responseText};
     }
     else {
         return false;
     }
 }
-function initiate_logout(error = "") {
+function initiate_logout(oauth, error = "") {
     clear_pref('auth');
-    clear_cookie_value('auth');
-    renderWarningMessageInLoginStatus(error);
+    clear_cookie_value('auth');    
+    renderWarningMessageInLoginStatus(oauth, error);
 }
 function check_bad_response(req, full_page_404) {
     // 1223 == 204 - see https://www.enhanceie.com/ie/bugs.asp
@@ -1322,7 +1455,7 @@ function check_bad_response(req, full_page_404) {
 
         if (error == 'bad_request' || error == 'not_found' || error == 'not_authorised' || error == 'not_authorized') {
             if ((req.status == 401 || req.status == 403) && oauth.enabled) {
-              initiate_logout(reason);
+              initiate_logout(oauth, reason);
             } else {
               show_popup('warn', fmt_escape_html(reason));
             }
@@ -1726,4 +1859,13 @@ function get_chart_range_type(arg) {
 
     console.log('[WARNING]: range type not found for arg: ' + arg);
     return 'basic';
+}
+
+function check_version() {
+    let curVersion = sync_get('/version')
+    let storedVersion = get_pref('version')
+    if (!storedVersion || storedVersion != curVersion) {
+        store_pref('version', curVersion)
+        location.reload()
+    }
 }

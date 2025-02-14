@@ -42,6 +42,18 @@
     [{max_connections, 5000}]}],
   [rabbitmq_web_stomp]},
 
+  {use_file_handle_cache_is_off,
+   "web_stomp.use_file_handle_cache = false",
+   [{rabbitmq_web_stomp,
+     [{use_file_handle_cache, false}]}],
+   [rabbitmq_web_stomp]},
+
+  {use_file_handle_cache_is_on,
+   "web_stomp.use_file_handle_cache = true",
+   [{rabbitmq_web_stomp,
+     [{use_file_handle_cache, true}]}],
+   [rabbitmq_web_stomp]},
+
  {ssl_listener,
   "web_stomp.ssl.listener = 127.0.0.4:15672",
   [{rabbitmq_web_stomp,
@@ -67,7 +79,7 @@
              {certfile,"test/config_schema_SUITE_data/certs/cert.pem"},
              {keyfile,"test/config_schema_SUITE_data/certs/key.pem"},
              {cacertfile,"test/config_schema_SUITE_data/certs/cacert.pem"},
-             {password,"changeme"}]}]}],
+             {password,<<"changeme">>}]}]}],
   [rabbitmq_web_stomp]},
 
  {ssl,
@@ -87,7 +99,7 @@
              {certfile,"test/config_schema_SUITE_data/certs/cert.pem"},
              {keyfile,"test/config_schema_SUITE_data/certs/key.pem"},
              {cacertfile,"test/config_schema_SUITE_data/certs/cacert.pem"},
-             {password,"changeme"},
+             {password,<<"changeme">>},
 
              {versions,['tlsv1.2','tlsv1.1']}
             ]}]}],
@@ -124,7 +136,7 @@
              {certfile,"test/config_schema_SUITE_data/certs/cert.pem"},
              {keyfile,"test/config_schema_SUITE_data/certs/key.pem"},
              {cacertfile,"test/config_schema_SUITE_data/certs/cacert.pem"},
-             {password,"changeme"},
+             {password,<<"changeme">>},
 
              {honor_cipher_order,   true},
              {honor_ecc_order,      true},

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_parameter).
@@ -40,8 +40,7 @@ resource_exists(ReqData, Context) ->
      end, ReqData, Context}.
 
 to_json(ReqData, Context) ->
-    rabbit_mgmt_util:reply(rabbit_mgmt_format:parameter(
-        rabbit_mgmt_wm_parameters:fix_shovel_publish_properties(parameter(ReqData))),
+    rabbit_mgmt_util:reply(rabbit_mgmt_format:parameter(parameter(ReqData)),
                            ReqData, Context).
 
 accept_content(ReqData0, Context = #context{user = User}) ->

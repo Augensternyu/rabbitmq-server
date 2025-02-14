@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_web_mqtt_handler).
@@ -12,6 +12,7 @@
 -include_lib("kernel/include/logger.hrl").
 -include_lib("rabbit_common/include/logging.hrl").
 -include_lib("rabbitmq_mqtt/include/rabbit_mqtt.hrl").
+-include_lib("rabbitmq_mqtt/include/rabbit_mqtt_packet.hrl").
 
 -export([
     init/2,
@@ -22,13 +23,14 @@
 ]).
 
 -export([conserve_resources/3]).
+-export([info/2]).
 
 %% cowboy_sub_protocol
 -export([upgrade/4,
          upgrade/5,
          takeover/7]).
 
--type option(T) :: undefined | T.
+-define(APP, rabbitmq_web_mqtt).
 
 -record(state, {
           socket :: {rabbit_proxy_socket, any(), any()} | rabbit_net:socket(),
@@ -40,15 +42,15 @@
           stats_timer :: option(rabbit_event:state()),
           keepalive = rabbit_mqtt_keepalive:init() :: rabbit_mqtt_keepalive:state(),
           conn_name :: option(binary())
-        }).
+         }).
 
 -type state() :: #state{}.
 
 %% Close frame status codes as defined in https://www.rfc-editor.org/rfc/rfc6455#section-7.4.1
 -define(CLOSE_NORMAL, 1000).
+-define(CLOSE_SERVER_GOING_DOWN, 1001).
 -define(CLOSE_PROTOCOL_ERROR, 1002).
 -define(CLOSE_UNACCEPTABLE_DATA_TYPE, 1003).
--define(PROTO_FAMILY, 'Web MQTT').
 
 %% cowboy_sub_protcol
 upgrade(Req, Env, Handler, HandlerState) ->
@@ -73,32 +75,43 @@ init(Req, Opts) ->
         undefined ->
             no_supported_sub_protocol(undefined, Req);
         Protocol ->
-            WsOpts0 = proplists:get_value(ws_opts, Opts, #{}),
-            WsOpts  = maps:merge(#{compress => true}, WsOpts0),
             case lists:member(<<"mqtt">>, Protocol) of
                 false ->
                     no_supported_sub_protocol(Protocol, Req);
                 true ->
-                    {?MODULE,
-                     cowboy_req:set_resp_header(<<"sec-websocket-protocol">>, <<"mqtt">>, Req),
-                     #state{socket = maps:get(proxy_header, Req, undefined)},
-                     WsOpts}
+                    Req1 = cowboy_req:set_resp_header(<<"sec-websocket-protocol">>, <<"mqtt">>, Req),
+                    State = #state{socket = maps:get(proxy_header, Req, undefined),
+                                   stats_timer = rabbit_event:init_stats_timer()},
+                    WsOpts0 = proplists:get_value(ws_opts, Opts, #{}),
+                    WsOpts  = maps:merge(#{compress => true}, WsOpts0),
+                    {?MODULE, Req1, State, WsOpts}
             end
     end.
 
+%% We cannot use a gen_server call, because the handler process is a
+%% special cowboy_websocket process (not a gen_server) which assumes
+%% all gen_server calls are supervisor calls, and does not pass on the
+%% request to this callback module. (see cowboy_websocket:loop/3 and
+%% cowboy_children:handle_supervisor_call/4) However using a generic
+%% gen:call with a special label ?MODULE works fine.
+-spec info(pid(), rabbit_types:info_keys()) ->
+    rabbit_types:infos().
+info(Pid, all) ->
+    info(Pid, ?INFO_ITEMS);
+info(Pid, Items) ->
+    {ok, Res} = gen:call(Pid, ?MODULE, {info, Items}),
+    Res.
 -spec websocket_init(state()) ->
     {cowboy_websocket:commands(), state()} |
     {cowboy_websocket:commands(), state(), hibernate}.
 websocket_init(State0 = #state{socket = Sock}) ->
     logger:set_process_metadata(#{domain => ?RMQLOG_DOMAIN_CONN ++ [web_mqtt]}),
-    ok = file_handle_cache:obtain(),
     case rabbit_net:connection_string(Sock, inbound) of
         {ok, ConnStr} ->
             ConnName = rabbit_data_coercion:to_binary(ConnStr),
             ?LOG_INFO("Accepting Web MQTT connection ~s", [ConnName]),
             _ = rabbit_alarm:register(self(), {?MODULE, conserve_resources, []}),
-            State1 = State0#state{conn_name = ConnName},
-            State = rabbit_event:init_stats_timer(State1, #state.stats_timer),
+            State = State0#state{conn_name = ConnName},
             process_flag(trap_exit, true),
             {[], State, hibernate};
         {error, Reason} ->
@@ -139,8 +152,8 @@ websocket_info({bump_credit, Msg}, State) ->
     handle_credits(State);
 websocket_info({reply, Data}, State) ->
     {[{binary, Data}], State, hibernate};
-websocket_info({stop, CloseCode, Error}, State) ->
-    stop(State, CloseCode, Error);
+websocket_info({stop, CloseCode, Error, SendWill}, State) ->
+    stop({SendWill, State}, CloseCode, Error);
 websocket_info({'EXIT', _, _}, State) ->
     stop(State);
 websocket_info({'$gen_cast', QueueEvent = {queue_event, _, _}},
@@ -153,18 +166,29 @@ websocket_info({'$gen_cast', QueueEvent = {queue_event, _, _}},
                        [State#state.conn_name, Reason]),
             stop(State#state{proc_state = PState})
     end;
-websocket_info({'$gen_cast', duplicate_id}, State = #state{ proc_state = ProcState,
-                                                            conn_name = ConnName }) ->
+websocket_info({'$gen_cast', {duplicate_id, SendWill}},
+               State = #state{proc_state = ProcState,
+                              conn_name = ConnName}) ->
     ?LOG_WARNING("Web MQTT disconnecting a client with duplicate ID '~s' (~p)",
                  [rabbit_mqtt_processor:info(client_id, ProcState), ConnName]),
-    stop(State);
-websocket_info({'$gen_cast', {close_connection, Reason}}, State = #state{ proc_state = ProcState,
-                                                                          conn_name = ConnName }) ->
+    rabbit_mqtt_processor:send_disconnect(?RC_SESSION_TAKEN_OVER, ProcState),
+    defer_close(?CLOSE_NORMAL, SendWill),
+    {[], State};
+websocket_info({'$gen_cast', {close_connection, Reason}},
+               State = #state{proc_state = ProcState,
+                              conn_name = ConnName}) ->
     ?LOG_WARNING("Web MQTT disconnecting client with ID '~s' (~p), reason: ~s",
                  [rabbit_mqtt_processor:info(client_id, ProcState), ConnName, Reason]),
-    stop(State);
+    case Reason of
+        maintenance ->
+            rabbit_mqtt_processor:send_disconnect(?RC_SERVER_SHUTTING_DOWN, ProcState),
+            defer_close(?CLOSE_SERVER_GOING_DOWN),
+            {[], State};
+        _ ->
+            stop(State)
+    end;
 websocket_info({'$gen_cast', {force_event_refresh, Ref}}, State0) ->
-    Infos = infos(?CREATION_EVENT_KEYS, State0),
+    Infos = infos(?EVENT_KEYS, State0),
     rabbit_event:notify(connection_created, Infos, Ref),
     State = rabbit_event:init_stats_timer(State0, #state.stats_timer),
     {[], State, hibernate};
@@ -174,25 +198,32 @@ websocket_info({'$gen_cast', refresh_config},
     PState = rabbit_mqtt_processor:update_trace(ConnName, PState0),
     State = State0#state{proc_state = PState},
     {[], State, hibernate};
-websocket_info({keepalive, Req}, State = #state{keepalive = KState0,
+websocket_info({keepalive, Req}, State = #state{proc_state = ProcState,
+                                                keepalive = KState0,
                                                 conn_name = ConnName}) ->
     case rabbit_mqtt_keepalive:handle(Req, KState0) of
         {ok, KState} ->
             {[], State#state{keepalive = KState}, hibernate};
         {error, timeout} ->
             ?LOG_ERROR("keepalive timeout in Web MQTT connection ~p", [ConnName]),
-            stop(State, ?CLOSE_NORMAL, <<"MQTT keepalive timeout">>);
+            rabbit_mqtt_processor:send_disconnect(?RC_KEEP_ALIVE_TIMEOUT, ProcState),
+            defer_close(?CLOSE_NORMAL),
+            {[], State};
         {error, Reason} ->
             ?LOG_ERROR("keepalive error in Web MQTT connection ~p: ~p",
                        [ConnName, Reason]),
             stop(State)
     end;
+websocket_info(credential_expired,
+               State = #state{proc_state = ProcState,
+                              conn_name = ConnName}) ->
+    ?LOG_WARNING("Web MQTT disconnecting client with ID '~s' (~p) because credential expired",
+                 [rabbit_mqtt_processor:info(client_id, ProcState), ConnName]),
+    rabbit_mqtt_processor:send_disconnect(?RC_MAXIMUM_CONNECT_TIME, ProcState),
+    defer_close(?CLOSE_NORMAL),
+    {[], State};
 websocket_info(emit_stats, State) ->
     {[], emit_stats(State), hibernate};
-websocket_info({ra_event, _From, Evt},
-               #state{proc_state = PState0} = State) ->
-    PState = rabbit_mqtt_processor:handle_ra_event(Evt, PState0),
-    {[], State#state{proc_state = PState}, hibernate};
 websocket_info({{'DOWN', _QName}, _MRef, process, _Pid, _Reason} = Evt,
                State = #state{proc_state = PState0}) ->
     case rabbit_mqtt_processor:handle_down(Evt, PState0) of
@@ -209,9 +240,13 @@ websocket_info({shutdown, Reason}, #state{conn_name = ConnName} = State) ->
     ?LOG_INFO("Web MQTT closing connection ~tp: ~tp", [ConnName, Reason]),
     stop(State, ?CLOSE_NORMAL, Reason);
 websocket_info(connection_created, State) ->
-    Infos = infos(?CREATION_EVENT_KEYS, State),
+    Infos = infos(?EVENT_KEYS, State),
     rabbit_core_metrics:connection_created(self(), Infos),
     rabbit_event:notify(connection_created, Infos),
+    {[], State, hibernate};
+websocket_info({?MODULE, From, {info, Items}}, State) ->
+    Infos = infos(Items, State),
+    gen:reply(From, Infos),
     {[], State, hibernate};
 websocket_info(Msg, State) ->
     ?LOG_WARNING("Web MQTT: unexpected message ~tp", [Msg]),
@@ -226,12 +261,12 @@ terminate(_Reason, _Request,
     ?LOG_INFO("Web MQTT closing connection ~ts", [ConnName]),
     maybe_emit_stats(State),
     _ = rabbit_mqtt_keepalive:cancel_timer(KState),
-    ok = file_handle_cache:release(),
     case PState of
         connect_packet_unprocessed ->
             ok;
         _ ->
-            rabbit_mqtt_processor:terminate(SendWill, ConnName, ?PROTO_FAMILY, PState)
+            Infos = infos(?EVENT_KEYS, State),
+            rabbit_mqtt_processor:terminate(SendWill, Infos, PState)
     end.
 
 %% Internal.
@@ -239,7 +274,9 @@ terminate(_Reason, _Request,
 no_supported_sub_protocol(Protocol, Req) ->
     %% The client MUST include “mqtt” in the list of WebSocket Sub Protocols it offers [MQTT-6.0.0-3].
     ?LOG_ERROR("Web MQTT: 'mqtt' not included in client offered subprotocols: ~tp", [Protocol]),
-    {ok, cowboy_req:reply(400, #{<<"connection">> => <<"close">>}, Req), #state{}}.
+    {ok,
+     cowboy_req:reply(400, #{<<"connection">> => <<"close">>}, Req),
+     #state{}}.
 
 handle_data(Data, State0 = #state{}) ->
     case handle_data1(Data, State0) of
@@ -255,12 +292,12 @@ handle_data1(Data, State = #state{socket = Socket,
                                   parse_state = ParseState,
                                   proc_state = ProcState,
                                   conn_name = ConnName}) ->
-    case parse(Data, ParseState) of
+    try rabbit_mqtt_packet:parse(Data, ParseState) of
         {more, ParseState1} ->
             {ok, ensure_stats_timer(
                    control_throttle(
                      State#state{parse_state = ParseState1})), hibernate};
-        {ok, Packet, Rest} ->
+        {ok, Packet, Rest, ParseState1} ->
             case ProcState of
                 connect_packet_unprocessed ->
                     case rabbit_mqtt_processor:init(Packet, rabbit_net:unwrap_socket(Socket),
@@ -269,40 +306,50 @@ handle_data1(Data, State = #state{socket = Socket,
                             ?LOG_INFO("Accepted Web MQTT connection ~ts for client ID ~ts",
                                       [ConnName, rabbit_mqtt_processor:info(client_id, ProcState1)]),
                             handle_data1(
-                              Rest, State#state{parse_state = rabbit_mqtt_packet:reset_state(),
+                              Rest, State#state{parse_state = ParseState1,
                                                 proc_state = ProcState1});
                         {error, Reason} ->
                             ?LOG_ERROR("Rejected Web MQTT connection ~ts: ~p", [ConnName, Reason]),
-                            self() ! {stop, ?CLOSE_PROTOCOL_ERROR, connect_packet_rejected},
-                            {[], {_SendWill = false, State}}
+                            self() ! {stop, ?CLOSE_PROTOCOL_ERROR, connect_packet_rejected,
+                                      _SendWill = false},
+                            {[], State}
                     end;
                 _ ->
                     case rabbit_mqtt_processor:process_packet(Packet, ProcState) of
                         {ok, ProcState1} ->
                             handle_data1(
                               Rest,
-                              State#state{parse_state = rabbit_mqtt_packet:reset_state(),
+                              State#state{parse_state = ParseState1,
                                           proc_state = ProcState1});
                         {error, Reason, _} ->
                             stop_mqtt_protocol_error(State, Reason, ConnName);
-                        {stop, disconnect, ProcState1} ->
-                            stop({_SendWill = false, State#state{proc_state = ProcState1}})
+                        {stop, {disconnect, server_initiated}, _} ->
+                            defer_close(?CLOSE_PROTOCOL_ERROR),
+                            {[], State};
+                        {stop, {disconnect, {client_initiated, SendWill}}, ProcState1} ->
+                            stop({SendWill, State#state{proc_state = ProcState1}})
                     end
             end;
+        {error, {disconnect_reason_code, ReasonCode}} ->
+            rabbit_mqtt_processor:send_disconnect(ReasonCode, ProcState),
+            defer_close(?CLOSE_PROTOCOL_ERROR),
+            {[], State};
         {error, Reason} ->
             stop_mqtt_protocol_error(State, Reason, ConnName)
+    catch _:Reason:Stacktrace ->
+              ?LOG_DEBUG("Web MQTT cannot parse a packet, reason: ~tp, "
+                         "stacktrace: ~tp, payload (first 100 bytes): ~tp",
+                         [Reason, Stacktrace, rabbit_mqtt_util:truncate_binary(Data, 100)]),
+              stop_mqtt_protocol_error(State, cannot_parse, ConnName)
     end.
 
-parse(Data, ParseState) ->
-    try
-        rabbit_mqtt_packet:parse(Data, ParseState)
-    catch
-        _:Reason:Stacktrace ->
-            ?LOG_DEBUG("Web MQTT cannot parse a packet, reason: ~tp, stacktrace: ~tp, "
-                       "payload (first 100 bytes): ~tp",
-                       [Reason, Stacktrace, rabbit_mqtt_util:truncate_binary(Data, 100)]),
-            {error, cannot_parse}
-    end.
+%% Allow DISCONNECT packet to be sent to client before closing the connection.
+defer_close(CloseStatusCode) ->
+    defer_close(CloseStatusCode, true).
+
+defer_close(CloseStatusCode, SendWill) ->
+    self() ! {stop, CloseStatusCode, server_initiated_disconnect, SendWill},
+    ok.
 
 stop_mqtt_protocol_error(State, Reason, ConnName) ->
     ?LOG_WARNING("Web MQTT protocol error ~tp for connection ~tp", [Reason, ConnName]),
@@ -395,7 +442,7 @@ i(reductions, _) ->
 i(garbage_collection, _) ->
     rabbit_misc:get_gc_info(self());
 i(protocol, #state{proc_state = PState}) ->
-    {?PROTO_FAMILY, rabbit_mqtt_processor:proto_version_tuple(PState)};
+    {'Web MQTT', rabbit_mqtt_processor:proto_version_tuple(PState)};
 i(SSL, #state{socket = Sock})
   when SSL =:= ssl;
        SSL =:= ssl_protocol;

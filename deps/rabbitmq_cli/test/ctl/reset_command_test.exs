@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule ResetCommandTest do
   use ExUnit.Case, async: false
@@ -44,7 +44,17 @@ defmodule ResetCommandTest do
   test "run: reset request to an active node with a running rabbit app fails", context do
     add_vhost("some_vhost")
     assert vhost_exists?("some_vhost")
-    assert match?({:error, :mnesia_unexpectedly_running}, @command.run([], context[:opts]))
+    node = get_rabbit_hostname()
+    ret = @command.run([], context[:opts])
+
+    case :rabbit_misc.rpc_call(node, :rabbit_khepri, :is_enabled, []) do
+      true ->
+        assert match?({:error, :rabbitmq_unexpectedly_running}, ret)
+
+      false ->
+        assert match?({:error, :mnesia_unexpectedly_running}, ret)
+    end
+
     assert vhost_exists?("some_vhost")
   end
 

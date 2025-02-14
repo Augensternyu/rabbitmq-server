@@ -27,7 +27,7 @@
         if (vhosts[i].cluster_state[vhost_status_node] != 'running') {
 %>
 <p class="warning">
-  Virtual host <b><%= vhosts[i].name %></b> experienced an error on node <b><%= vhost_status_node %></b> and may be inaccessible
+  Virtual host <b><%= fmt_string(vhosts[i].name) %></b> experienced an error on node <b><%= fmt_string(vhost_status_node) %></b> and may be inaccessible
 </p>
 <% }}} %>
 </div>
@@ -84,9 +84,6 @@
   <% if (show_column('overview', 'file_descriptors')) { %>
     <th>File descriptors <span class="help" id="file-descriptors"></span></th>
   <% } %>
-  <% if (show_column('overview', 'socket_descriptors')) { %>
-    <th>Socket descriptors <span class="help" id="socket-descriptors"></span></th>
-  <% } %>
   <% if (show_column('overview', 'erlang_processes')) { %>
     <th>Erlang processes</th>
   <% } %>
@@ -98,6 +95,9 @@
   <% } %>
   <% if (show_column('overview', 'uptime')) { %>
     <th>Uptime</th>
+  <% } %>
+  <% if (show_column('overview', 'cores')) { %>
+    <th>Cores</th>
   <% } %>
   <% if (show_column('overview', 'info')) { %>
     <th>Info</th>
@@ -150,11 +150,6 @@
     <% } %>
      </td>
   <% } %>
-  <% if (show_column('overview', 'socket_descriptors')) { %>
-     <td>
-        <%= node_stat_count_bar('sockets_used', 'sockets_total', node, FD_THRESHOLDS) %>
-     </td>
-  <% } %>
   <% if (show_column('overview', 'erlang_processes')) { %>
      <td>
 
@@ -188,14 +183,15 @@
   <% if (show_column('overview', 'uptime')) { %>
      <td><span><%= fmt_uptime(node.uptime) %></span></td>
   <% } %>
+  <% if (show_column('overview', 'cores')) { %>
+     <td><span><%= fmt_string(node.processors) %></span></td>
+  <% } %>
   <% if (show_column('overview', 'info')) { %>
      <td>
-         <abbr title="Message rates"><%= fmt_string(node.rates_mode) %></abbr>
-       <% if (node.type == 'disc') { %>
-         <abbr title="Broker definitions are held on disc.">disc</abbr>
-       <% } else { %>
-         <abbr title="Broker definitions are held in RAM. Messages will still be written to disc if necessary.">RAM</abbr>
+       <% if (node.being_drained) { %>
+         <abbr class="status-yellow" title="Node was put under maintenance">maintenance mode</abbr>
        <% } %>
+         <abbr title="Message rates"><%= fmt_string(node.rates_mode) %></abbr>
        <%= fmt_plugins_small(node) %>
         <abbr title="Memory calculation strategy"><%= fmt_string(node.mem_calculation_strategy) %></abbr>
      </td>

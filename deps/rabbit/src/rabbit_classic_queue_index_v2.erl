@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_classic_queue_index_v2).
@@ -41,18 +41,7 @@
 -define(HEADER_SIZE, 64). %% bytes
 -define(ENTRY_SIZE,  32). %% bytes
 
-%% The file_handle_cache module tracks reservations at
-%% the level of the process. This means we cannot
-%% handle them independently in the store and index.
-%% Because the index may reserve more FDs than the
-%% store the index becomes responsible for this and
-%% will always reserve at least 2 FDs, and release
-%% everything when terminating.
--define(STORE_FD_RESERVATIONS, 2).
-
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("kernel/include/file.hrl").
-
 %% Set to true to get an awful lot of debug logs.
 -if(false).
 -define(DEBUG(X,Y), logger:debug("~0p: " ++ X, [?FUNCTION_NAME|Y])).
@@ -196,9 +185,10 @@ init_for_conversion(#resource{ virtual_host = VHost } = Name, OnSyncFun, OnSyncM
 
 init1(Name, Dir, OnSyncFun, OnSyncMsgFun) ->
     ensure_queue_name_stub_file(Name, Dir),
+    DirBin = rabbit_file:filename_to_binary(Dir),
     #qi{
         queue_name = Name,
-        dir = rabbit_file:filename_to_binary(Dir),
+        dir = << DirBin/binary, "/" >>,
         on_sync = OnSyncFun,
         on_sync_msg = OnSyncMsgFun
     }.
@@ -539,7 +529,6 @@ terminate(VHost, Terms, State0 = #qi { dir = Dir,
         ok = file:sync(Fd),
         ok = file:close(Fd)
     end, OpenFds),
-    file_handle_cache:release_reservation(),
     %% Write recovery terms for faster recovery.
     _ = rabbit_recovery_terms:store(VHost,
                                 filename:basename(rabbit_file:binary_to_filename(Dir)),
@@ -556,7 +545,6 @@ delete_and_terminate(State = #qi { dir = Dir,
     _ = maps:map(fun(_, Fd) ->
         ok = file:close(Fd)
     end, OpenFds),
-    file_handle_cache:release_reservation(),
     %% Erase the data on disk.
     ok = erase_index_dir(rabbit_file:binary_to_filename(Dir)),
     State#qi{ segments = #{},
@@ -627,18 +615,9 @@ new_segment_file(Segment, SegmentEntryCount, State = #qi{ segments = Segments })
 %% using too many FDs when the consumer lags a lot. We
 %% limit at 4 because we try to keep up to 2 for reading
 %% and 2 for writing.
-reduce_fd_usage(SegmentToOpen, State = #qi{ fds = OpenFds })
+reduce_fd_usage(_SegmentToOpen, State = #qi{ fds = OpenFds })
         when map_size(OpenFds) < 4 ->
-    %% The only case where we need to update reservations is
-    %% when we are opening a segment that wasn't already open,
-    %% and we are not closing another segment at the same time.
-    case OpenFds of
-        #{SegmentToOpen := _} ->
-            State;
-        _ ->
-            file_handle_cache:set_reservation(?STORE_FD_RESERVATIONS + map_size(OpenFds) + 1),
-            State
-    end;
+    State;
 reduce_fd_usage(SegmentToOpen, State = #qi{ fds = OpenFds0 }) ->
     case OpenFds0 of
         #{SegmentToOpen := _} ->
@@ -720,7 +699,6 @@ flush_buffer(State0 = #qi { write_buffer = WriteBuffer0,
         {Fd, FoldState} = get_fd_for_segment(Segment, FoldState1),
         LocBytes = flush_buffer_consolidate(lists:sort(LocBytes0), 1),
         ok = file:pwrite(Fd, LocBytes),
-        file_handle_cache_stats:update(queue_index_write),
         FoldState
     end, State0, Writes),
     %% Update the cache. If we are flushing the entire write buffer,
@@ -869,7 +847,6 @@ delete_segment(Segment, State0 = #qi{ fds = OpenFds0 }) ->
     State = case maps:take(Segment, OpenFds0) of
         {Fd, OpenFds} ->
             ok = file:close(Fd),
-            file_handle_cache:set_reservation(?STORE_FD_RESERVATIONS + map_size(OpenFds)),
             State0#qi{ fds = OpenFds };
         error ->
             State0
@@ -983,7 +960,6 @@ read_from_disk(SeqIdsToRead0, State0 = #qi{ write_buffer = WriteBuffer }, Acc0) 
     ReadSize = (LastSeqId - FirstSeqId + 1) * ?ENTRY_SIZE,
     case get_fd(FirstSeqId, State0) of
         {Fd, OffsetForSeqId, State} ->
-            file_handle_cache_stats:update(queue_index_read),
             %% When reading further than the end of a partial file,
             %% file:pread/3 will return what it could read.
             case file:pread(Fd, OffsetForSeqId, ReadSize) of
@@ -1077,7 +1053,7 @@ sync(State0 = #qi{ confirms = Confirms,
     end,
     State#qi{ confirms = sets:new([{version,2}]) }.
 
--spec needs_sync(state()) -> 'false'.
+-spec needs_sync(state()) -> 'false' | 'confirms'.
 
 needs_sync(State = #qi{ confirms = Confirms }) ->
     ?DEBUG("~0p", [State]),
@@ -1114,11 +1090,8 @@ queue_index_walker({start, DurableQueues}) when is_list(DurableQueues) ->
          ok = gatherer:fork(Gatherer),
          ok = worker_pool:submit_async(
                 fun () -> link(Gatherer),
-                          try
-                              queue_index_walker_reader(QueueName, Gatherer)
-                          after
-                              unlink(Gatherer)
-                          end,
+                          ok = queue_index_walker_reader(QueueName, Gatherer),
+                          unlink(Gatherer),
                           ok
                 end)
      end || QueueName <- DurableQueues],
@@ -1129,8 +1102,11 @@ queue_index_walker({next, Gatherer}) when is_pid(Gatherer) ->
         empty ->
             ok = gatherer:stop(Gatherer),
             finished;
+        %% From v1 index walker. @todo Remove when no longer possible to convert from v1.
         {value, {MsgId, Count}} ->
-            {MsgId, Count, {next, Gatherer}}
+            {MsgId, Count, {next, Gatherer}};
+        {value, MsgIds} ->
+            {MsgIds, {next, Gatherer}}
     end.
 
 queue_index_walker_reader(#resource{ virtual_host = VHost } = Name, Gatherer) ->
@@ -1157,27 +1133,30 @@ queue_index_walker_segment(F, Gatherer) ->
         {ok, <<?MAGIC:32,?VERSION:8,
                FromSeqId:64/unsigned,ToSeqId:64/unsigned,
                _/bits>>} ->
-            queue_index_walker_segment(Fd, Gatherer, 0, ToSeqId - FromSeqId);
+            queue_index_walker_segment(Fd, Gatherer, 0, ToSeqId - FromSeqId, []);
         _ ->
             %% Invalid segment file. Skip.
             ok
     end,
     ok = file:close(Fd).
 
-queue_index_walker_segment(_, _, N, N) ->
+queue_index_walker_segment(_, Gatherer, N, N, Acc) ->
     %% We reached the end of the segment file.
+    gatherer:sync_in(Gatherer, Acc),
     ok;
-queue_index_walker_segment(Fd, Gatherer, N, Total) ->
+queue_index_walker_segment(Fd, Gatherer, N, Total, Acc) ->
     case file:read(Fd, ?ENTRY_SIZE) of
         %% We found a non-ack persistent entry. Gather it.
         {ok, <<1,_:7,1:1,_,1,Id:16/binary,_/bits>>} ->
-            gatherer:sync_in(Gatherer, {Id, 1}),
-            queue_index_walker_segment(Fd, Gatherer, N + 1, Total);
+            queue_index_walker_segment(Fd, Gatherer, N + 1, Total, [Id|Acc]);
         %% We found an ack, a transient entry or a non-entry. Skip it.
         {ok, _} ->
-            queue_index_walker_segment(Fd, Gatherer, N + 1, Total);
+            queue_index_walker_segment(Fd, Gatherer, N + 1, Total, Acc);
         %% We reached the end of a partial segment file.
+        eof when Acc =:= [] ->
+            ok;
         eof ->
+            gatherer:sync_in(Gatherer, Acc),
             ok
     end.
 
@@ -1256,7 +1235,7 @@ segment_entry_count() ->
     %% A value lower than the max write_buffer size results in nothing needing
     %% to be written to disk as long as the consumer consumes as fast as the
     %% producer produces.
-    persistent_term:get({rabbit, classic_queue_index_v2_segment_entry_count}, 4096).
+    persistent_term:get(classic_queue_index_v2_segment_entry_count, 4096).
 
 %% Note that store files will also be removed if there are any in this directory.
 %% Currently the v2 per-queue store expects this function to remove its own files.
@@ -1280,8 +1259,8 @@ queue_name_to_dir_name(#resource { kind = queue,
     rabbit_misc:format("~.36B", [Num]).
 
 segment_file(Segment, #qi{ dir = Dir }) ->
-    filename:join(rabbit_file:binary_to_filename(Dir),
-                  integer_to_list(Segment) ++ ?SEGMENT_EXTENSION).
+    N = integer_to_binary(Segment),
+    <<Dir/binary, N/binary, ?SEGMENT_EXTENSION>>.
 
 highest_continuous_seq_id([SeqId|Tail], EndSeqId)
         when (1 + SeqId) =:= EndSeqId ->

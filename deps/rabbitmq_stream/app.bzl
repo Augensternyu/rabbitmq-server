@@ -16,6 +16,7 @@ def all_beam_files(name = "all_beam_files"):
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamConsumersCommand.erl",
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamGroupConsumersCommand.erl",
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamPublishersCommand.erl",
+            "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamTrackingCommand.erl",
             "src/rabbit_stream.erl",
             "src/rabbit_stream_connection_sup.erl",
             "src/rabbit_stream_manager.erl",
@@ -55,6 +56,7 @@ def all_test_beam_files(name = "all_test_beam_files"):
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamConsumersCommand.erl",
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamGroupConsumersCommand.erl",
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamPublishersCommand.erl",
+            "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamTrackingCommand.erl",
             "src/rabbit_stream.erl",
             "src/rabbit_stream_connection_sup.erl",
             "src/rabbit_stream_manager.erl",
@@ -93,6 +95,7 @@ def all_srcs(name = "all_srcs"):
     )
     filegroup(
         name = "private_hdrs",
+        srcs = ["src/rabbit_stream_reader.hrl"],
     )
     filegroup(
         name = "srcs",
@@ -104,6 +107,7 @@ def all_srcs(name = "all_srcs"):
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamConsumersCommand.erl",
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamGroupConsumersCommand.erl",
             "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamPublishersCommand.erl",
+            "src/Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamTrackingCommand.erl",
             "src/rabbit_stream.erl",
             "src/rabbit_stream_connection_sup.erl",
             "src/rabbit_stream_manager.erl",
@@ -171,4 +175,34 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         app_name = "rabbitmq_stream",
         erlc_opts = "//:test_erlc_opts",
         deps = ["//deps/rabbit_common:erlang_app"],
+    )
+    erlang_bytecode(
+        name = "rabbit_stream_reader_SUITE_beam_files",
+        testonly = True,
+        srcs = ["test/rabbit_stream_reader_SUITE.erl"],
+        outs = ["test/rabbit_stream_reader_SUITE.beam"],
+        hdrs = ["src/rabbit_stream_reader.hrl"],
+        app_name = "rabbitmq_stream",
+        erlc_opts = "//:test_erlc_opts",
+        deps = [
+            "//deps/rabbit_common:erlang_app",  #keep
+            "//deps/rabbitmq_stream_common:erlang_app",
+        ],
+    )
+    erlang_bytecode(
+        name = "protocol_interop_SUITE_beam_files",
+        testonly = True,
+        srcs = ["test/protocol_interop_SUITE.erl"],
+        outs = ["test/protocol_interop_SUITE.beam"],
+        app_name = "rabbitmq_stream",
+        erlc_opts = "//:test_erlc_opts",
+        deps = ["//deps/amqp10_common:erlang_app", "//deps/amqp_client:erlang_app"],
+    )
+    erlang_bytecode(
+        name = "test_rabbit_list_test_event_handler_beam",
+        testonly = True,
+        srcs = ["test/rabbit_list_test_event_handler.erl"],
+        outs = ["test/rabbit_list_test_event_handler.beam"],
+        app_name = "rabbitmq_stream",
+        erlc_opts = "//:test_erlc_opts",
     )

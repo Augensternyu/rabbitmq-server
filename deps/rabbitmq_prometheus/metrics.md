@@ -80,8 +80,9 @@ To generate these:
 Metrics `rabbitmq_global_messages_dead_lettered_*` have labels `queue_type` and `dead_letter_strategy`.
 
 Label `queue_type` denotes the type of queue messages were discarded from. It can have value
-* `rabbit_classic_queue`, or
-* `rabbit_quorum_queue`
+* `rabbit_classic_queue`,
+* `rabbit_quorum_queue`, or
+* `rabbit_mqtt_qos0_queue`
 
 (Queue type `rabbit_stream_queue` does not dead letter messages.)
 
@@ -131,9 +132,7 @@ These metrics are specific to the stream protocol.
 | rabbitmq_disk_space_available_limit_bytes | Free disk space low watermark in bytes             |
 | rabbitmq_identity_info                    | RabbitMQ node & cluster identity info              |
 | rabbitmq_process_max_fds                  | Open file descriptors limit                        |
-| rabbitmq_process_max_tcp_sockets          | Open TCP sockets limit                             |
 | rabbitmq_process_open_fds                 | Open file descriptors                              |
-| rabbitmq_process_open_tcp_sockets         | Open TCP sockets                                   |
 | rabbitmq_process_resident_memory_bytes    | Memory used in bytes                               |
 | rabbitmq_resident_memory_limit_bytes      | Memory high watermark in bytes                     |
 
@@ -256,6 +255,12 @@ These metrics are specific to the stream protocol.
 | rabbitmq_raft_log_last_written_index       | Raft log last written index             |
 | rabbitmq_raft_log_snapshot_index           | Raft log snapshot index                 |
 | rabbitmq_raft_term_total                   | Current Raft term number                |
+
+### Federation
+
+| Metric                                     | Description                                    |
+| ---                                        | ---                                            |
+| rabbitmq_federation_links                 | Federations Links count grouped by Link status |
 
 ## Telemetry
 

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(system_SUITE).
@@ -142,9 +142,7 @@ init_per_group(Group, Config) ->
                                               base_conf_ldap(LdapPort,
                                                              idle_timeout(Group),
                                                              pool_size(Group))),
-    Logon = {"localhost", LdapPort},
-    rabbit_ldap_seed:delete(Logon),
-    rabbit_ldap_seed:seed(Logon),
+    rabbit_ldap_seed:seed({"localhost", LdapPort}),
     Config4 = rabbit_ct_helpers:set_config(Config3, {ldap_port, LdapPort}),
 
     rabbit_ct_helpers:run_steps(Config4,

@@ -84,6 +84,9 @@ against the URIs listed in the configuration file. It will add query string
 * `username`: the name of the user
 * `password`: the password provided (may be missing if e.g. rabbitmq-auth-mechanism-ssl is used)
 
+Note: This request may include additional http request parameters in addition to the ones listed above.
+For instance, if the user accessed RabbitMQ via the MQTT protocol, it is expected `client_id` and `vhost` request parameters too.
+
 ### vhost_path
 
 * `username`: the name of the user
@@ -99,6 +102,9 @@ Note that you cannot create arbitrary virtual hosts using this plugin; you can o
 * `resource`: the type of resource (`exchange`, `queue`, `topic`)
 * `name`: the name of the resource
 * `permission`:the access level to the resource (`configure`, `write`, `read`): see [the Access Control guide](http://www.rabbitmq.com/access-control.html) for their meaning
+
+Note: This request may include additional http request parameters in addition to the ones listed above.
+For instance, if the user accessed RabbitMQ via the MQTT protocol, it is expected `client_id` request parameter too.
 
 ### topic_path
 
@@ -151,6 +157,27 @@ If the certificate of your Web Server should be matched against a wildcard certi
 
 ``` erl
 {customize_hostname_check, [{match_fun,public_key:pkix_verify_hostname_match_fun(https)}]}
+```
+
+## Tuning HTTP client timeouts
+
+You can configure the request timeout and connection timeout (see `timeout` and `connect_timeout` respectively in Erlang/OTP [httpc documentation](https://www.erlang.org/doc/apps/inets/httpc.html#request/5)). The default value is 15 seconds for both.
+
+In `rabbitmq.conf`:
+
+```
+auth_http.request_timeout=20000
+auth_http.connection_timeout=10000
+```
+
+In the [`advanced.config` format](https://www.rabbitmq.com/configure.html#advanced-config-file):
+
+```
+{rabbitmq_auth_backend_http,
+    [{request_timeout, 20_000},
+     {connection_timeout, 10_000},
+     ...
+]}
 ```
 
 ## Debugging

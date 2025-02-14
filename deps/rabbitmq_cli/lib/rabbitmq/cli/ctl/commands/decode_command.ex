@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 alias RabbitMQ.CLI.Core.Helpers
 
@@ -86,6 +86,8 @@ defmodule RabbitMQ.CLI.Ctl.Commands.DecodeCommand do
           {:ok, result}
         catch
           _, _ ->
+            IO.inspect(__STACKTRACE__)
+
             {:error,
              "Failed to decrypt the value. Things to check: is the passphrase correct? Are the cipher and hash algorithms the same as those used for encryption?"}
         end
@@ -109,6 +111,8 @@ defmodule RabbitMQ.CLI.Ctl.Commands.DecodeCommand do
       {:ok, result}
     catch
       _, _ ->
+        IO.inspect(__STACKTRACE__)
+
         {:error,
          "Failed to decrypt the value. Things to check: is the passphrase correct? Are the cipher and hash algorithms the same as those used for encryption?"}
     end
@@ -117,7 +121,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.DecodeCommand do
   def formatter(), do: RabbitMQ.CLI.Formatters.Erlang
 
   def banner(_, _) do
-    "Decrypting value..."
+    "Decrypting an advanced.config (Erlang term) value..."
   end
 
   def usage,
@@ -125,7 +129,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.DecodeCommand do
 
   def usage_additional() do
     [
-      ["<value>", "config value to decode"],
+      ["<value>", "advanced.config (Erlang term) value to decode"],
       ["<passphrase>", "passphrase to use with the config value encryption key"],
       ["--cipher <cipher>", "cipher suite to use"],
       ["--hash <hash>", "hashing function to use"],
@@ -141,7 +145,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.DecodeCommand do
 
   def help_section(), do: :configuration
 
-  def description(), do: "Decrypts an encrypted configuration value"
+  def description(), do: "Decrypts an encrypted advanced.config value"
 
   #
   # Implementation

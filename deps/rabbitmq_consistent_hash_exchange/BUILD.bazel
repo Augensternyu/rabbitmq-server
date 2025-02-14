@@ -24,8 +24,6 @@ APP_DESCRIPTION = "Consistent Hash Exchange Type"
 
 all_beam_files(name = "all_beam_files")
 
-all_test_beam_files(name = "all_test_beam_files")
-
 all_srcs(name = "all_srcs")
 
 test_suite_beam_files(name = "test_suite_beam_files")
@@ -43,6 +41,8 @@ rabbitmq_app(
     deps = [
         "//deps/rabbit:erlang_app",
         "//deps/rabbit_common:erlang_app",
+        "@khepri//:erlang_app",
+        "@khepri_mnesia_migration//:erlang_app",
     ],
 )
 
@@ -61,7 +61,7 @@ plt(
     ],
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
     deps = ["//deps/rabbitmq_cli:erlang_app"],  # keep
 )
@@ -82,7 +82,9 @@ broker_for_integration_suites()
 
 rabbitmq_integration_suite(
     name = "rabbit_exchange_type_consistent_hash_SUITE",
-    shard_count = 3,
+    runtime_deps = [
+        "//deps/rabbitmq_amqp_client:erlang_app",
+    ],
 )
 
 assert_suites()
@@ -92,3 +94,5 @@ alias(
     actual = ":erlang_app",
     visibility = ["//visibility:public"],
 )
+
+all_test_beam_files(name = "all_test_beam_files")

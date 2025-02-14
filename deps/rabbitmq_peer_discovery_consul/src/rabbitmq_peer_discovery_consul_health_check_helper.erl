@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% This gen_server starts a periodic timer on behalf of
@@ -33,12 +33,17 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
-    case rabbit_peer_discovery:backend() of
-        rabbit_peer_discovery_consul ->
-            set_up_periodic_health_check();
-        rabbitmq_peer_discovery_consul ->
-            set_up_periodic_health_check();
-        _ ->
+    case rabbit_peer_discovery:should_perform_registration() of
+        true ->
+            case rabbit_peer_discovery:backend() of
+                rabbit_peer_discovery_consul ->
+                    set_up_periodic_health_check();
+                rabbitmq_peer_discovery_consul ->
+                    set_up_periodic_health_check();
+                _ ->
+                    {ok, #state{}}
+            end;
+        false ->
             {ok, #state{}}
     end.
 

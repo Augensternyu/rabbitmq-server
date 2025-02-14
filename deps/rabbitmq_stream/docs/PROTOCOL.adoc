@@ -230,6 +230,16 @@ used to make the difference between a request (0) and a response (1). Example fo
 |0x001c
 |Yes
 
+|<<createsuperstream>>
+|Client
+|0x001d
+|Yes
+
+|<<deletesuperstream>>
+|Client
+|0x001e
+|Yes
+
 |===
 
 === DeclarePublisher
@@ -252,6 +262,8 @@ DeclarePublisherResponse => Key Version CorrelationId ResponseCode
 
 === Publish
 
+Version 1
+
 ```
 Publish => Key Version PublisherId PublishedMessages
   Key => uint16 // 0x0002
@@ -262,6 +274,23 @@ Publish => Key Version PublisherId PublishedMessages
   PublishingId => uint64
   Message => bytes
 ```
+
+Version 2
+
+```
+Publish => Key Version PublisherId PublishedMessages
+  Key => uint16 // 0x0002
+  Version => uint16
+  PublisherId => uint8
+  PublishedMessages => [PublishedMessage]
+  PublishedMessage => PublishingId Message
+  PublishingId => uint64
+  FilterValue => string
+  Message => bytes
+```
+
+1. Use version 1 if there is no filter value.
+2. Use version 2 if there is a filter value.
 
 === PublishConfirm
 
@@ -341,6 +370,13 @@ Subscribe => Key Version CorrelationId SubscriptionId Stream OffsetSpecification
 NB: Timestamp is https://www.erlang.org/doc/apps/erts/time_correction.html#Erlang_System_Time[Erlang system time],
 milliseconds from epoch
 
+Supported properties:
+
+* `single-active-consumer`: set to `true` to enable https://blog.rabbitmq.com/posts/2022/07/rabbitmq-3-11-feature-preview-single-active-consumer-for-streams/[single active consumer] for this subscription.
+* `super-stream`: set to the name of the super stream the subscribed is a partition of.
+* `filter.` (e.g. `filter.0`, `filter.1`, etc): prefix to use to define filter values for the subscription.
+* `match-unfiltered`: whether to return messages without any filter value or not.
+
 === Deliver
 
 Version 1
@@ -350,7 +386,7 @@ Deliver => Key Version SubscriptionId OsirisChunk
   Key => uint16 // 0x0008
   Version => uint16
   SubscriptionId => uint8
-  OsirisChunk => MagicVersion NumEntries NumRecords Epoch ChunkFirstOffset ChunkCrc DataLength Messages
+  OsirisChunk => MagicVersion ChunkType NumEntries NumRecords Timestamp Epoch ChunkFirstOffset ChunkCrc DataLength TrailerLength BloomSize Reserved Messages
   MagicVersion => int8
   ChunkType => int8 // 0: user, 1: tracking delta, 2: tracking snapshot
   NumEntries => uint16
@@ -361,8 +397,9 @@ Deliver => Key Version SubscriptionId OsirisChunk
   ChunkCrc => int32
   DataLength => uint32
   TrailerLength => uint32
-  Reserved => unit32 // unused 4 bytes
-  Messages => [Message] // no int32 for the size for this array; the size is defined by NumEntries field above
+  BloomSize => uint8 // size of bloom filter data, ignored at the moment
+  Reserved => uint24 // 24 bits reserved for future use
+  Messages => [Message] // a continous collection of messages, the size of the array is defined by NumEntries
   Message => EntryTypeAndSize
   Data => bytes
 ```
@@ -375,7 +412,7 @@ Deliver => Key Version SubscriptionId CommittedOffset OsirisChunk
   Version => uint16
   SubscriptionId => uint8
   CommittedChunkId => uint64
-  OsirisChunk => MagicVersion NumEntries NumRecords Epoch ChunkFirstOffset ChunkCrc DataLength Messages
+  OsirisChunk => MagicVersion ChunkType NumEntries NumRecords Timestamp Epoch ChunkFirstOffset ChunkCrc DataLength TrailerLength BloomSize Reserved Messages
   MagicVersion => int8
   ChunkType => int8 // 0: user, 1: tracking delta, 2: tracking snapshot
   NumEntries => uint16
@@ -386,14 +423,15 @@ Deliver => Key Version SubscriptionId CommittedOffset OsirisChunk
   ChunkCrc => int32
   DataLength => uint32
   TrailerLength => uint32
-  Reserved => unit32 // unused 4 bytes
-  Messages => [Message] // no int32 for the size for this array; the size is defined by NumEntries field above
+  BloomSize => uint8 // size of bloom filter data, ignored at the moment
+  Reserved => uint24 // 24 bits reserved for future use
+  Messages => [Message] // a continous collection of messages, the size of the array is defined by NumEntries
   Message => EntryTypeAndSize
   Data => bytes
 ```
 
 
-NB: See the https://github.com/rabbitmq/osiris/blob/f32df7563a036b1687c0208a3cb5f9e8f5cee937/src/osiris_log.erl#L101[Osiris project]
+NB: See the https://github.com/rabbitmq/osiris/blob/12a430b11be2c2be3f26ce4f2d7268954c7ec02b/src/osiris_log.erl#L126-L195[Osiris project]
 for details on the structure of messages.
 
 === Credit
@@ -451,6 +489,12 @@ Unsubscribe => Key Version CorrelationId SubscriptionId
   Version => uint16
   CorrelationId => uint32
   SubscriptionId => uint8
+  
+UnsubscribeResponse => Key Version CorrelationId ResponseCode
+  Key => uint16 // 0x800c
+  Version => uint16
+  CorrelationId => uint32
+  ResponseCode => uint16
 ```
 
 === Create
@@ -725,6 +769,31 @@ StreamStatsResponse => Key Version CorrelationId ResponseCode Stats
   Value => int64
 ```
 
+=== CreateSuperStream
+
+```
+CreateSuperStream => Key Version CorrelationId Name [Partition] [BindingKey] Arguments
+  Key => uint16 // 0x001d
+  Version => uint16
+  CorrelationId => uint32
+  Name => string
+  Partition => string
+  BindingKey => string
+  Arguments => [Argument]
+  Argument => Key Value
+  Key => string
+  Value => string
+```
+
+=== DeleteSuperStream
+
+```
+Delete => Key Version CorrelationId Name
+  Key => uint16 // 0x001e
+  Version => uint16
+  CorrelationId => uint32
+  Name => string
+```
 
 == Authentication
 
@@ -769,8 +838,3 @@ The client answers with a `Tune` frame with the settings he agrees on, possibly 
 from the server's suggestions.
 * Open: the client sends an `Open` frame to pick a virtual host to connect to. The server
 answers whether it accepts the access or not.
-
-== Resources
-
-- https://docs.google.com/presentation/d/1Hlv4qaWm2PRU04dVPmShP9wU7TEQEttXdsbV8P54Uvw/edit#slide=id.gdbeadf9676_0_37[RabbitMQ Streams client] : a general guide line to write a streams client
-- https://docs.google.com/presentation/d/1BFwf01LcicZ-SyxE1CycZv2gUQMPFGdtFkVuXhgkoTE/edit#slide=id.p1[RabbitMQ Streams Internals]: how the streams work internally 

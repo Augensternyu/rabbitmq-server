@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQCtlTest do
   use ExUnit.Case, async: false
@@ -121,7 +121,7 @@ defmodule RabbitMQCtlTest do
 
   test "short node name without the host part connects properly" do
     command = ["status", "-n", "rabbit"]
-    capture_io(:stderr, fn -> error_check(command, exit_ok()) end)
+    capture_io(:stdio, fn -> error_check(command, exit_ok()) end)
   end
 
   test "a non-existent command results in help message displayed" do
@@ -168,7 +168,7 @@ defmodule RabbitMQCtlTest do
     capture_io(:stderr, fn -> error_check(command, exit_dataerr()) end)
   end
 
-  test "a mcommand with an unsupported option as the first command-line arg fails gracefully" do
+  test "a command with an unsupported option as the first command-line arg fails gracefully" do
     command1 = ["--invalid=true", "list_permissions", "-p", "/"]
 
     assert capture_io(:stderr, fn ->

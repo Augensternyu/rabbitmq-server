@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 ##
 
 import pika
@@ -27,6 +27,8 @@ class TestUserGeneratedQueueName(base.BaseTest):
                     'x-queue-type': 'stream',
                     'x-max-age' : '10h',
                     'x-stream-max-segment-size-bytes' : 1048576,
+                    'x-stream-filter-size-bytes' : 32,
+                    'x-stream-match-unfiltered' : True,
                     'durable': True,
                     'auto-delete': False,
                     'id': 1234,

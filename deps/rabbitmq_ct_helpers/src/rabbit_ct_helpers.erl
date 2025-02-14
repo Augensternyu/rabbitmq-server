@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_ct_helpers).
@@ -66,14 +66,8 @@
 
 log_environment() ->
     Vars = lists:sort(fun(A, B) -> A =< B end, os:getenv()),
-    case file:native_name_encoding() of
-        latin1 ->
-            ct:pal(?LOW_IMPORTANCE, "Environment variables:~n~ts",
-                   [[io_lib:format("  ~ts~n", [V]) || V <- Vars]]);
-        utf8 ->
-            ct:pal(?LOW_IMPORTANCE, "Environment variables:~n~ts",
-                   [[io_lib:format("  ~ts~n", [V]) || V <- Vars]])
-    end.
+    ct:log(?LOW_IMPORTANCE, "Environment variables:~n~ts",
+           [[io_lib:format("  ~ts~n", [V]) || V <- Vars]]).
 
 run_setup_steps(Config) ->
     run_setup_steps(Config, []).
@@ -84,6 +78,7 @@ run_setup_steps(Config, ExtraSteps) ->
             [
                 fun init_skip_as_error_flag/1,
                 fun guess_tested_erlang_app_name/1,
+                fun ensure_secondary_dist/1,
                 fun ensure_secondary_umbrella/1,
                 fun ensure_current_srcdir/1,
                 fun ensure_rabbitmq_ct_helpers_srcdir/1,
@@ -158,13 +153,13 @@ run_steps(Config, []) ->
     Config.
 
 redirect_logger_to_ct_logs(Config) ->
-    ct:pal(
+    ct:log(
       ?LOW_IMPORTANCE,
       "Configuring logger to send logs to common_test logs"),
-    logger:set_handler_config(cth_log_redirect, level, debug),
+    ok = logger:set_handler_config(cth_log_redirect, level, debug),
 
     %% Let's use the same format as RabbitMQ itself.
-    logger:set_handler_config(
+    ok = logger:set_handler_config(
       cth_log_redirect, formatter,
       rabbit_prelaunch_early_logging:default_file_formatter(#{})),
 
@@ -176,9 +171,9 @@ redirect_logger_to_ct_logs(Config) ->
            cth_log_redirect_any_domains, cth_log_redirect_any_domains,
            LogCfg),
 
-    logger:remove_handler(default),
+    ok = logger:remove_handler(default),
 
-    ct:pal(
+    ct:log(
       ?LOW_IMPORTANCE,
       "Logger configured to send logs to common_test logs; you should see "
       "a message below saying so"),
@@ -206,6 +201,18 @@ guess_tested_erlang_app_name(Config) ->
             AppName = string:strip(AppName0, left, $.),
             set_config(Config, {tested_erlang_app, list_to_atom(AppName)})
     end.
+
+ensure_secondary_dist(Config) ->
+    Path = case get_config(Config, secondary_dist) of
+               undefined -> os:getenv("SECONDARY_DIST");
+               P         -> P
+           end,
+    %% Hard fail if the path is invalid.
+    case Path =:= false orelse filelib:is_dir(Path) of
+        true -> ok;
+        false -> error(secondary_dist_path_invalid)
+    end,
+    set_config(Config, {secondary_dist, Path}).
 
 ensure_secondary_umbrella(Config) ->
     Path = case get_config(Config, secondary_umbrella) of
@@ -423,8 +430,7 @@ ensure_rabbitmq_run_secondary_cmd(Config) ->
     end.
 
 ensure_erl_call_cmd(Config) ->
-    ErlCallDir = code:lib_dir(erl_interface, bin),
-    ErlCall = filename:join(ErlCallDir, "erl_call"),
+    ErlCall = filename:join(code:lib_dir(erl_interface), "bin/erl_call"),
     Cmd = [ErlCall],
     case exec(Cmd, [{match_stdout, "Usage: "}]) of
         {ok, _} -> set_config(Config, {erl_call_cmd, ErlCall});
@@ -440,12 +446,12 @@ ensure_rabbitmqctl_cmd(Config) ->
                 false ->
                     find_script(Config, "rabbitmqctl");
                 R ->
-                    ct:pal(?LOW_IMPORTANCE,
+                    ct:log(?LOW_IMPORTANCE,
                       "Using rabbitmqctl from RABBITMQCTL: ~tp~n", [R]),
                     R
             end;
         R ->
-            ct:pal(?LOW_IMPORTANCE,
+            ct:log(?LOW_IMPORTANCE,
               "Using rabbitmqctl from rabbitmqctl_cmd: ~tp~n", [R]),
             R
     end,
@@ -477,7 +483,7 @@ find_script(Config, Script) ->
                     filelib:is_file(File)],
     case Locations of
         [Location | _] ->
-            ct:pal(?LOW_IMPORTANCE, "Using ~ts at ~tp~n", [Script, Location]),
+            ct:log(?LOW_IMPORTANCE, "Using ~ts at ~tp~n", [Script, Location]),
             Location;
         [] ->
             false
@@ -562,7 +568,7 @@ ensure_rabbitmq_queues_cmd(Config) ->
                 R -> R
             end;
         R ->
-            ct:pal(?LOW_IMPORTANCE,
+            ct:log(?LOW_IMPORTANCE,
               "Using rabbitmq-queues from rabbitmq_queues_cmd: ~tp~n", [R]),
             R
     end,
@@ -591,9 +597,14 @@ ensure_rabbitmq_queues_cmd(Config) ->
 
 ensure_ssl_certs(Config) ->
     SrcDir = ?config(rabbitmq_ct_helpers_srcdir, Config),
+    UniqueDir = io_lib:format(
+                  "~s2-~p",
+                  [node(), erlang:unique_integer([positive,monotonic])]),
     CertsMakeDir = filename:join([SrcDir, "tools", "tls-certs"]),
     PrivDir = ?config(priv_dir, Config),
-    CertsDir = filename:join(PrivDir, "certs"),
+    CertsDir = filename:join([PrivDir, UniqueDir, "certs"]),
+    _ = filelib:ensure_dir(CertsDir),
+    _ = file:make_dir(CertsDir),
     CertsPwd = proplists:get_value(rmq_certspwd, Config, ?SSL_CERT_PASSWORD),
     Cmd = [
       "PASSWORD=" ++ CertsPwd,
@@ -618,7 +629,10 @@ ensure_ssl_certs(Config) ->
                       {verify, Verify},
                       {fail_if_no_peer_cert, FailIfNoPeerCert}
                     ]}]}),
-            set_config(Config1, {rmq_certsdir, CertsDir});
+            set_config(
+              Config1,
+              [{rmq_certsdir, CertsDir},
+               {rmq_certspwd, CertsPwd}]);
         _ ->
             {skip, "Failed to create SSL certificates"}
     end.
@@ -658,12 +672,12 @@ symlink_priv_dir(Config) ->
                     Target = filename:join([SrcDir, "logs", Name]),
                     case exec(["ln", "-snf", PrivDir, Target]) of
                         {ok, _} -> ok;
-                        _ -> ct:pal(?LOW_IMPORTANCE,
+                        _ -> ct:log(?LOW_IMPORTANCE,
                                     "Failed to symlink private_log directory.")
                     end,
                     Config;
                 not_found ->
-                    ct:pal(?LOW_IMPORTANCE,
+                    ct:log(?LOW_IMPORTANCE,
                            "Failed to symlink private_log directory."),
                     Config
             end
@@ -688,9 +702,8 @@ load_elixir(Config) ->
         {skip, _} = Skip ->
             Skip;
         ElixirLibDir ->
-            ct:pal(?LOW_IMPORTANCE, "Elixir lib dir: ~ts~n", [ElixirLibDir]),
+            ct:log(?LOW_IMPORTANCE, "Elixir lib dir: ~ts~n", [ElixirLibDir]),
             true = code:add_pathz(ElixirLibDir),
-            application:load(elixir),
             {ok, _} = application:ensure_all_started(elixir),
             Config
     end.
@@ -725,14 +738,18 @@ long_running_testsuite_monitor(TimerRef, Testcases) ->
             long_running_testsuite_monitor(TimerRef, Testcases1);
         ping_ct ->
             T1 = erlang:monotonic_time(seconds),
-            ct:pal(?STD_IMPORTANCE, "Testcases still in progress:~ts",
-              [[
+            InProgress = [
                   begin
                       TDiff = format_time_diff(T1, T0),
                       rabbit_misc:format("~n - ~ts (~ts)", [TC, TDiff])
                   end
                   || {TC, T0} <- Testcases
-                ]]),
+                ],
+            case InProgress of
+                [] -> ok;
+                _ -> ct:pal(?STD_IMPORTANCE, "Testcases still in progress:~ts",
+                         [InProgress])
+            end,
             long_running_testsuite_monitor(TimerRef, Testcases);
         stop ->
             timer:cancel(TimerRef)
@@ -883,7 +900,10 @@ exec([Cmd | Args], Options) when is_list(Cmd) orelse is_binary(Cmd) ->
             Env1 = [
               begin
                   Key1 = format_arg(Key),
-                  Value1 = format_arg(Value),
+                  Value1 = case Value of
+                               false -> false;
+                               _     -> format_arg(Value)
+                           end,
                   Value2 = case is_binary(Value1) of
                                true  -> binary_to_list(Value1);
                                false -> Value1
@@ -897,15 +917,17 @@ exec([Cmd | Args], Options) when is_list(Cmd) orelse is_binary(Cmd) ->
                | proplists:delete(env, PortOptions1)],
               Log ++ "~n~nEnvironment variables:~n" ++
               string:join(
-                [rabbit_misc:format("  ~ts=~ts", [K, string:replace(V, "~", "~~", all)])
-                 || {K, V} <- Env1],
+                [rabbit_misc:format(
+                   "  ~ts=~ts",
+                   [K, string:replace(V, "~", "~~", all)])
+                 || {K, V} <- Env1, is_list(V) ],
                 "~n")
             }
     end,
     %% Because Args1 may contain binaries, we don't use string:join().
     %% Instead we do a list comprehension.
     ArgsIoList = [Cmd1, [[$\s, Arg] || Arg <- Args1]],
-    ct:pal(?LOW_IMPORTANCE, Log1, [ArgsIoList, self()]),
+    ct:log(?LOW_IMPORTANCE, Log1, [ArgsIoList, self()]),
     try
         Port = erlang:open_port(
           {spawn_executable, Cmd1}, [
@@ -946,15 +968,15 @@ port_receive_loop(Port, Stdout, Options, Until, DumpTimer) ->
             end,
   receive
       {Port, {exit_status, X}} ->
-          timer:cancel(DumpTimer),
+          _ = timer:cancel(DumpTimer),
           DropStdout = lists:member(drop_stdout, Options) orelse
               Stdout =:= "",
           if
               DropStdout ->
-                  ct:pal(?LOW_IMPORTANCE, "Exit code: ~tp (pid ~tp)",
+                  ct:log(?LOW_IMPORTANCE, "Exit code: ~tp (pid ~tp)",
                          [X, self()]);
               true ->
-                  ct:pal(?LOW_IMPORTANCE, "~ts~nExit code: ~tp (pid ~tp)",
+                  ct:log(?LOW_IMPORTANCE, "~ts~nExit code: ~tp (pid ~tp)",
                          [Stdout, X, self()])
           end,
           case proplists:get_value(match_stdout, Options) of
@@ -976,7 +998,7 @@ port_receive_loop(Port, Stdout, Options, Until, DumpTimer) ->
               DropStdout ->
                   ok;
               true ->
-                  ct:pal(?LOW_IMPORTANCE, "~ts~n[Command still in progress] (pid ~tp)",
+                  ct:log(?LOW_IMPORTANCE, "~ts~n[Command still in progress] (pid ~tp)",
                          [Stdout, self()])
           end,
           port_receive_loop(Port, Stdout, Options, Until, stdout_dump_timer());
@@ -1056,11 +1078,13 @@ convert_to_unicode_binary(Arg) when is_binary(Arg) ->
     Arg.
 
 is_mixed_versions() ->
-    os:getenv("SECONDARY_UMBRELLA") =/= false
+    os:getenv("SECONDARY_DIST") =/= false
+        orelse os:getenv("SECONDARY_UMBRELLA") =/= false
         orelse os:getenv("RABBITMQ_RUN_SECONDARY") =/= false.
 
 is_mixed_versions(Config) ->
-    get_config(Config, secondary_umbrella, false) =/= false
+    get_config(Config, secondary_dist, false) =/= false
+        orelse get_config(Config, secondary_umbrella, false) =/= false
         orelse get_config(Config, rabbitmq_run_secondary_cmd, false) =/= false.
 
 %% -------------------------------------------------------------------
@@ -1096,12 +1120,12 @@ eventually({Line, _}, _, 0) ->
 eventually({Line, Assertion} = TestObj, PollInterval, PollCount)
   when is_integer(Line), Line >= 0, is_function(Assertion, 0),
        is_integer(PollInterval), PollInterval >= 0,
-       is_integer(PollCount), PollCount >= 0 ->
+       is_integer(PollCount), PollCount > 0 ->
     case catch Assertion() of
         ok ->
             ok;
         Err ->
-            ct:pal(?LOW_IMPORTANCE,
+            ct:log(?LOW_IMPORTANCE,
                    "Retrying in ~bms for ~b more times due to failed assertion in line ~b: ~tp",
                    [PollInterval, PollCount - 1, Line, Err]),
             timer:sleep(PollInterval),

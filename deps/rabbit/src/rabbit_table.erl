@@ -2,23 +2,28 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_table).
 
 -export([
     create/0, create/2, ensure_local_copies/1, ensure_table_copy/3,
-    wait_for_replicated/1, wait/1, wait/2,
+    wait_for_replicated/1, wait/1, wait/2, wait_silent/2,
     force_load/0, is_present/0, is_empty/0, needs_default_data/0,
-    check_schema_integrity/1, clear_ram_only_tables/0, retry_timeout/0,
-    wait_for_replicated/0]).
+    check_schema_integrity/1,
+    clear_ram_only_tables/0, maybe_clear_ram_only_tables/0,
+    retry_timeout/0, wait_for_replicated/0]).
 
 %% for testing purposes
 -export([definitions/0]).
 
 
 -include_lib("rabbit_common/include/rabbit.hrl").
+
+-ifdef(TEST).
+-export([pre_khepri_definitions/0]).
+-endif.
 
 %%----------------------------------------------------------------------------
 
@@ -33,7 +38,7 @@
 create() ->
     lists:foreach(
         fun ({Table, Def}) -> create(Table, Def) end,
-        definitions()),
+        mandatory_definitions()),
     ensure_secondary_indexes(),
     ok.
 
@@ -52,8 +57,13 @@ create(TableName, TableDefinition) ->
 
 %% Sets up secondary indexes in a blank node database.
 ensure_secondary_indexes() ->
-  ensure_secondary_index(rabbit_queue, vhost),
-  ok.
+    case rabbit_khepri:is_enabled() of
+        true ->
+            ok;
+        false ->
+            ensure_secondary_index(rabbit_queue, vhost),
+            ok
+    end.
 
 ensure_secondary_index(Table, Field) ->
   case mnesia:add_table_index(Table, Field) of
@@ -99,11 +109,40 @@ wait(TableNames, Retry) ->
     {Timeout, Retries} = retry_timeout(Retry),
     wait(TableNames, Timeout, Retries).
 
+wait_silent(TableNames, Retry) ->
+    %% The check to validate if the deprecated feature
+    %% Classic Mirrored Queues is in use, calls this wait
+    %% for tables to ensure `rabbit_runtime_parameters` are
+    %% ready. This happens every time a user clicks on any
+    %% tab on the management UI (to warn about deprecated ff
+    %% in use), which generates some suspicious
+    %% `Waiting for Mnesia tables...` log messages.
+    %% They're normal, but better to avoid them as it might
+    %% confuse users, wondering if there is any issue with Mnesia.
+    {Timeout, Retries} = retry_timeout(Retry),
+    wait(TableNames, Timeout, Retries, _Silent = true).
+
 wait(TableNames, Timeout, Retries) ->
+    wait(TableNames, Timeout, Retries, _Silent = false).
+
+wait(TableNames, Timeout, Retries, Silent) ->
+    %% Wait for tables must only wait for tables that have already been declared.
+    %% Otherwise, node boot returns a timeout when the Khepri ff is enabled from the start
+    ExistingTables = mnesia:system_info(tables),
+    MissingTables = TableNames -- ExistingTables,
+    TablesToMigrate = TableNames -- MissingTables,
+    wait1(TablesToMigrate, Timeout, Retries, Silent).
+
+wait1(TableNames, Timeout, Retries, Silent) ->
     %% We might be in ctl here for offline ops, in which case we can't
     %% get_env() for the rabbit app.
-    rabbit_log:info("Waiting for Mnesia tables for ~tp ms, ~tp retries left",
-                    [Timeout, Retries - 1]),
+    case Silent of
+        true ->
+            ok;
+        false ->
+            rabbit_log:info("Waiting for Mnesia tables for ~tp ms, ~tp retries left",
+                            [Timeout, Retries - 1])
+    end,
     Result = case mnesia:wait_for_tables(TableNames, Timeout) of
                  ok ->
                      ok;
@@ -116,13 +155,23 @@ wait(TableNames, Timeout, Retries) ->
              end,
     case {Retries, Result} of
         {_, ok} ->
-            rabbit_log:info("Successfully synced tables from a peer"),
-            ok;
+            case Silent of
+                true ->
+                    ok;
+                false ->
+                    rabbit_log:info("Successfully synced tables from a peer"),
+                    ok
+            end;
         {1, {error, _} = Error} ->
             throw(Error);
         {_, {error, Error}} ->
-            rabbit_log:warning("Error while waiting for Mnesia tables: ~tp", [Error]),
-            wait(TableNames, Timeout, Retries - 1)
+            case Silent of
+                true ->
+                    ok;
+                false ->
+                    rabbit_log:warning("Error while waiting for Mnesia tables: ~tp", [Error])
+            end,
+            wait1(TableNames, Timeout, Retries - 1, Silent)
     end.
 
 retry_timeout(_Retry = false) ->
@@ -156,8 +205,21 @@ is_empty()           -> is_empty(names()).
 
 -spec needs_default_data() -> boolean().
 
-needs_default_data() -> is_empty([rabbit_user, rabbit_user_permission,
-                                  rabbit_vhost]).
+needs_default_data() ->
+    case rabbit_khepri:is_enabled() of
+        true ->
+            needs_default_data_in_khepri();
+        false ->
+            needs_default_data_in_mnesia()
+    end.
+
+needs_default_data_in_khepri() ->
+    rabbit_db_user:count_all() =:= {ok, 0} orelse
+    rabbit_db_vhost:count_all() =:= {ok, 0}.
+
+needs_default_data_in_mnesia() ->
+    is_empty([rabbit_user, rabbit_user_permission,
+              rabbit_vhost]).
 
 is_empty(Names) ->
     lists:all(fun (Tab) -> mnesia:dirty_first(Tab) == '$end_of_table' end,
@@ -190,6 +252,23 @@ clear_ram_only_tables() ->
               end
       end, names()),
     ok.
+
+-spec maybe_clear_ram_only_tables() -> ok.
+
+maybe_clear_ram_only_tables() ->
+    %% We use `rabbit_khepri:get_feature_state/0' because we don't want to
+    %% block here. Indeed, this function is executed as part of
+    %% `rabbit:stop/1'.
+    case rabbit_khepri:get_feature_state() of
+        enabled ->
+            ok;
+        _ ->
+            _ = case rabbit_mnesia:members() of
+                    [N] when N=:= node() -> clear_ram_only_tables();
+                    _                    -> ok
+                end,
+            ok
+    end.
 
 %% The sequence in which we delete the schema and then the other
 %% tables is important: if we delete the schema first when moving to
@@ -296,6 +375,19 @@ definitions(ram) ->
         {Tab, TabDef} <- definitions()].
 
 definitions() ->
+    %% Checks for feature flags enabled during node boot must be non_blocking
+    case rabbit_khepri:get_feature_state() of
+        enabled -> [];
+        _       -> mandatory_definitions()
+    end.
+
+mandatory_definitions() ->
+    pre_khepri_definitions()
+        ++ gm:table_definitions()
+        ++ mirrored_supervisor:table_definitions()
+        ++ rabbit_maintenance:table_definitions().
+
+pre_khepri_definitions() ->
     [{rabbit_user,
       [{record_name, internal_user},
        {attributes, internal_user:fields()},
@@ -308,6 +400,11 @@ definitions() ->
        {match, #user_permission{user_vhost = #user_vhost{_='_'},
                                 permission = #permission{_='_'},
                                 _='_'}}]},
+     {rabbit_runtime_parameters,
+      [{record_name, runtime_parameters},
+       {attributes, record_info(fields, runtime_parameters)},
+       {disc_copies, [node()]},
+       {match, #runtime_parameters{_='_'}}]},
      {rabbit_topic_permission,
       [{record_name, topic_permission},
        {attributes, record_info(fields, topic_permission)},
@@ -321,6 +418,28 @@ definitions() ->
        {attributes, vhost:fields()},
        {disc_copies, [node()]},
        {match, vhost:pattern_match_all()}]},
+     {rabbit_durable_queue,
+      [{record_name, amqqueue},
+       {attributes, amqqueue:fields()},
+       {disc_copies, [node()]},
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
+     {rabbit_queue,
+      [{record_name, amqqueue},
+       {attributes, amqqueue:fields()},
+       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
+     {rabbit_durable_exchange,
+      [{record_name, exchange},
+       {attributes, record_info(fields, exchange)},
+       {disc_copies, [node()]},
+       {match, #exchange{name = exchange_name_match(), _='_'}}]},
+     {rabbit_exchange,
+      [{record_name, exchange},
+       {attributes, record_info(fields, exchange)},
+       {match, #exchange{name = exchange_name_match(), _='_'}}]},
+     {rabbit_exchange_serial,
+      [{record_name, exchange_serial},
+       {attributes, record_info(fields, exchange_serial)},
+       {match, #exchange_serial{name = exchange_name_match(), _='_'}}]},
      {rabbit_durable_route,
       [{record_name, route},
        {attributes, record_info(fields, route)},
@@ -365,37 +484,8 @@ definitions() ->
        {attributes, record_info(fields, topic_trie_binding)},
        {type, ordered_set},
        {match, #topic_trie_binding{trie_binding = trie_binding_match(),
-                                   _='_'}}]},
-     {rabbit_durable_exchange,
-      [{record_name, exchange},
-       {attributes, record_info(fields, exchange)},
-       {disc_copies, [node()]},
-       {match, #exchange{name = exchange_name_match(), _='_'}}]},
-     {rabbit_exchange,
-      [{record_name, exchange},
-       {attributes, record_info(fields, exchange)},
-       {match, #exchange{name = exchange_name_match(), _='_'}}]},
-     {rabbit_exchange_serial,
-      [{record_name, exchange_serial},
-       {attributes, record_info(fields, exchange_serial)},
-       {match, #exchange_serial{name = exchange_name_match(), _='_'}}]},
-     {rabbit_runtime_parameters,
-      [{record_name, runtime_parameters},
-       {attributes, record_info(fields, runtime_parameters)},
-       {disc_copies, [node()]},
-       {match, #runtime_parameters{_='_'}}]},
-     {rabbit_durable_queue,
-      [{record_name, amqqueue},
-       {attributes, amqqueue:fields()},
-       {disc_copies, [node()]},
-       {match, amqqueue:pattern_match_on_name(queue_name_match())}]},
-     {rabbit_queue,
-      [{record_name, amqqueue},
-       {attributes, amqqueue:fields()},
-       {match, amqqueue:pattern_match_on_name(queue_name_match())}]}
-    ]
-        ++ gm:table_definitions()
-        ++ mirrored_supervisor:table_definitions().
+                                   _='_'}}]}
+    ].
 
 binding_match() ->
     #binding{source = exchange_name_match(),

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_channel_tracking).
@@ -25,6 +25,7 @@
          shutdown_tracked_items/2]).
 
 -export([list/0, list_of_user/1, list_on_node/1,
+         channel_count_on_node/1,
          tracked_channel_table_name_for/1,
          tracked_channel_per_user_table_name_for/1,
          ensure_tracked_tables_for_this_node/0,
@@ -79,19 +80,22 @@ handle_cast({channel_closed, Details}) ->
     %% channel has terminated, unregister if local
     unregister_tracked_by_pid(pget(pid, Details));
 handle_cast({connection_closed, ConnDetails}) ->
-    ThisNode= node(),
-    ConnPid = pget(pid, ConnDetails),
-
+    ThisNode = node(),
     case pget(node, ConnDetails) of
         ThisNode ->
-            TrackedChs = get_tracked_channels_by_connection_pid(ConnPid),
-            rabbit_log_channel:debug(
-                "Closing all channels from connection '~ts' "
-                "because it has been closed", [pget(name, ConnDetails)]),
-            %% Shutting down channels will take care of unregistering the
-            %% corresponding tracking.
-            shutdown_tracked_items(TrackedChs, undefined),
-            ok;
+            ConnPid = pget(pid, ConnDetails),
+            case get_tracked_channels_by_connection_pid(ConnPid) of
+                [] ->
+                    ok;
+                TrackedChs ->
+                    rabbit_log_channel:debug(
+                      "Closing ~b channel(s) because connection '~ts' has been closed",
+                      [length(TrackedChs), pget(name, ConnDetails)]),
+                    %% Shutting down channels will take care of unregistering the
+                    %% corresponding tracking.
+                    shutdown_tracked_items(TrackedChs, undefined),
+                    ok
+            end;
         _DifferentNode ->
             ok
     end;
@@ -122,7 +126,7 @@ unregister_tracked_by_pid(ChPid) when node(ChPid) == node() ->
     case ets:lookup(?TRACKED_CHANNEL_TABLE, ChPid) of
         []     -> ok;
         [#tracked_channel{username = Username}] ->
-            ets:update_counter(?TRACKED_CHANNEL_TABLE_PER_USER, Username, -1),
+            _ = ets:update_counter(?TRACKED_CHANNEL_TABLE_PER_USER, Username, -1),
             ets:delete(?TRACKED_CHANNEL_TABLE, ChPid)
     end.
 
@@ -135,7 +139,7 @@ unregister_tracked(ChId = {Node, _Name}) when Node == node() ->
     case get_tracked_channel_by_id(ChId) of
         []     -> ok;
         [#tracked_channel{pid = ChPid, username = Username}] ->
-            ets:update_counter(?TRACKED_CHANNEL_TABLE_PER_USER, Username, -1),
+            _ = ets:update_counter(?TRACKED_CHANNEL_TABLE_PER_USER, Username, -1),
             ets:delete(?TRACKED_CHANNEL_TABLE, ChPid)
     end.
 
@@ -182,8 +186,18 @@ list_on_node(Node) ->
             []
     end.
 
--spec tracked_channel_table_name_for(node()) -> atom().
+channel_count_on_node(Node) when Node == node() ->
+    ets:info(?TRACKED_CHANNEL_TABLE, size);
+channel_count_on_node(Node) ->
+    case rabbit_misc:rpc_call(Node, ?MODULE, ?FUNCTION_NAME, [Node]) of
+        Int when is_integer(Int) ->
+            Int;
+        _ ->
+            0
+    end.
 
+
+-spec tracked_channel_table_name_for(node()) -> atom().
 tracked_channel_table_name_for(Node) ->
     list_to_atom(rabbit_misc:format("tracked_channel_on_node_~ts", [Node])).
 
@@ -217,8 +231,8 @@ get_tracked_channels_by_connection_pid(ConnPid) ->
 
 get_tracked_channel_by_id(ChId) ->
     rabbit_tracking:match_tracked_items(
-        ?TRACKED_CHANNEL_TABLE,
-        #tracked_channel{id = ChId, _ = '_'}).
+      ?TRACKED_CHANNEL_TABLE,
+      #tracked_channel{id = ChId, _ = '_'}).
 
 delete_tracked_channel_user_entry(Username) ->
     rabbit_tracking:delete_tracked_entry(

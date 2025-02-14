@@ -4,7 +4,7 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 
 -module(unit_SUITE).
@@ -55,10 +55,14 @@ registration_value_test(_Config) ->
 extract_nodes_case1_test(_Config) ->
     Input    = registration_value_of(8488283859587364900, 61),
     Expected = node(),
+    CreatedRev = ?LINE,
+    ?assertEqual({true, {CreatedRev, Expected}},
+                 rabbitmq_peer_discovery_etcd_v3_client:extract_node(
+                   {CreatedRev, Input})),
 
-    ?assertEqual(Expected, rabbitmq_peer_discovery_etcd_v3_client:extract_node(Input)),
-
-    ?assertEqual(undefined, rabbitmq_peer_discovery_etcd_v3_client:extract_node(<<"{}">>)).
+    ?assertEqual(false,
+                 rabbitmq_peer_discovery_etcd_v3_client:extract_node(
+                   {CreatedRev, <<"{}">>})).
 
 filter_nodes_test(_Config) ->
     Input    = [node(), undefined, undefined, {error, reason1}, {error, {another, reason}}],

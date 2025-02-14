@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2018-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 defmodule ListFeatureFlagsCommandTest do
   use ExUnit.Case, async: false
@@ -21,12 +21,12 @@ defmodule ListFeatureFlagsCommandTest do
 
     new_feature_flags = %{
       @flag1 => %{
-        desc: 'My feature flag #1',
+        desc: ~c"My feature flag #1",
         provided_by: :ListFeatureFlagsCommandTest,
         stability: :stable
       },
       @flag2 => %{
-        desc: 'My feature flag #2',
+        desc: ~c"My feature flag #2",
         provided_by: :ListFeatureFlagsCommandTest,
         stability: :stable
       }

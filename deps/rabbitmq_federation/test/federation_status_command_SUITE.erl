@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(federation_status_command_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 -compile(export_all).
@@ -96,12 +95,12 @@ run_federated(Config) ->
               timer:sleep(3000),
               {stream, [Props]} = ?CMD:run([], Opts#{only_down => false}),
               <<"upstream">> = proplists:get_value(upstream_queue, Props),
-              <<"fed.downstream">> = proplists:get_value(queue, Props),
+              <<"fed1.downstream">> = proplists:get_value(queue, Props),
               <<"fed.tag">> = proplists:get_value(consumer_tag, Props),
               running = proplists:get_value(status, Props)
       end,
       [rabbit_federation_test_util:q(<<"upstream">>),
-       rabbit_federation_test_util:q(<<"fed.downstream">>)]),
+       rabbit_federation_test_util:q(<<"fed1.downstream">>)]),
     %% Down
     rabbit_federation_test_util:with_ch(
       Config,
@@ -109,7 +108,7 @@ run_federated(Config) ->
               {stream, []} = ?CMD:run([], Opts#{only_down => true})
       end,
       [rabbit_federation_test_util:q(<<"upstream">>),
-       rabbit_federation_test_util:q(<<"fed.downstream">>)]).
+       rabbit_federation_test_util:q(<<"fed1.downstream">>)]).
 
 run_down_federated(Config) ->
     [A] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
@@ -129,7 +128,7 @@ run_down_federated(Config) ->
                 end, 15000)
       end,
       [rabbit_federation_test_util:q(<<"upstream">>),
-       rabbit_federation_test_util:q(<<"fed.downstream">>)]),
+       rabbit_federation_test_util:q(<<"fed1.downstream">>)]),
     %% Down
     rabbit_federation_test_util:with_ch(
       Config,
@@ -143,12 +142,12 @@ run_down_federated(Config) ->
                 end, 15000)
       end,
       [rabbit_federation_test_util:q(<<"upstream">>),
-       rabbit_federation_test_util:q(<<"fed.downstream">>)]).
+       rabbit_federation_test_util:q(<<"fed1.downstream">>)]).
 
 output_federated(Config) ->
     [A] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Opts = #{node => A},
-    Input = {stream,[[{queue, <<"fed.downstream">>},
+    Input = {stream,[[{queue, <<"fed1.downstream">>},
                       {consumer_tag, <<"fed.tag">>},
                       {upstream_queue, <<"upstream">>},
                       {type, queue},
@@ -158,7 +157,7 @@ output_federated(Config) ->
                       {local_connection, <<"<rmq-ct-federation_status_command_SUITE-1-21000@localhost.1.563.0>">>},
                       {uri, <<"amqp://localhost:21000">>},
                       {timestamp, {{2016,11,21},{8,51,19}}}]]},
-    {stream, [#{queue := <<"fed.downstream">>,
+    {stream, [#{queue := <<"fed1.downstream">>,
                 upstream_queue := <<"upstream">>,
                 type := queue,
                 vhost := <<"/">>,

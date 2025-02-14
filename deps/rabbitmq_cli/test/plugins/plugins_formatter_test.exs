@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule PluginsFormatterTest do
   use ExUnit.Case, async: false
@@ -19,35 +19,35 @@ defmodule PluginsFormatterTest do
               name: :amqp_client,
               enabled: :implicit,
               running: true,
-              version: '3.7.0',
+              version: ~c"3.7.0",
               running_version: nil
             },
             %{
               name: :mock_rabbitmq_plugins_01,
               enabled: :not_enabled,
               running: false,
-              version: '0.2.0',
+              version: ~c"0.2.0",
               running_version: nil
             },
             %{
               name: :mock_rabbitmq_plugins_02,
               enabled: :enabled,
               running: true,
-              version: '0.2.0',
-              running_version: '0.1.0'
+              version: ~c"0.2.0",
+              running_version: ~c"0.1.0"
             },
             %{
               name: :rabbitmq_federation,
               enabled: :enabled,
               running: true,
-              version: '3.7.0',
+              version: ~c"3.7.0",
               running_version: nil
             },
             %{
               name: :rabbitmq_stomp,
               enabled: :enabled,
               running: true,
-              version: '3.7.0',
+              version: ~c"3.7.0",
               running_version: nil
             }
           ],
@@ -75,35 +75,35 @@ defmodule PluginsFormatterTest do
               name: :amqp_client,
               enabled: :implicit,
               running: true,
-              version: '3.7.0',
-              running_version: nil
+              version: ~c"3.7.0",
+              running_version: ""
             },
             %{
               name: :mock_rabbitmq_plugins_01,
               enabled: :not_enabled,
               running: false,
-              version: '0.2.0',
+              version: ~c"0.2.0",
               running_version: nil
             },
             %{
               name: :mock_rabbitmq_plugins_02,
               enabled: :enabled,
               running: true,
-              version: '0.2.0',
-              running_version: '0.1.0'
+              version: ~c"0.2.0",
+              running_version: ~c"0.1.0"
             },
             %{
               name: :rabbitmq_federation,
               enabled: :enabled,
               running: true,
-              version: '3.7.0',
+              version: ~c"3.7.0",
               running_version: nil
             },
             %{
               name: :rabbitmq_stomp,
               enabled: :enabled,
               running: true,
-              version: '3.7.0',
+              version: ~c"3.7.0",
               running_version: nil
             }
           ],

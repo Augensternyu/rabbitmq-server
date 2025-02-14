@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% An HTTP API counterpart of 'rabbitmq-diagnostics check_if_node_is_quorum_critical'
@@ -31,12 +31,12 @@ resource_exists(ReqData, Context) ->
 to_json(ReqData, Context) ->
     case rabbit_nodes:is_single_node_cluster() of
         true ->
-            rabbit_mgmt_util:reply([{status, ok},
-                                    {reason, <<"single node cluster">>}], ReqData, Context);
+            rabbit_mgmt_util:reply(#{status => ok,
+                                     reason => <<"single node cluster">>}, ReqData, Context);
         false ->
             case rabbit_upgrade_preparation:list_with_minimum_quorum_for_cli() of
                 [] ->
-                    rabbit_mgmt_util:reply([{status, ok}], ReqData, Context);
+                    rabbit_mgmt_util:reply(#{status => ok}, ReqData, Context);
                 Qs when length(Qs) > 0 ->
                     Msg = <<"There are quorum queues that would lose their quorum if the target node is shut down">>,
                     failure(Msg, Qs, ReqData, Context)
@@ -44,10 +44,10 @@ to_json(ReqData, Context) ->
     end.
 
 failure(Message, Qs, ReqData, Context) ->
-    {Response, ReqData1, Context1} = rabbit_mgmt_util:reply([{status, failed},
-                                                             {reason, Message},
-                                                             {queues, Qs}],
-                                                            ReqData, Context),
+    Body = #{status => failed,
+             reason => Message,
+             queues => Qs},
+    {Response, ReqData1, Context1} = rabbit_mgmt_util:reply(Body, ReqData, Context),
     {stop, cowboy_req:reply(503, #{}, Response, ReqData1), Context1}.
 
 is_authorized(ReqData, Context) ->

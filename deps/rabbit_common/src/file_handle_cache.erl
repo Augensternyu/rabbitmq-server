@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(file_handle_cache).
@@ -147,6 +147,8 @@
 -export([start_link/0, start_link/2, init/1, handle_call/3, handle_cast/2,
          handle_info/2, terminate/2, code_change/3, prioritise_cast/3]).
 
+-export([clear_metrics_of/1, list_elders/0, list_clients/0, get_client_state/1]).
+
 -define(SERVER, ?MODULE).
 %% Reserve 3 handles for ra usage: wal, segment writer and a dets table
 -define(RESERVED_FOR_OTHERS, 100 + 3).
@@ -157,6 +159,9 @@
 -define(OBTAIN_LIMIT(LIMIT), trunc((LIMIT * 0.9) - 2)).
 -define(CLIENT_ETS_TABLE, file_handle_cache_client).
 -define(ELDERS_ETS_TABLE, file_handle_cache_elders).
+
+-import(rabbit_misc, [safe_ets_update_counter/3, safe_ets_update_counter/4,
+                      safe_ets_update_element/3, safe_ets_update_element/4]).
 
 %%----------------------------------------------------------------------------
 
@@ -558,6 +563,7 @@ obtain()          -> obtain(1).
 set_reservation() -> set_reservation(1).
 release()         -> release(1).
 release_reservation() -> release_reservation(file).
+%% @todo This isn't used.
 transfer(Pid)     -> transfer(Pid, 1).
 
 obtain(Count)          -> obtain(Count, socket).
@@ -621,24 +627,49 @@ clear_process_read_cache() ->
         size(Handle#handle.read_buffer) > 0
     ].
 
+%% Only used for testing
+clear_metrics_of(Pid) ->
+  case whereis(?SERVER) of
+    undefined -> ok;
+    _         -> gen_server2:cast(?SERVER, {clear_metrics_of, Pid})
+  end.
+
+%% Only used for testing
+list_elders() ->
+  case whereis(?SERVER) of
+    undefined -> ok;
+    _         -> gen_server2:call(?SERVER, list_elders)
+  end.
+
+%% Only used for testing
+list_clients() ->
+  case whereis(?SERVER) of
+    undefined -> ok;
+    _         -> gen_server2:call(?SERVER, list_clients)
+  end.
+
+%% Only used for testing
+get_client_state(Pid) ->
+  case whereis(?SERVER) of
+    undefined -> ok;
+    _         -> gen_server2:call(?SERVER, {get_client_state, Pid})
+  end.
+
 %%----------------------------------------------------------------------------
 %% Internal functions
 %%----------------------------------------------------------------------------
 
 prim_file_read(Hdl, Size) ->
-    file_handle_cache_stats:update(
-      io_read, Size, fun() -> prim_file:read(Hdl, Size) end).
+    prim_file:read(Hdl, Size).
 
 prim_file_write(Hdl, Bytes) ->
-    file_handle_cache_stats:update(
-      io_write, iolist_size(Bytes), fun() -> prim_file:write(Hdl, Bytes) end).
+    prim_file:write(Hdl, Bytes).
 
 prim_file_sync(Hdl) ->
-    file_handle_cache_stats:update(io_sync, fun() -> prim_file:sync(Hdl) end).
+    prim_file:sync(Hdl).
 
 prim_file_position(Hdl, NewOffset) ->
-    file_handle_cache_stats:update(
-      io_seek, fun() -> prim_file:position(Hdl, NewOffset) end).
+    prim_file:position(Hdl, NewOffset).
 
 is_reader(Mode) -> lists:member(read, Mode).
 
@@ -732,8 +763,7 @@ reopen([{Ref, NewOrReopen, Handle = #handle { hdl          = closed,
         RefNewOrReopenHdls] = ToOpen, Tree, RefHdls) ->
     Mode = case NewOrReopen of
                new    -> Mode0;
-               reopen -> file_handle_cache_stats:update(io_reopen),
-                         [read | Mode0]
+               reopen -> [read | Mode0]
            end,
     case prim_file:open(Path, Mode) of
         {ok, Hdl} ->
@@ -1053,9 +1083,8 @@ infos(Items, State) -> [{Item, i(Item, State)} || Item <- Items].
 
 i(total_limit,   #fhc_state{limit               = Limit}) -> Limit;
 i(total_used,    State)                                   -> used(State);
-i(sockets_limit, #fhc_state{obtain_limit        = Limit}) -> Limit;
-i(sockets_used,  #fhc_state{obtain_count_socket = Count,
-                            reserve_count_socket = RCount}) -> Count + RCount;
+i(sockets_limit, _) -> 0;
+i(sockets_used,  _) -> 0;
 i(files_reserved,  #fhc_state{reserve_count_file   = RCount}) -> RCount;
 i(Item, _) -> throw({bad_argument, Item}).
 
@@ -1070,7 +1099,6 @@ used(#fhc_state{open_count          = C1,
 %%----------------------------------------------------------------------------
 
 init([AlarmSet, AlarmClear]) ->
-    _ = file_handle_cache_stats:init(),
     Limit = case application:get_env(file_handles_high_watermark) of
                 {ok, Watermark} when (is_integer(Watermark) andalso
                                       Watermark > 0) ->
@@ -1124,13 +1152,13 @@ handle_call({open, Pid, Requested, EldestUnusedSince}, From,
     case needs_reduce(State #fhc_state { open_count = Count + Requested }) of
         true  -> case ets:lookup(Clients, Pid) of
                      [#cstate { opened = 0 }] ->
-                         true = ets:update_element(
+                         _ = safe_ets_update_element(
                                   Clients, Pid, {#cstate.blocked, true}),
                          {noreply,
                           reduce(State #fhc_state {
                                    open_pending = pending_in(Item, Pending) })};
                      [#cstate { opened = Opened }] ->
-                         true = ets:update_element(
+                         _ = safe_ets_update_element(
                                   Clients, Pid,
                                   {#cstate.pending_closes, Opened}),
                          {reply, close, State}
@@ -1146,7 +1174,7 @@ handle_call({obtain, N, Type, Pid}, From,
     Item = #pending { kind      = {obtain, Type}, pid  = Pid,
                       requested = N,              from = From },
     Enqueue = fun () ->
-                      true = ets:update_element(Clients, Pid,
+                      _ = safe_ets_update_element(Clients, Pid,
                                                 {#cstate.blocked, true}),
                       set_obtain_state(Type, pending,
                                        pending_in(Item, Pending), State)
@@ -1174,12 +1202,21 @@ handle_call(get_limit, _From, State = #fhc_state { limit = Limit }) ->
     {reply, Limit, State};
 
 handle_call({info, Items}, _From, State) ->
-    {reply, infos(Items, State), State}.
+    {reply, infos(Items, State), State};
+
+handle_call(list_elders, _From, State = #fhc_state { elders = Elders }) ->
+  {reply, ets:tab2list(Elders), State};
+
+handle_call(list_clients, _From, State = #fhc_state { clients = Clients }) ->
+  {reply, ets:tab2list(Clients), State};
+
+handle_call({get_client_state, ID}, _From, State = #fhc_state { clients = Clients }) ->
+  {reply, ets:lookup(Clients, ID), State}.
 
 handle_cast({register_callback, Pid, MFA},
             State = #fhc_state { clients = Clients }) ->
     ok = track_client(Pid, Clients),
-    true = ets:update_element(Clients, Pid, {#cstate.callback, MFA}),
+    _ = safe_ets_update_element(Clients, Pid, {#cstate.callback, MFA}),
     {noreply, State};
 
 handle_cast({update, Pid, EldestUnusedSince},
@@ -1200,7 +1237,7 @@ handle_cast({close, Pid, EldestUnusedSince},
                undefined -> ets:delete(Elders, Pid);
                _         -> ets:insert(Elders, {Pid, EldestUnusedSince})
            end,
-    ets:update_counter(Clients, Pid, {#cstate.pending_closes, -1, 0, 0}),
+    safe_ets_update_counter(Clients, Pid, {#cstate.pending_closes, -1, 0, 0}),
     {noreply, adjust_alarm(State, process_pending(
                 update_counts(open, Pid, -1, State)))};
 
@@ -1226,7 +1263,15 @@ handle_cast({set_reservation, N, Type, Pid},
     {noreply, case needs_reduce(NewState) of
                   true  -> reduce(NewState);
                   false -> adjust_alarm(State, NewState)
-              end}.
+              end};
+
+handle_cast({clear_metrics_of, Pid},
+    State = #fhc_state { elders = Elders, clients = Clients }) ->
+  ets:delete(Elders, Pid),
+  ets:delete(Clients, Pid),
+  safe_ets_update_counter(Clients, Pid, {#cstate.pending_closes, -1, 0, 0}),
+  {noreply, adjust_alarm(State, process_pending(
+    update_counts(open, Pid, -1, State)))}.
 
 handle_info(check_counts, State) ->
     {noreply, maybe_reduce(State #fhc_state { timer_ref = undefined })};
@@ -1399,37 +1444,42 @@ run_pending_item(#pending { kind      = Kind,
                             from      = From },
                  State = #fhc_state { clients = Clients }) ->
     gen_server2:reply(From, ok),
-    true = ets:update_element(Clients, Pid, {#cstate.blocked, false}),
+    safe_ets_update_element(Clients, Pid, {#cstate.blocked, false}),
     update_counts(Kind, Pid, Requested, State).
 
 update_counts(open, Pid, Delta,
               State = #fhc_state { open_count          = OpenCount,
                                    clients             = Clients }) ->
-    ets:update_counter(Clients, Pid, {#cstate.opened, Delta}),
+    safe_ets_update_counter(Clients, Pid, {#cstate.opened, Delta},
+      fun() -> rabbit_log:warning("FHC: failed to update counter 'opened', client pid: ~p", [Pid]) end),
     State #fhc_state { open_count = OpenCount + Delta};
 update_counts({obtain, file}, Pid, Delta,
               State = #fhc_state {obtain_count_file   = ObtainCountF,
                                   clients             = Clients }) ->
-    ets:update_counter(Clients, Pid, {#cstate.obtained_file, Delta}),
+  safe_ets_update_counter(Clients, Pid, {#cstate.obtained_file, Delta},
+      fun() -> rabbit_log:warning("FHC: failed to update counter 'obtained_file', client pid: ~p", [Pid]) end),
     State #fhc_state { obtain_count_file = ObtainCountF + Delta};
 update_counts({obtain, socket}, Pid, Delta,
               State = #fhc_state {obtain_count_socket   = ObtainCountS,
                                   clients             = Clients }) ->
-    ets:update_counter(Clients, Pid, {#cstate.obtained_socket, Delta}),
+  safe_ets_update_counter(Clients, Pid, {#cstate.obtained_socket, Delta},
+    fun() -> rabbit_log:warning("FHC: failed to update counter 'obtained_socket', client pid: ~p", [Pid]) end),
     State #fhc_state { obtain_count_socket = ObtainCountS + Delta};
 update_counts({reserve, file}, Pid, NewReservation,
               State = #fhc_state {reserve_count_file   = ReserveCountF,
                                   clients             = Clients }) ->
     [#cstate{reserved_file = R}] = ets:lookup(Clients, Pid),
     Delta = NewReservation - R,
-    ets:update_counter(Clients, Pid, {#cstate.reserved_file, Delta}),
+  safe_ets_update_counter(Clients, Pid, {#cstate.reserved_file, Delta},
+    fun() -> rabbit_log:warning("FHC: failed to update counter 'reserved_file', client pid: ~p", [Pid]) end),
     State #fhc_state { reserve_count_file = ReserveCountF + Delta};
 update_counts({reserve, socket}, Pid, NewReservation,
               State = #fhc_state {reserve_count_socket   = ReserveCountS,
                                   clients             = Clients }) ->
     [#cstate{reserved_file = R}] = ets:lookup(Clients, Pid),
     Delta = NewReservation - R,
-    ets:update_counter(Clients, Pid, {#cstate.reserved_socket, Delta}),
+  safe_ets_update_counter(Clients, Pid, {#cstate.reserved_socket, Delta},
+    fun() -> rabbit_log:warning("FHC: failed to update counter 'reserved_socket', client pid: ~p", [Pid]) end),
     State #fhc_state { reserve_count_socket = ReserveCountS + Delta}.
 
 maybe_reduce(State) ->
@@ -1520,7 +1570,7 @@ notify(Clients, Required, [#cstate{ pid      = Pid,
                                     callback = {M, F, A},
                                     opened   = Opened } | Notifications]) ->
     apply(M, F, A ++ [0]),
-    ets:update_element(Clients, Pid, {#cstate.pending_closes, Opened}),
+    safe_ets_update_element(Clients, Pid, {#cstate.pending_closes, Opened}),
     notify(Clients, Required - Opened, Notifications).
 
 track_client(Pid, Clients) ->

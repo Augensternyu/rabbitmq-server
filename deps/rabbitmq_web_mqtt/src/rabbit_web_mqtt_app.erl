@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_web_mqtt_app).
@@ -12,7 +12,9 @@
     start/2,
     prep_stop/1,
     stop/1,
-    list_connections/0
+    list_connections/0,
+    emit_connection_info_all/4,
+    emit_connection_info_local/3
 ]).
 
 %% Dummy supervisor - see Ulf Wiger's comment at
@@ -48,48 +50,50 @@ init([]) -> {ok, {{one_for_one, 1, 5}, []}}.
 
 -spec list_connections() -> [pid()].
 list_connections() ->
-    PlainPids = connection_pids_of_protocol(?TCP_PROTOCOL),
-    TLSPids   = connection_pids_of_protocol(?TLS_PROTOCOL),
+    PlainPids = rabbit_networking:list_local_connections_of_protocol(?TCP_PROTOCOL),
+    TLSPids   = rabbit_networking:list_local_connections_of_protocol(?TLS_PROTOCOL),
     PlainPids ++ TLSPids.
 
+-spec emit_connection_info_all([node()], rabbit_types:info_keys(), reference(), pid()) -> term().
+emit_connection_info_all(Nodes, Items, Ref, AggregatorPid) ->
+    Pids = [spawn_link(Node, ?MODULE, emit_connection_info_local,
+                       [Items, Ref, AggregatorPid])
+            || Node <- Nodes],
+
+    rabbit_control_misc:await_emitters_termination(Pids).
+
+-spec emit_connection_info_local(rabbit_types:info_keys(), reference(), pid()) -> ok.
+emit_connection_info_local(Items, Ref, AggregatorPid) ->
+    LocalPids = list_connections(),
+    emit_connection_info(Items, Ref, AggregatorPid, LocalPids).
+
+emit_connection_info(Items, Ref, AggregatorPid, Pids) ->
+    rabbit_control_misc:emitting_map_with_exit_handler(
+      AggregatorPid, Ref,
+      fun(Pid) ->
+              rabbit_web_mqtt_handler:info(Pid, Items)
+      end, Pids).
 %%
 %% Implementation
 %%
 
-connection_pids_of_protocol(Protocol) ->
-    case rabbit_networking:ranch_ref_of_protocol(Protocol) of
-        undefined   -> [];
-        AcceptorRef ->
-            lists:map(fun cowboy_ws_connection_pid/1, ranch:procs(AcceptorRef, connections))
-    end.
-
--spec cowboy_ws_connection_pid(pid()) -> pid().
-cowboy_ws_connection_pid(RanchConnPid) ->
-    Children = supervisor:which_children(RanchConnPid),
-    {cowboy_clear, Pid, _, _} = lists:keyfind(cowboy_clear, 1, Children),
-    Pid.
-
 mqtt_init() ->
-  CowboyOpts0  = maps:from_list(get_env(cowboy_opts, [])),
-  CowboyWsOpts = maps:from_list(get_env(cowboy_ws_opts, [])),
-  Routes = cowboy_router:compile([{'_', [
-      {get_env(ws_path, "/ws"), rabbit_web_mqtt_handler, [{ws_opts, CowboyWsOpts}]}
-  ]}]),
-  CowboyOpts = CowboyOpts0#{
+    CowboyOpts0  = maps:from_list(get_env(cowboy_opts, [])),
+    CowboyWsOpts = maps:from_list(get_env(cowboy_ws_opts, [])),
+    TcpConfig = get_env(tcp_config, []),
+    SslConfig = get_env(ssl_config, []),
+    Routes = cowboy_router:compile([{'_', [
+        {get_env(ws_path, "/ws"), rabbit_web_mqtt_handler, [{ws_opts, CowboyWsOpts}]}
+    ]}]),
+    CowboyOpts = CowboyOpts0#{
                  env => #{dispatch => Routes},
                  proxy_header => get_env(proxy_protocol, false),
                  stream_handlers => [rabbit_web_mqtt_stream_handler, cowboy_stream_h]
                 },
-  case get_env(tcp_config, []) of
-      []       -> ok;
-      TCPConf0 -> start_tcp_listener(TCPConf0, CowboyOpts)
-  end,
-  case get_env(ssl_config, []) of
-      []       -> ok;
-      TLSConf0 -> start_tls_listener(TLSConf0, CowboyOpts)
-  end,
-  ok.
+    start_tcp_listener(TcpConfig, CowboyOpts),
+    start_tls_listener(SslConfig, CowboyOpts).
 
+start_tcp_listener([], _) -> ok;
 start_tcp_listener(TCPConf0, CowboyOpts) ->
     {TCPConf, IpStr, Port} = get_tcp_conf(TCPConf0),
     RanchRef = rabbit_networking:ranch_ref(TCPConf),
@@ -115,6 +119,8 @@ start_tcp_listener(TCPConf0, CowboyOpts) ->
     rabbit_log:info("rabbit_web_mqtt: listening for HTTP connections on ~s:~w",
                     [IpStr, Port]).
 
+
+start_tls_listener([], _) -> ok;
 start_tls_listener(TLSConf0, CowboyOpts) ->
     _ = rabbit_networking:ensure_ssl(),
     {TLSConf, TLSIpStr, TLSPort} = get_tls_conf(TLSConf0),
@@ -143,10 +149,20 @@ start_tls_listener(TLSConf0, CowboyOpts) ->
 
 listener_started(Protocol, Listener) ->
     Port = rabbit_misc:pget(port, Listener),
-    [rabbit_networking:tcp_listener_started(Protocol, Listener,
-                                            IPAddress, Port)
-     || {IPAddress, _Port, _Family}
-        <- rabbit_networking:tcp_listener_addresses(Port)],
+    _ = case rabbit_misc:pget(ip, Listener) of
+            undefined ->
+                [rabbit_networking:tcp_listener_started(Protocol, Listener,
+                                                        IPAddress, Port)
+                 || {IPAddress, _Port, _Family}
+                        <- rabbit_networking:tcp_listener_addresses(Port)];
+            IP when is_tuple(IP) ->
+                rabbit_networking:tcp_listener_started(Protocol, Listener,
+                                                       IP, Port);
+            IP when is_list(IP) ->
+                {ok, ParsedIP} = inet_parse:address(IP),
+                rabbit_networking:tcp_listener_started(Protocol, Listener,
+                                                       ParsedIP, Port)
+        end,
     ok.
 
 get_tcp_conf(TCPConf0) ->

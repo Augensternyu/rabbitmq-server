@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(single_active_consumer_SUITE).
@@ -11,13 +11,15 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(TIMEOUT, 30000).
 
 all() ->
     [
-        {group, classic_queue}, {group, quorum_queue}
+        {group, classic_queue},
+        {group, quorum_queue}
     ].
 
 groups() ->
@@ -25,6 +27,7 @@ groups() ->
         {classic_queue, [], [
             all_messages_go_to_one_consumer,
             fallback_to_another_consumer_when_first_one_is_cancelled,
+            fallback_to_another_consumer_when_first_one_is_cancelled_qos1,
             fallback_to_another_consumer_when_exclusive_consumer_channel_is_cancelled,
             fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks,
             amqp_exclusive_consume_fails_on_exclusive_consumer_queue
@@ -32,6 +35,7 @@ groups() ->
         {quorum_queue, [], [
             all_messages_go_to_one_consumer,
             fallback_to_another_consumer_when_first_one_is_cancelled,
+            fallback_to_another_consumer_when_first_one_is_cancelled_qos1,
             fallback_to_another_consumer_when_exclusive_consumer_channel_is_cancelled,
             fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks,
             basic_get_is_unsupported
@@ -165,6 +169,49 @@ fallback_to_another_consumer_when_first_one_is_cancelled(Config) ->
     amqp_connection:close(C),
     ok.
 
+fallback_to_another_consumer_when_first_one_is_cancelled_qos1(Config) ->
+    {C, Ch} = connection_and_channel(Config),
+    Q = queue_declare(Ch, Config),
+    ?assertEqual(#'basic.qos_ok'{},
+                 amqp_channel:call(Ch, #'basic.qos'{prefetch_count = 1})),
+    CTag1 = <<"tag1">>,
+    CTag2 = <<"tag2">>,
+    amqp_channel:subscribe(Ch, #'basic.consume'{queue = Q,
+                                                consumer_tag = CTag1}, self()),
+    receive #'basic.consume_ok'{consumer_tag = CTag1} -> ok
+    after ?TIMEOUT -> ct:fail(timeout_ctag1)
+    end,
+
+    amqp_channel:subscribe(Ch, #'basic.consume'{queue = Q,
+                                                consumer_tag = CTag2}, self()),
+    receive #'basic.consume_ok'{consumer_tag = CTag2} -> ok
+    after ?TIMEOUT -> ct:fail(timeout_ctag2)
+    end,
+
+    Publish = #'basic.publish'{exchange = <<>>, routing_key = Q},
+    amqp_channel:cast(Ch, Publish, #amqp_msg{payload = <<"m1">>}),
+    amqp_channel:cast(Ch, Publish, #amqp_msg{payload = <<"m2">>}),
+
+    DTag1 = receive {#'basic.deliver'{consumer_tag = CTag1,
+                                      delivery_tag = DTag},
+                     #amqp_msg{payload = <<"m1">>}} -> DTag
+            after ?TIMEOUT -> ct:fail(timeout_m1)
+            end,
+
+    #'basic.cancel_ok'{consumer_tag = CTag1} = amqp_channel:call(Ch, #'basic.cancel'{consumer_tag = CTag1}),
+    receive #'basic.cancel_ok'{consumer_tag = CTag1} -> ok
+    after ?TIMEOUT -> ct:fail(missing_cancel)
+    end,
+
+    amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DTag1}),
+
+    receive {#'basic.deliver'{consumer_tag = CTag2},
+             #amqp_msg{payload = <<"m2">>}} -> ok;
+            Unexpected -> ct:fail({unexpected, Unexpected})
+    after ?TIMEOUT -> ct:fail(timeout_m2)
+    end,
+    amqp_connection:close(C).
+
 fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks(Config) ->
     %% Let's ensure that although the consumer is cancelled we still keep the unacked
     %% messages and accept acknowledgments on them.
@@ -189,7 +236,7 @@ fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks(Config) ->
     {CTag, DTag1} = receive_deliver(),
     {_CTag, DTag2} = receive_deliver(),
 
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"0">>, <<"2">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"0">>, <<"2">>]]),
     #'basic.cancel_ok'{} = amqp_channel:call(Ch, #'basic.cancel'{consumer_tag = CTag}),
 
     receive
@@ -201,14 +248,14 @@ fallback_to_another_consumer_when_first_one_is_cancelled_manual_acks(Config) ->
                                               Resource = proplists:get_value(queue_name, Props),
                                               Q == Resource#resource.name
                                       end, Consumers1)),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"0">>, <<"2">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"0">>, <<"2">>]]),
 
     [amqp_channel:cast(Ch, Publish, #amqp_msg{payload = P}) || P <- [<<"msg3">>, <<"msg4">>]],
 
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"4">>, <<"0">>, <<"4">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"4">>, <<"0">>, <<"4">>]]),
     amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DTag1}),
     amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DTag2}),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"0">>, <<"2">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"0">>, <<"2">>]]),
 
     amqp_connection:close(C),
     ok.
@@ -292,7 +339,7 @@ queue_declare(Channel, Config) ->
 
 consume({Parent, State, 0}) ->
     Parent ! {consumer_done, State};
-consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown}) ->
+consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown} = Arg) ->
     receive
         #'basic.consume_ok'{consumer_tag = CTag} ->
             consume({Parent, {maps:put(CTag, 0, MessagesPerConsumer), MessageCount}, CountDown});
@@ -307,9 +354,9 @@ consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown}) ->
             consume({Parent, NewState, CountDown - 1});
         #'basic.cancel_ok'{consumer_tag = CTag} ->
             Parent ! {cancel_ok, CTag},
-            consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown});
+            consume(Arg);
         _ ->
-            consume({Parent, {MessagesPerConsumer, MessageCount}, CountDown})
+            consume(Arg)
     after ?TIMEOUT ->
               Parent ! {consumer_timeout, {MessagesPerConsumer, MessageCount}},
               flush(),
@@ -338,7 +385,7 @@ wait_for_messages(ExpectedCount, State) ->
     receive
         {message, {MessagesPerConsumer, MessageCount}} ->
             wait_for_messages(ExpectedCount - 1, {MessagesPerConsumer, MessageCount})
-    after 5000 ->
+    after ?TIMEOUT ->
             {missing, ExpectedCount, State}
     end.
 
@@ -346,7 +393,7 @@ wait_for_cancel_ok() ->
     receive
         {cancel_ok, CTag} ->
             {cancel_ok, CTag}
-    after 5000 ->
+    after ?TIMEOUT ->
         throw(consumer_cancel_ok_timeout)
     end.
 
@@ -355,7 +402,7 @@ receive_deliver() ->
         {#'basic.deliver'{consumer_tag = CTag,
                           delivery_tag = DTag}, _} ->
             {CTag, DTag}
-    after 5000 ->
+    after ?TIMEOUT ->
             exit(deliver_timeout)
     end.
 

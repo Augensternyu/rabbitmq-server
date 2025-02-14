@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2019-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_feature_flags).
@@ -14,8 +14,6 @@
 -export([feature_flags/0]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 %%--------------------------------------------------------------------
 
 init(Req, _Args) ->
@@ -36,8 +34,7 @@ to_json(ReqData, Context) ->
     rabbit_mgmt_util:reply_list(feature_flags(), ReqData, Context).
 
 is_authorized(ReqData, Context) ->
-    {Res, Req2, Context2} = rabbit_mgmt_util:is_authorized_admin(ReqData, Context),
-    {Res, Req2, Context2}.
+    rabbit_mgmt_util:is_authorized(ReqData, Context).
 
 %%--------------------------------------------------------------------
 

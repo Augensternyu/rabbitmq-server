@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_shovel_worker).
@@ -62,6 +62,9 @@ handle_call(_Msg, _From, State) ->
     {noreply, State}.
 
 handle_cast(init, State = #state{config = Config0}) ->
+    rabbit_log_shovel:debug("Shovel ~ts is reporting its status", [human_readable_name(State#state.name)]),
+    rabbit_shovel_status:report(State#state.name, State#state.type, starting),
+    rabbit_log_shovel:info("Shovel ~ts will now try to connect...", [human_readable_name(State#state.name)]),
     try rabbit_shovel_behaviour:connect_source(Config0) of
       Config ->
         rabbit_log_shovel:debug("Shovel ~ts connected to source", [human_readable_name(maps:get(name, Config))]),
@@ -70,8 +73,8 @@ handle_cast(init, State = #state{config = Config0}) ->
         %% rabbitmq/rabbitmq-shovel#54 for context.
         gen_server2:cast(self(), connect_dest),
         {noreply, State#state{config = Config}}
-    catch _:_ ->
-      rabbit_log_shovel:error("Shovel ~ts could not connect to source", [human_readable_name(maps:get(name, Config0))]),
+    catch E:R ->
+      rabbit_log_shovel:error("Shovel ~ts could not connect to source: ~p ~p", [human_readable_name(maps:get(name, Config0)), E, R]),
       {stop, shutdown, State}
     end;
 handle_cast(connect_dest, State = #state{config = Config0}) ->
@@ -80,8 +83,8 @@ handle_cast(connect_dest, State = #state{config = Config0}) ->
         rabbit_log_shovel:debug("Shovel ~ts connected to destination", [human_readable_name(maps:get(name, Config))]),
         gen_server2:cast(self(), init_shovel),
         {noreply, State#state{config = Config}}
-    catch _:_ ->
-      rabbit_log_shovel:error("Shovel ~ts could not connect to destination", [human_readable_name(maps:get(name, Config0))]),
+    catch E:R ->
+      rabbit_log_shovel:error("Shovel ~ts could not connect to destination: ~p ~p", [human_readable_name(maps:get(name, Config0)), E, R]),
       {stop, shutdown, State}
     end;
 handle_cast(init_shovel, State = #state{config = Config}) ->
@@ -150,10 +153,14 @@ terminate({shutdown, autodelete}, State = #state{name = Name,
     _ = rabbit_runtime_parameters:clear(VHost, <<"shovel">>, ShovelName, ?SHOVEL_USER),
     rabbit_shovel_status:remove(Name),
     ok;
-terminate(shutdown, State) ->
+terminate(shutdown, State = #state{name = Name}) ->
     close_connections(State),
+    rabbit_shovel_status:remove(Name),
     ok;
-terminate(socket_closed_unexpectedly, State) ->
+terminate(socket_closed_unexpectedly, State = #state{name = Name}) ->
+    rabbit_log_shovel:error("Shovel ~ts is stopping because of the socket closed unexpectedly", [human_readable_name(Name)]),
+    rabbit_shovel_status:report(State#state.name, State#state.type,
+                                {terminated, "socket closed"}),
     close_connections(State),
     ok;
 terminate({'EXIT', heartbeat_timeout}, State = #state{name = Name}) ->

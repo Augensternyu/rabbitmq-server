@@ -2,14 +2,12 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_vhost_limit).
 
 -behaviour(rabbit_runtime_parameter).
-
--include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([register/0]).
 -export([parse_set/3, set/3, clear/2]).
@@ -39,12 +37,14 @@ validate(_VHost, <<"vhost-limits">>, Name, Term, _User) ->
 
 notify(VHost, <<"vhost-limits">>, <<"limits">>, Limits, ActingUser) ->
     rabbit_event:notify(vhost_limits_set, [{name, <<"limits">>},
+                                           {vhost, VHost},
                                            {user_who_performed_action, ActingUser}
                                            | Limits]),
     update_vhost(VHost, Limits).
 
 notify_clear(VHost, <<"vhost-limits">>, <<"limits">>, ActingUser) ->
     rabbit_event:notify(vhost_limits_cleared, [{name, <<"limits">>},
+                                               {vhost, VHost},
                                                {user_who_performed_action, ActingUser}]),
     %% If the function is called as a part of vhost deletion, the vhost can
     %% be already deleted.
@@ -84,7 +84,7 @@ list(VHost) ->
 -spec is_over_connection_limit(vhost:name()) -> {true, non_neg_integer()} | false.
 
 is_over_connection_limit(VirtualHost) ->
-    case rabbit_vhost_limit:connection_limit(VirtualHost) of
+    case connection_limit(VirtualHost) of
         %% no limit configured
         undefined                                            -> false;
         %% with limit = 0, no connections are allowed

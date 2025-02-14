@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_vhost_sup_sup).
@@ -22,7 +22,7 @@
          save_vhost_recovery_terms/2,
          lookup_vhost_sup_record/1,
          lookup_vhost_recovery_terms/1]).
--export([delete_on_all_nodes/1, start_on_all_nodes/1]).
+-export([delete_on_all_nodes/1, start_on_all_nodes/1, start_on_all_nodes/2]).
 -export([is_vhost_alive/1]).
 -export([check/0]).
 
@@ -54,16 +54,19 @@ init([]) ->
             [rabbit_vhost_sup_wrapper, rabbit_vhost_sup]}]}}.
 
 start_on_all_nodes(VHost) ->
-    %% Do not try to start a vhost on booting peer nodes
-    AllBooted = [Node || Node <- rabbit_nodes:list_running()],
+    %% By default select only fully booted peers
+    AllBooted = rabbit_nodes:list_running(),
     Nodes     = [node() | AllBooted],
+    start_on_all_nodes(VHost, Nodes).
+
+start_on_all_nodes(VHost, Nodes) ->
     Results   = [{Node, start_vhost(VHost, Node)} || Node <- Nodes],
     Failures  = lists:filter(fun
-                               ({_, {ok, _}}) -> false;
-                               ({_, {error, {already_started, _}}}) -> false;
-                               (_) -> true
-                            end,
-                            Results),
+                                 ({_, {ok, _}}) -> false;
+                                 ({_, {error, {already_started, _}}}) -> false;
+                                 (_) -> true
+                             end,
+        Results),
     case Failures of
         []     -> ok;
         Errors -> {error, {failed_to_start_vhost_on_nodes, Errors}}
@@ -75,11 +78,17 @@ delete_on_all_nodes(VHost) ->
 
 stop_and_delete_vhost(VHost) ->
     StopResult = case lookup_vhost_sup_record(VHost) of
-        not_found -> ok;
+        not_found ->
+            rabbit_log:warning("Supervisor for vhost '~ts' not found during deletion procedure",
+                            [VHost]),
+            ok;
         #vhost_sup{wrapper_pid = WrapperPid,
                    vhost_sup_pid = VHostSupPid} ->
             case is_process_alive(WrapperPid) of
-                false -> ok;
+                false ->
+                    rabbit_log:info("Supervisor ~tp for vhost '~ts' already stopped",
+                                    [VHostSupPid, VHost]),
+                    ok;
                 true  ->
                     rabbit_log:info("Stopping vhost supervisor ~tp"
                                     " for vhost '~ts'",
@@ -278,7 +287,7 @@ check() ->
     VHosts = rabbit_vhost:list_names(),
     lists:filter(
       fun(V) ->
-              case rabbit_vhost_sup_sup:get_vhost_sup(V) of
+              case get_vhost_sup(V) of
                   {ok, Sup} ->
                       MsgStores = [Pid || {Name, Pid, _, _} <- supervisor:which_children(Sup),
                                          lists:member(Name, [msg_store_persistent,

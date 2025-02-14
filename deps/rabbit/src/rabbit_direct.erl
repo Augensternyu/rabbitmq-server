@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_direct).
@@ -158,7 +158,7 @@ is_vhost_alive(VHost, {Username, _Password}, Pid) ->
         true  -> true;
         false ->
             rabbit_log_connection:error(
-                "Error on Direct connection ~tp~n"
+                "Error on direct client connection ~tp~n"
                 "access to vhost '~ts' refused for user '~ts': "
                 "vhost '~ts' is down",
                 [Pid, VHost, PrintedUsername, VHost]),
@@ -174,7 +174,7 @@ is_over_vhost_connection_limit(VHost, {Username, _Password}, Pid) ->
         false         -> false;
         {true, Limit} ->
             rabbit_log_connection:error(
-                "Error on Direct connection ~tp~n"
+                "Error on direct client connection ~tp~n"
                 "access to vhost '~ts' refused for user '~ts': "
                 "vhost connection limit (~tp) is reached",
                 [Pid, VHost, PrintedUsername, Limit]),
@@ -182,7 +182,7 @@ is_over_vhost_connection_limit(VHost, {Username, _Password}, Pid) ->
     catch
         throw:{error, {no_such_vhost, VHost}} ->
             rabbit_log_connection:error(
-                "Error on Direct connection ~tp~n"
+                "Error on direct client connection ~tp~n"
                 "vhost ~ts not found", [Pid, VHost]),
             true
     end.

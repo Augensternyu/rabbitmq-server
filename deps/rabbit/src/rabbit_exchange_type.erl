@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_exchange_type).
@@ -23,8 +23,14 @@
 
 %% The no_return is there so that we can have an "invalid" exchange
 %% type (see rabbit_exchange_type_invalid).
--callback route(rabbit_types:exchange(), rabbit_types:delivery()) ->
-    rabbit_router:match_result().
+%% NB: This callback is deprecated in favour of route/3
+%% and will be removed in the future
+% -callback route(rabbit_types:exchange(), mc:state()) ->
+%     rabbit_router:match_result().
+
+-callback route(rabbit_types:exchange(), mc:state(), rabbit_exchange:route_opts()) ->
+    [rabbit_types:binding_destination() |
+     {rabbit_amqqueue:name(), rabbit_types:binding_key()}].
 
 %% called BEFORE declaration, to check args etc; may exit with #amqp_error{}
 -callback validate(rabbit_types:exchange()) -> 'ok'.
@@ -63,5 +69,10 @@
 
 -callback info(rabbit_types:exchange(), [atom()]) -> [{atom(), term()}].
 
-added_to_rabbit_registry(_Type, _ModuleName) -> ok.
-removed_from_rabbit_registry(_Type) -> ok.
+added_to_rabbit_registry(Type, _ModuleName) ->
+    persistent_term:erase(Type),
+    ok.
+
+removed_from_rabbit_registry(Type) ->
+    persistent_term:erase(Type),
+    ok.

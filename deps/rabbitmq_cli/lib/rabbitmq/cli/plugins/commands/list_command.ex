@@ -2,12 +2,12 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Plugins.Commands.ListCommand do
   import RabbitCommon.Records
 
-  alias RabbitMQ.CLI.Core.{DocGuide, Validators}
+  alias RabbitMQ.CLI.Core.{Config, DocGuide, Validators}
   alias RabbitMQ.CLI.Plugins.Helpers, as: PluginHelpers
   import RabbitMQ.CLI.Core.{CodePath, Paths}
 
@@ -61,8 +61,14 @@ defmodule RabbitMQ.CLI.Plugins.Commands.ListCommand do
         :ok
 
       false ->
-        names = Enum.join(Enum.to_list(missing), ", ")
-        IO.puts("WARNING - plugins currently enabled but missing: #{names}\n")
+        case Config.output_less?(opts) do
+          false ->
+            names = Enum.join(Enum.to_list(missing), ", ")
+            IO.puts("WARNING - plugins currently enabled but missing: #{names}\n")
+
+          true ->
+            :ok
+        end
     end
 
     implicit = :rabbit_plugins.dependencies(false, enabled, all)
@@ -116,7 +122,7 @@ defmodule RabbitMQ.CLI.Plugins.Commands.ListCommand do
       ["--verbose", "output more information"],
       [
         "--minimal",
-        "only print plugin names. Most useful in compbination with --silent and --enabled."
+        "only print plugin names. Most useful in combination with --silent and --enabled."
       ],
       ["--enabled", "only list enabled plugins"],
       ["--implicitly-enabled", "include plugins enabled as dependencies of other plugins"]
@@ -172,8 +178,8 @@ defmodule RabbitMQ.CLI.Plugins.Commands.ListCommand do
 
     %{
       name: name,
-      version: version,
-      running_version: running[name],
+      version: to_string(version),
+      running_version: to_string(running[name]),
       enabled: enabled_mode,
       running: Keyword.has_key?(running, name)
     }

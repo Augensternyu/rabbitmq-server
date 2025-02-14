@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Core.Listeners do
   import Record, only: [defrecord: 3, extract: 2]
@@ -12,6 +12,11 @@ defmodule RabbitMQ.CLI.Core.Listeners do
   #
   # API
   #
+
+  # TODO: Remove when we require Elixir 1.15
+  if function_exported?(Mix, :ensure_application!, 1) do
+    Mix.ensure_application!(:public_key)
+  end
 
   defrecord :certificate,
             :Certificate,
@@ -256,10 +261,12 @@ defmodule RabbitMQ.CLI.Core.Listeners do
   def protocol_label(:"stomp/ssl"), do: "STOMP over TLS"
   def protocol_label(:http), do: "HTTP API"
   def protocol_label(:https), do: "HTTP API over TLS (HTTPS)"
-  def protocol_label(:"http/web-mqtt"), do: "MQTT over WebSockets"
-  def protocol_label(:"https/web-mqtt"), do: "MQTT over WebSockets and TLS (HTTPS)"
-  def protocol_label(:"http/web-stomp"), do: "STOMP over WebSockets"
-  def protocol_label(:"https/web-stomp"), do: "STOMP over WebSockets and TLS (HTTPS)"
+  def protocol_label(:"http/web-amqp"), do: "AMQP over WebSocket"
+  def protocol_label(:"https/web-amqp"), do: "AMQP over WebSocket and TLS (HTTPS)"
+  def protocol_label(:"http/web-mqtt"), do: "MQTT over WebSocket"
+  def protocol_label(:"https/web-mqtt"), do: "MQTT over WebSocket and TLS (HTTPS)"
+  def protocol_label(:"http/web-stomp"), do: "STOMP over WebSocket"
+  def protocol_label(:"https/web-stomp"), do: "STOMP over WebSocket and TLS (HTTPS)"
   def protocol_label(:"http/prometheus"), do: "Prometheus exporter API over HTTP"
   def protocol_label(:"https/prometheus"), do: "Prometheus exporter API over TLS (HTTPS)"
   def protocol_label(:clustering), do: "inter-node and CLI tool communication"

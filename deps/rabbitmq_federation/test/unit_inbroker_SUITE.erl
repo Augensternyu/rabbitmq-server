@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(unit_inbroker_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
@@ -201,10 +200,12 @@ upstream_validation(_Config) ->
     ok.
 
 with_exchanges(Fun) ->
-    rabbit_exchange:declare(r(?US_NAME), fanout, false, false, false, [],
-                            <<"acting-user">>),
-    X = rabbit_exchange:declare(r(?DS_NAME), fanout, false, false, false, [],
-                                <<"acting-user">>),
+    {ok, _} = rabbit_exchange:declare(
+                r(?US_NAME), fanout, false, false, false, [],
+                <<"acting-user">>),
+    {ok, X} = rabbit_exchange:declare(
+                r(?DS_NAME), fanout, false, false, false, [],
+                <<"acting-user">>),
     Fun(X),
     %% Delete downstream first or it will recreate the upstream
     rabbit_exchange:delete(r(?DS_NAME), false, <<"acting-user">>),

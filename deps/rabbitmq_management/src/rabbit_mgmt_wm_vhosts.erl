@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_vhosts).
@@ -12,8 +12,6 @@
 -export([basic/0, augmented/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 -define(BASIC_COLUMNS, ["name", "tracing", "pid"]).
 
 -define(DEFAULT_SORT, ["name"]).
@@ -33,9 +31,12 @@ to_json(ReqData, Context = #context{user = User}) ->
     try
         Basic = [rabbit_vhost:info(V)
                  || V <- rabbit_mgmt_util:list_visible_vhosts(User)],
-        Data = rabbit_mgmt_util:augment_resources(Basic, ?DEFAULT_SORT,
-                                                  ?BASIC_COLUMNS, ReqData,
-                                                  Context, fun augment/2),
+        Augmented = rabbit_mgmt_util:augment_resources(Basic, ?DEFAULT_SORT,
+                                                       ?BASIC_COLUMNS, ReqData,
+                                                       Context, fun augment/2),
+        %% inject default DQT into virtual host metadata,
+        %% where necessary
+        Data = rabbit_queue_type:vhosts_with_dqt(Augmented),
         rabbit_mgmt_util:reply(Data, ReqData, Context)
     catch
         {error, invalid_range_parameters, Reason} ->
@@ -57,7 +58,7 @@ augment(Basic, ReqData) ->
 
 augmented(ReqData, #context{user = User}) ->
     case rabbit_mgmt_util:disable_stats(ReqData) of
-        false ->            
+        false ->
             rabbit_mgmt_db:augment_vhosts(
               [rabbit_vhost:info(V) || V <- rabbit_mgmt_util:list_visible_vhosts(User)],
               rabbit_mgmt_util:range(ReqData));
@@ -66,4 +67,7 @@ augmented(ReqData, #context{user = User}) ->
     end.
 
 basic() ->
-    rabbit_vhost:info_all([name]).
+    Maps = lists:map(
+            fun maps:from_list/1,
+            rabbit_vhost:info_all([name, description, tags, default_queue_type, metadata, protected_from_deletion])),
+    rabbit_queue_type:vhosts_with_dqt(Maps).

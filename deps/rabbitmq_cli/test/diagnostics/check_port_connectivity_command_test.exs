@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule CheckPortConnectivityCommandTest do
   use ExUnit.Case, async: false
@@ -57,7 +57,7 @@ defmodule CheckPortConnectivityCommandTest do
   # note: it's run/2 that filters out non-local alarms
   test "output: when check failed to connect to a port, returns a failure", context do
     failure =
-      {:listener, :rabbit@mercurio, :lolz, 'mercurio', {0, 0, 0, 0, 0, 0, 0, 0}, 7_761_613,
+      {:listener, :rabbit@mercurio, :lolz, ~c"mercurio", {0, 0, 0, 0, 0, 0, 0, 0}, 7_761_613,
        [backlog: 128, nodelay: true]}
 
     assert match?({:error, _}, @command.output({false, [failure]}, context[:opts]))

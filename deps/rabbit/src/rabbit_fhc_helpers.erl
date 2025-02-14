@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_fhc_helpers).
@@ -30,9 +30,8 @@ clear_queue_read_cache([]) ->
     ok;
 clear_queue_read_cache([Q | Rest]) when ?is_amqqueue(Q) ->
     MPid = amqqueue:get_pid(Q),
-    SPids = amqqueue:get_slave_pids(Q),
     %% Limit the action to the current node.
-    Pids = [P || P <- [MPid | SPids], node(P) =:= node()],
+    Pids = [P || P <- [MPid], node(P) =:= node()],
     %% This function is executed in the context of the backing queue
     %% process because the read buffer is stored in the process
     %% dictionary.

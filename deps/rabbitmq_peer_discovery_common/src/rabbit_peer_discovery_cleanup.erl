@@ -4,7 +4,7 @@
 %%
 %% The Initial Developer of the Original Code is AWeber Communications.
 %% Copyright (c) 2015-2016 AWeber Communications
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates. All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved. All rights reserved.
 %%
 -module(rabbit_peer_discovery_cleanup).
 
@@ -27,6 +27,8 @@
 -ifdef(TEST).
 -compile(export_all).
 -endif.
+
+-import(rabbit_data_coercion, [as_list/1]).
 
 -define(CONFIG_MODULE, rabbit_peer_discovery_config).
 -define(CONFIG_KEY, node_cleanup).
@@ -241,7 +243,7 @@ maybe_cleanup(State, UnreachableNodes) ->
        "Peer discovery: cleanup discovered unreachable nodes: ~tp",
        [UnreachableNodes],
        #{domain => ?RMQLOG_DOMAIN_PEER_DIS}),
-    case lists:subtract(UnreachableNodes, service_discovery_nodes()) of
+    case lists:subtract(as_list(UnreachableNodes), as_list(service_discovery_nodes())) of
         [] ->
             ?LOG_DEBUG(
                "Peer discovery: all unreachable nodes are still "
@@ -262,11 +264,11 @@ maybe_cleanup(State, UnreachableNodes) ->
 %% @doc Iterate over the list of partitioned nodes, either logging the
 %%      node that would be removed or actually removing it.
 %% @spec maybe_remove_nodes(PartitionedNodes :: [node()],
-%%                          WarnOnly :: true | false) -> ok
+%%                          WarnOnly :: boolean()) -> ok
 %% @end
 %%--------------------------------------------------------------------
 -spec maybe_remove_nodes(PartitionedNodes :: [node()],
-                         WarnOnly :: true | false) -> ok.
+                         WarnOnly :: boolean()) -> ok.
 maybe_remove_nodes([], _) -> ok;
 maybe_remove_nodes([Node | Nodes], true) ->
     ?LOG_WARNING(
@@ -277,7 +279,11 @@ maybe_remove_nodes([Node | Nodes], false) ->
     ?LOG_WARNING(
        "Peer discovery: removing unknown node ~ts from the cluster", [Node],
        #{domain => ?RMQLOG_DOMAIN_PEER_DIS}),
-    rabbit_db_cluster:forget_member(Node, false),
+    _ = rabbit_db_cluster:forget_member(Node, false),
+    ?LOG_WARNING(
+        "Peer discovery: removing all quorum queue replicas on node ~ts", [Node],
+        #{domain => ?RMQLOG_DOMAIN_PEER_DIS}),
+    _ = rabbit_quorum_queue:shrink_all(Node),
     maybe_remove_nodes(Nodes, false).
 
 %%--------------------------------------------------------------------
@@ -300,7 +306,8 @@ unreachable_nodes() ->
 service_discovery_nodes() ->
     Module = rabbit_peer_discovery:backend(),
     case rabbit_peer_discovery:normalize(Module:list_nodes()) of
-        {ok, {Nodes, _Type}} ->
+        {ok, {OneOrMultipleNodes, _Type}} ->
+            Nodes = as_list(OneOrMultipleNodes),
             ?LOG_DEBUG(
                "Peer discovery cleanup: ~tp returned ~tp",
                [Module, Nodes],

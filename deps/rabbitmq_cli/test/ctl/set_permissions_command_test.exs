@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule SetPermissionsCommandTest do
   use ExUnit.Case, async: false
@@ -99,7 +99,7 @@ defmodule SetPermissionsCommandTest do
     assert @command.run(
              [context[:user], "^#{context[:user]}-.*", ".*", "*"],
              context[:opts]
-           ) == {:error, {:invalid_regexp, '*', {'nothing to repeat', 0}}}
+           ) == {:error, {:invalid_regexp, ~c"*", {~c"nothing to repeat", 0}}}
 
     # asserts that the failed command didn't change anything
     u = Enum.find(list_permissions(context[:vhost]), fn x -> x[:user] == context[:user] end)

@@ -3,7 +3,7 @@ REM  This Source Code Form is subject to the terms of the Mozilla Public
 REM  License, v. 2.0. If a copy of the MPL was not distributed with this
 REM  file, You can obtain one at https://mozilla.org/MPL/2.0/.
 REM
-REM  Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+REM  Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 REM
 
 setlocal
@@ -201,7 +201,6 @@ set ERLANG_SERVICE_ARGUMENTS= ^
 -syslog logger [] ^
 -syslog syslog_error_logger false ^
 -kernel prevent_overlapping_partitions false ^
--enable-feature maybe_expr ^
 !STARVAR!
 
 set ERLANG_SERVICE_ARGUMENTS=!ERLANG_SERVICE_ARGUMENTS:\=\\!
@@ -226,6 +225,9 @@ rem user-specific directory.
 -env ERL_MAX_ETS_TABLES="!ERL_MAX_ETS_TABLES!" ^
 -env ERL_MAX_PORTS="!ERL_MAX_PORTS!" ^
 -env RABBITMQ_BASE="!RABBITMQ_BASE!" ^
+-env RABBITMQ_CONFIG_FILE="!RABBITMQ_CONFIG_FILE!" ^
+-env RABBITMQ_LOG_BASE="!RABBITMQ_LOG_BASE!" ^
+-env RABBITMQ_MNESIA_BASE="!RABBITMQ_MNESIA_BASE!" ^
 -env RABBITMQ_NODENAME="!RABBITMQ_NODENAME!" ^
 -workdir "!RABBITMQ_BASE!" ^
 -stopaction "rabbit:stop_and_halt()." ^

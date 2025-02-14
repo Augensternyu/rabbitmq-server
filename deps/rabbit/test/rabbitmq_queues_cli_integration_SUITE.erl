@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2017-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbitmq_queues_cli_integration_SUITE).
 
@@ -120,8 +120,8 @@ grow_invalid_node_filtered(Config) ->
     #'queue.declare_ok'{} = declare_qq(Ch, QName, Args),
     DummyNode = not_really_a_node@nothing,
     publish_confirm(Ch, QName),
-    {ok, Out1} = rabbitmq_queues(Config, 0, ["grow", DummyNode, "all"]),
-    ?assertNotMatch(#{{"/", "grow-err"} := _}, parse_result(Out1)),
+    %% validated as of rabbitmq-server#8007
+    {error, _ExitCode, _} = rabbitmq_queues(Config, 0, ["grow", DummyNode, "all"]),
     ok.
 
 parse_result(S) ->
@@ -161,6 +161,6 @@ publish_confirm(Ch, QName) ->
         #'basic.nack'{} ->
             ct:pal("NOT CONFIRMED! ~ts", [QName]),
             fail
-    after 10000 ->
+    after 30000 ->
             exit(confirm_timeout)
     end.

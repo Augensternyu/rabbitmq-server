@@ -2,17 +2,16 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_queue_actions).
 
--export([init/2, resource_exists/2, is_authorized/2,
+-export([init/2, resource_exists/2, is_authorized/2, allow_missing_post/2,
          allowed_methods/2, content_types_accepted/2, accept_content/2]).
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("rabbit/include/amqqueue.hrl").
 
 %%--------------------------------------------------------------------
@@ -28,9 +27,12 @@ allowed_methods(ReqData, Context) ->
 
 resource_exists(ReqData, Context) ->
     {case rabbit_mgmt_wm_queue:queue(ReqData) of
-         not_found -> false;
+         not_found -> raise_not_found(ReqData, Context);
          _         -> true
      end, ReqData, Context}.
+
+allow_missing_post(ReqData, Context) ->
+    {false, ReqData, Context}.
 
 content_types_accepted(ReqData, Context) ->
    {[{'*', accept_content}], ReqData, Context}.
@@ -52,17 +54,18 @@ do_it(ReqData0, Context) ->
 is_authorized(ReqData, Context) ->
     rabbit_mgmt_util:is_authorized_admin(ReqData, Context).
 
+raise_not_found(ReqData, Context) ->
+    ErrorMessage = case rabbit_mgmt_util:vhost(ReqData) of
+        not_found ->
+            "vhost_not_found";
+        _ ->
+            "queue_not_found"
+    end,
+    rabbit_mgmt_util:not_found(
+        rabbit_data_coercion:to_binary(ErrorMessage),
+        ReqData,
+        Context).
 %%--------------------------------------------------------------------
-
-action(<<"sync">>, Q, ReqData, Context) when ?is_amqqueue(Q) ->
-    QPid = amqqueue:get_pid(Q),
-    spawn(fun() -> rabbit_amqqueue:sync_mirrors(QPid) end),
-    {true, ReqData, Context};
-
-action(<<"cancel_sync">>, Q, ReqData, Context) when ?is_amqqueue(Q) ->
-    QPid = amqqueue:get_pid(Q),
-    _ = rabbit_amqqueue:cancel_sync_mirrors(QPid),
-    {true, ReqData, Context};
 
 action(Else, _Q, ReqData, Context) ->
     rabbit_mgmt_util:bad_request({unknown, Else}, ReqData, Context).

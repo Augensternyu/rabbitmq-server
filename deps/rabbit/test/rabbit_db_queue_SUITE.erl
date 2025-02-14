@@ -2,14 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_db_queue_SUITE).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("eunit/include/eunit.hrl").
--include_lib("common_test/include/ct.hrl").
 -include("amqqueue.hrl").
 
 -compile(export_all).
@@ -41,23 +40,24 @@ all_tests() ->
      count,
      count_by_vhost,
      set,
-     set_many,
      delete,
      update,
+     update_decorators,
      exists,
      get_all_durable,
      get_all_durable_by_type,
      filter_all_durable,
      get_durable,
      get_many_durable,
-     set_dirty,
-     internal_delete,
-     update_durable
+     update_durable,
+     mark_local_durable_queues_stopped,
+     foreach_durable,
+     internal_delete
     ].
 
 mnesia_tests() ->
     [
-     foreach_durable,
+     set_dirty,
      foreach_transient,
      delete_transient,
      update_in_mnesia_tx,
@@ -75,7 +75,13 @@ init_per_suite(Config) ->
 end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config).
 
+init_per_group(mnesia_store = Group, Config0) ->
+    Config = rabbit_ct_helpers:set_config(Config0, [{metadata_store, mnesia}]),
+    init_per_group_common(Group, Config);
 init_per_group(Group, Config) ->
+    init_per_group_common(Group, Config).
+
+init_per_group_common(Group, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config, [
         {rmq_nodename_suffix, Group},
         {rmq_nodes_count, 1}
@@ -137,7 +143,7 @@ get_many1(_Config) ->
     ?assertEqual([Q], rabbit_db_queue:get_many([QName, QName2])),
     ?assertEqual([], rabbit_db_queue:get_many([QName2])),
     ok = rabbit_db_queue:set(Q2),
-    ?assertEqual([Q, Q2], rabbit_db_queue:get_many([QName, QName2])),
+    ?assertEqual(lists:sort([Q, Q2]), lists:sort(rabbit_db_queue:get_many([QName, QName2]))),
     passed.
 
 get_all(Config) ->
@@ -276,23 +282,6 @@ set1(_Config) ->
     ?assertEqual({ok, Q}, rabbit_db_queue:get(QName)),
     passed.
 
-set_many(Config) ->
-    passed = rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, set_many1, [Config]).
-
-set_many1(_Config) ->
-    QName1 = rabbit_misc:r(?VHOST, queue, <<"test-queue1">>),
-    QName2 = rabbit_misc:r(?VHOST, queue, <<"test-queue2">>),
-    QName3 = rabbit_misc:r(?VHOST, queue, <<"test-queue3">>),
-    Q1 = new_queue(QName1, rabbit_classic_queue),
-    Q2 = new_queue(QName2, rabbit_classic_queue),
-    Q3 = new_queue(QName3, rabbit_classic_queue),
-    ?assertEqual(ok, rabbit_db_queue:set_many([])),
-    ?assertEqual(ok, rabbit_db_queue:set_many([Q1, Q2, Q3])),
-    ?assertEqual({ok, Q1}, rabbit_db_queue:get_durable(QName1)),
-    ?assertEqual({ok, Q2}, rabbit_db_queue:get_durable(QName2)),
-    ?assertEqual({ok, Q3}, rabbit_db_queue:get_durable(QName3)),
-    passed.
-
 delete(Config) ->
     passed = rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete1, [Config]).
 
@@ -303,8 +292,8 @@ delete1(_Config) ->
     ?assertEqual({ok, Q}, rabbit_db_queue:get(QName)),
     %% TODO Can we handle the deletions outside of rabbit_db_queue? Probably not because
     %% they should be done in a single transaction, but what a horrid API to have!
-    Dict = rabbit_db_queue:delete(QName, normal),
-    ?assertEqual(0, dict:size(Dict)),
+    Deletions = rabbit_db_queue:delete(QName, normal),
+    ?assertEqual(rabbit_binding:new_deletions(), Deletions),
     ?assertEqual(ok, rabbit_db_queue:delete(QName, normal)),
     ?assertEqual({error, not_found}, rabbit_db_queue:get(QName)),
     passed.
@@ -335,7 +324,7 @@ update_decorators1(_Config) ->
     ?assertEqual({ok, Q}, rabbit_db_queue:get(QName)),
     ?assertEqual(undefined, amqqueue:get_decorators(Q)),
     %% Not really testing we set a decorator, but at least the field is being updated
-    ?assertEqual(ok, rabbit_db_queue:update_decorators(QName)),
+    ?assertEqual(ok, rabbit_db_queue:update_decorators(QName, [])),
     {ok, Q1} = rabbit_db_queue:get(QName),
     ?assertEqual([], amqqueue:get_decorators(Q1)),
     passed.
@@ -455,8 +444,24 @@ update_durable1(_Config) ->
                        fun(Q0) when ?is_amqqueue(Q0) -> true end)),
     {ok, Q0} = rabbit_db_queue:get_durable(QName1),
     ?assertMatch(my_policy, amqqueue:get_policy(Q0)),
-    {ok, Q00} = rabbit_db_queue:get(QName1),
-    ?assertMatch(undefined, amqqueue:get_policy(Q00)),
+    passed.
+
+mark_local_durable_queues_stopped(Config) ->
+    passed = rabbit_ct_broker_helpers:rpc(Config, 0,
+               ?MODULE, mark_local_durable_queues_stopped1, [Config]).
+
+mark_local_durable_queues_stopped1(_Config) ->
+    DurableQName = rabbit_misc:r(?VHOST, queue, <<"test-queue1">>),
+    TransientQName = rabbit_misc:r(?VHOST, queue, <<"test-queue2">>),
+    DurableQ = new_queue(DurableQName, rabbit_classic_queue),
+    TransientQ = new_queue(TransientQName, rabbit_classic_queue),
+    %% Set Q1's pid to a dead process
+    RecoverableQ = amqqueue:set_pid(DurableQ, spawn(fun() -> ok end)),
+    ?assertEqual(ok, rabbit_db_queue:set(RecoverableQ)),
+    ?assertEqual(ok, rabbit_db_queue:set_dirty(TransientQ)),
+    ?assertEqual(ok, rabbit_amqqueue:mark_local_durable_queues_stopped(?VHOST)),
+    {ok, StoppedQ} = rabbit_db_queue:get_durable(DurableQName),
+    ?assertEqual(stopped, amqqueue:get_state(StoppedQ)),
     passed.
 
 foreach_durable(Config) ->
@@ -464,11 +469,8 @@ foreach_durable(Config) ->
 
 foreach_durable1(_Config) ->
     QName1 = rabbit_misc:r(?VHOST, queue, <<"test-queue1">>),
-    QName2 = rabbit_misc:r(?VHOST, queue, <<"test-queue2">>),
     Q1 = new_queue(QName1, rabbit_classic_queue),
-    Q2 = new_queue(QName2, rabbit_classic_queue),
     ?assertEqual(ok, rabbit_db_queue:set(Q1)),
-    ?assertEqual(ok, rabbit_db_queue:set_dirty(Q2)),
     ?assertEqual(ok, rabbit_db_queue:foreach_durable(
                        fun(Q0) ->
                                rabbit_db_queue:internal_delete(amqqueue:get_name(Q0), true, normal)
@@ -476,7 +478,6 @@ foreach_durable1(_Config) ->
                        fun(Q0) when ?is_amqqueue(Q0) -> true end)),
     ?assertEqual({error, not_found}, rabbit_db_queue:get(QName1)),
     ?assertEqual({error, not_found}, rabbit_db_queue:get_durable(QName1)),
-    ?assertMatch({ok, _}, rabbit_db_queue:get(QName2)),
     passed.
 
 foreach_transient(Config) ->

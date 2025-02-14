@@ -18,13 +18,13 @@ def all_beam_files(name = "all_beam_files"):
             "src/rabbit_stream_management_utils.erl",
             "src/rabbit_stream_mgmt_db.erl",
             "src/rabbit_stream_publishers_mgmt.erl",
+            "src/rabbit_stream_tracking_mgmt.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
         app_name = "rabbitmq_stream_management",
         dest = "ebin",
         erlc_opts = "//:erlc_opts",
         deps = [
-            "//deps/amqp_client:erlang_app",
             "//deps/rabbit_common:erlang_app",
             "//deps/rabbitmq_management:erlang_app",
             "//deps/rabbitmq_management_agent:erlang_app",
@@ -51,13 +51,13 @@ def all_test_beam_files(name = "all_test_beam_files"):
             "src/rabbit_stream_management_utils.erl",
             "src/rabbit_stream_mgmt_db.erl",
             "src/rabbit_stream_publishers_mgmt.erl",
+            "src/rabbit_stream_tracking_mgmt.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
         app_name = "rabbitmq_stream_management",
         dest = "test",
         erlc_opts = "//:test_erlc_opts",
         deps = [
-            "//deps/amqp_client:erlang_app",
             "//deps/rabbit_common:erlang_app",
             "//deps/rabbitmq_management:erlang_app",
             "//deps/rabbitmq_management_agent:erlang_app",
@@ -101,6 +101,7 @@ def all_srcs(name = "all_srcs"):
             "src/rabbit_stream_management_utils.erl",
             "src/rabbit_stream_mgmt_db.erl",
             "src/rabbit_stream_publishers_mgmt.erl",
+            "src/rabbit_stream_tracking_mgmt.erl",
         ],
     )
     filegroup(

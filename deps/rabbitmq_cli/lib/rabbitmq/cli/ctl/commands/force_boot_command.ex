@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ForceBootCommand do
   alias RabbitMQ.CLI.Core.{Config, DocGuide}
@@ -42,6 +42,10 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ForceBootCommand do
           dir ->
             File.write(Path.join(dir, "force_load"), "")
         end
+
+      {:error, :not_supported} ->
+        {:error, RabbitMQ.CLI.Core.ExitCodes.exit_usage(),
+         "This command is not supported by node #{node_name}"}
 
       _ ->
         :ok

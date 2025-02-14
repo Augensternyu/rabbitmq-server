@@ -9,7 +9,8 @@ def all_beam_files(name = "all_beam_files"):
     erlang_bytecode(
         name = "other_beam",
         srcs = [
-            "src/rabbit_shovel_mgmt.erl",
+            "src/rabbit_shovel_mgmt_shovel.erl",
+            "src/rabbit_shovel_mgmt_shovels.erl",
             "src/rabbit_shovel_mgmt_util.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
@@ -33,7 +34,8 @@ def all_test_beam_files(name = "all_test_beam_files"):
         name = "test_other_beam",
         testonly = True,
         srcs = [
-            "src/rabbit_shovel_mgmt.erl",
+            "src/rabbit_shovel_mgmt_shovel.erl",
+            "src/rabbit_shovel_mgmt_shovels.erl",
             "src/rabbit_shovel_mgmt_util.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
@@ -72,7 +74,8 @@ def all_srcs(name = "all_srcs"):
     filegroup(
         name = "srcs",
         srcs = [
-            "src/rabbit_shovel_mgmt.erl",
+            "src/rabbit_shovel_mgmt_shovel.erl",
+            "src/rabbit_shovel_mgmt_shovels.erl",
             "src/rabbit_shovel_mgmt_util.erl",
         ],
     )
@@ -99,19 +102,10 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         deps = ["//deps/rabbit_common:erlang_app", "//deps/rabbitmq_ct_helpers:erlang_app"],
     )
     erlang_bytecode(
-        name = "rabbit_shovel_mgmt_SUITE_beam_files",
+        name = "unit_SUITE_beam_files",
         testonly = True,
-        srcs = ["test/rabbit_shovel_mgmt_SUITE.erl"],
-        outs = ["test/rabbit_shovel_mgmt_SUITE.beam"],
-        app_name = "rabbitmq_shovel_management",
-        erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/rabbit_common:erlang_app", "//deps/rabbitmq_management_agent:erlang_app"],
-    )
-    erlang_bytecode(
-        name = "rabbit_shovel_mgmt_util_SUITE_beam_files",
-        testonly = True,
-        srcs = ["test/rabbit_shovel_mgmt_util_SUITE.erl"],
-        outs = ["test/rabbit_shovel_mgmt_util_SUITE.beam"],
+        srcs = ["test/unit_SUITE.erl"],
+        outs = ["test/unit_SUITE.beam"],
         app_name = "rabbitmq_shovel_management",
         erlc_opts = "//:test_erlc_opts",
     )

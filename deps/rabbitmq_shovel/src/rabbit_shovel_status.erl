@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_shovel_status).
@@ -14,9 +14,12 @@
          report_blocked_status/2,
          remove/1,
          status/0,
+         status/1,
          lookup/1,
          cluster_status/0,
-         cluster_status_with_nodes/0]).
+         cluster_status_with_nodes/0,
+         get_status_table/0
+]).
 -export([inject_node_info/2, find_matching_shovel/3]).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -68,7 +71,9 @@ remove(Name) ->
 %% format without a feature flag.
 -spec status() -> [status_tuple()].
 status() ->
-    gen_server:call(?SERVER, status, infinity).
+    status(infinity).
+status(Timeout) ->
+    gen_server:call(?SERVER, status, Timeout).
 
 -spec cluster_status() -> [status_tuple()].
 cluster_status() ->
@@ -93,6 +98,10 @@ cluster_status_with_nodes() ->
 lookup(Name) ->
     gen_server:call(?SERVER, {lookup, Name}, infinity).
 
+-spec get_status_table() -> ok.
+get_status_table() ->
+    gen_server:call(?SERVER, get_status_table).
+
 init([]) ->
     ?ETS_NAME = ets:new(?ETS_NAME,
                         [named_table, {keypos, #entry.name}, private]),
@@ -114,11 +123,20 @@ handle_call({lookup, Name}, _From, State) ->
                            {timestamp, Entry#entry.timestamp}];
                [] -> not_found
            end,
-    {reply, Link, State}.
+    {reply, Link, State};
+
+handle_call(get_status_table, _From, State) ->
+    Entries = ets:tab2list(?ETS_NAME),
+    {reply, Entries, State}.
 
 handle_cast({report, Name, Type, Info, Timestamp}, State) ->
-    true = ets:insert(?ETS_NAME, #entry{name = Name, type = Type, info = Info,
-                                        timestamp = Timestamp}),
+    Entry = #entry{
+        name = Name,
+        type = Type,
+        info = Info,
+        timestamp = Timestamp
+    },
+    true = ets:insert(?ETS_NAME, Entry),
     rabbit_event:notify(shovel_worker_status,
                         split_name(Name) ++ split_status(Info)),
     {noreply, State};
@@ -159,9 +177,17 @@ code_change(_OldVsn, State, _Extra) ->
 -spec inject_node_info(node(), [status_tuple()]) -> [status_tuple()].
 inject_node_info(Node, Shovels) ->
     lists:map(
-        fun({Name, Type, {State, Opts}, Timestamp}) ->
-            Opts1 = Opts ++ [{node, Node}],
-            {Name, Type, {State, Opts1}, Timestamp}
+        %% starting
+        fun({Name, Type, State, Timestamp}) when is_atom(State) ->
+             Opts = [{node, Node}],
+             {Name, Type, {State, Opts}, Timestamp};
+           %% terminated
+           ({Name, Type, {terminated, Reason}, Timestamp}) ->
+             {Name, Type, {terminated, Reason}, Timestamp};
+            %% running
+           ({Name, Type, {State, Opts}, Timestamp}) ->
+             Opts1 = Opts ++ [{node, Node}],
+             {Name, Type, {State, Opts1}, Timestamp}
         end, Shovels).
 
 -spec find_matching_shovel(rabbit_types:vhost(), binary(), [status_tuple()]) -> status_tuple() | undefined.
@@ -206,4 +232,3 @@ blocked_status_to_info(#entry{info = {running, Info},
     {running, Info ++ [{blocked_status, BlockedStatus}]};
 blocked_status_to_info(#entry{info = Info}) ->
     Info.
-

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 -module('Elixir.RabbitMQ.CLI.Ctl.Commands.ListStreamConnectionsCommand').
 
@@ -64,7 +64,7 @@ validate(Args, _) ->
     end.
 
 merge_defaults([], Opts) ->
-    merge_defaults([<<"conn_name">>], Opts);
+    merge_defaults([<<"node">>, <<"conn_name">>], Opts);
 merge_defaults(Args, Opts) ->
     {Args, maps:merge(#{verbose => false}, Opts)}.
 
@@ -79,7 +79,7 @@ usage_additional() ->
     [{<<"<column>">>, <<Prefix/binary, InfoItems/binary>>}].
 
 usage_doc_guides() ->
-    [?STREAM_GUIDE_URL].
+    [?STREAMS_GUIDE_URL].
 
 run(Args,
     #{node := NodeName,

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_federation_test_util).
@@ -94,13 +94,20 @@ setup_federation_with_upstream_params(Config, ExtraParams) ->
         ]
       ]),
 
-    rabbit_ct_broker_helpers:set_policy(Config, 0,
-      <<"fed">>, <<"^fed\.">>, <<"all">>, [
-        {<<"federation-upstream-set">>, <<"upstream">>}]),
+    rabbit_ct_broker_helpers:rpc(
+      Config, 0, rabbit_policy, set,
+      [<<"/">>, <<"fed">>, <<"^fed1\.">>, [{<<"federation-upstream-set">>, <<"upstream">>}],
+       0, <<"all">>, <<"acting-user">>]),
 
-    rabbit_ct_broker_helpers:set_policy(Config, 0,
-      <<"fed12">>, <<"^fed12\.">>, <<"all">>, [
-        {<<"federation-upstream-set">>, <<"upstream12">>}]),
+    rabbit_ct_broker_helpers:rpc(
+      Config, 0, rabbit_policy, set,
+      [<<"/">>, <<"fed2">>, <<"^fed2\.">>, [{<<"federation-upstream-set">>, <<"upstream2">>}],
+       0, <<"all">>, <<"acting-user">>]),
+
+    rabbit_ct_broker_helpers:rpc(
+      Config, 0, rabbit_policy, set,
+      [<<"/">>, <<"fed12">>, <<"^fed3\.">>, [{<<"federation-upstream-set">>, <<"upstream12">>}],
+       2, <<"all">>, <<"acting-user">>]),
 
     rabbit_ct_broker_helpers:set_policy(Config, 0,
       <<"one">>, <<"^two$">>, <<"all">>, [
@@ -142,10 +149,10 @@ setup_down_federation(Config) ->
         {<<"queue">>, <<"upstream">>}]]),
     rabbit_ct_broker_helpers:set_policy(
       Config, 0,
-      <<"fed">>, <<"^fed\.">>, <<"all">>, [{<<"federation-upstream-set">>, <<"upstream">>}]),
+      <<"fed">>, <<"^fed1\.">>, <<"all">>, [{<<"federation-upstream-set">>, <<"upstream">>}]),
     rabbit_ct_broker_helpers:set_policy(
       Config, 0,
-      <<"fed">>, <<"^fed\.">>, <<"all">>, [{<<"federation-upstream-set">>, <<"upstream">>}]),
+      <<"fed">>, <<"^fed1\.">>, <<"all">>, [{<<"federation-upstream-set">>, <<"upstream">>}]),
     Config.
 
 wait_for_federation(Retries, Fun) ->
@@ -191,7 +198,7 @@ expect(Payloads, Timeout) ->
                 false -> ?assert(false, rabbit_misc:format("received an unexpected payload ~tp", [Payload]))
             end
     after Timeout ->
-        ?assert(false, rabbit_misc:format("Did not receive expected payloads ~tp in time", [Payloads]))
+              ct:fail("Did not receive expected payloads ~tp in time", [Payloads])
     end.
 
 expect_empty(Ch, Q) ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% An HTTP API counterpart of 'rabbitmq-diagnostics check_protocol_listener'
@@ -42,16 +42,19 @@ to_json(ReqData, Context) ->
             Msg = <<"No active listener">>,
             failure(Msg, Protocol, [P || #listener{protocol = P} <- Local], ReqData, Context);
         _ ->
-            rabbit_mgmt_util:reply([{status, ok},
-                                    {protocol, list_to_binary(Protocol)}], ReqData, Context)
+            Body = #{status   => ok,
+                     protocol => list_to_binary(Protocol)},
+            rabbit_mgmt_util:reply(Body, ReqData, Context)
     end.
 
 failure(Message, Missing, Protocols, ReqData, Context) ->
-    {Response, ReqData1, Context1} = rabbit_mgmt_util:reply([{status, failed},
-                                                             {reason, Message},
-                                                             {missing, list_to_binary(Missing)},
-                                                             {protocols, Protocols}],
-                                                            ReqData, Context),
+    Body = #{
+        status    => failed,
+        reason    => Message,
+        missing   => list_to_binary(Missing),
+        protocols => Protocols
+    },
+    {Response, ReqData1, Context1} = rabbit_mgmt_util:reply(Body, ReqData, Context),
     {stop, cowboy_req:reply(503, #{}, Response, ReqData1), Context1}.
 
 is_authorized(ReqData, Context) ->

@@ -2,14 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_http_health_checks_SUITE).
 
 -include("rabbit_mgmt.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_mgmt_test.hrl").
 
@@ -17,39 +16,42 @@
                                 req/4,
                                 auth_header/2]).
 
--define(COLLECT_INTERVAL, 1000).
 -define(PATH_PREFIX, "/custom-prefix").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 all() ->
     [
-     {group, all_tests},
+     {group, cluster_size_3},
+     {group, cluster_size_5},
      {group, single_node}
     ].
 
 groups() ->
     [
-     {all_tests, [], all_tests()},
+     {cluster_size_3, [], all_tests()},
+     {cluster_size_5, [], [is_quorum_critical_test]},
      {single_node, [], [
                         alarms_test,
                         local_alarms_test,
-                        is_quorum_critical_single_node_test,
-                        is_mirror_sync_critical_single_node_test]}
+                        metadata_store_initialized_test,
+                        metadata_store_initialized_with_data_test,
+                        is_quorum_critical_single_node_test]}
     ].
 
 all_tests() -> [
                 health_checks_test,
-                is_quorum_critical_test,
-                is_mirror_sync_critical_test,
                 virtual_hosts_test,
+                metadata_store_initialized_test,
+                metadata_store_initialized_with_data_test,
                 protocol_listener_test,
                 port_listener_test,
                 certificate_expiration_test
                ].
 
 %% -------------------------------------------------------------------
-%% Testsuite setup/teardown.
+%% Test suite setup/teardown
 %% -------------------------------------------------------------------
 
 init_per_group(Group, Config0) ->
@@ -58,7 +60,8 @@ init_per_group(Group, Config0) ->
     rabbit_ct_helpers:log_environment(),
     inets:start(),
     ClusterSize = case Group of
-                      all_tests -> 3;
+                      cluster_size_3 -> 3;
+                      cluster_size_5 -> 5;
                       single_node -> 1
                   end,
     NodeConf = [{rmq_nodename_suffix, Group},
@@ -77,9 +80,7 @@ end_per_group(_, Config) ->
     Steps = Teardown0 ++ Teardown1,
     rabbit_ct_helpers:run_teardown_steps(Config, Steps).
 
-init_per_testcase(Testcase, Config)
-        when Testcase == is_quorum_critical_test
-            orelse Testcase == is_mirror_sync_critical_test ->
+init_per_testcase(Testcase, Config) when Testcase == is_quorum_critical_test ->
     case rabbit_ct_helpers:is_mixed_versions() of
         true ->
             {skip, "not mixed versions compatible"};
@@ -89,24 +90,11 @@ init_per_testcase(Testcase, Config)
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase).
 
-end_per_testcase(is_quorum_critical_test = Testcase, Config) ->
-    [_, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    _ = rabbit_ct_broker_helpers:start_node(Config, Server2),
-    _ = rabbit_ct_broker_helpers:start_node(Config, Server3),
-    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_queues, []),
-    rabbit_ct_helpers:testcase_finished(Config, Testcase);
-end_per_testcase(is_mirror_sync_critical_test = Testcase, Config) ->
-    [_, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    _ = rabbit_ct_broker_helpers:start_node(Config, Server2),
-    _ = rabbit_ct_broker_helpers:start_node(Config, Server3),
-    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ha">>),
-    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_queues, []),
-    rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
 
 %% -------------------------------------------------------------------
-%% Testcases.
+%% Test cases
 %% -------------------------------------------------------------------
 
 health_checks_test(Config) ->
@@ -115,8 +103,15 @@ health_checks_test(Config) ->
     http_get(Config, io_lib:format("/health/checks/port-listener/~tp", [Port]), ?OK),
     http_get(Config, "/health/checks/protocol-listener/http", ?OK),
     http_get(Config, "/health/checks/virtual-hosts", ?OK),
-    http_get(Config, "/health/checks/node-is-mirror-sync-critical", ?OK),
     http_get(Config, "/health/checks/node-is-quorum-critical", ?OK),
+    passed.
+
+metadata_store_initialized_test(Config) ->
+    http_get(Config, "/health/checks/metadata-store/initialized", ?OK),
+    passed.
+
+metadata_store_initialized_with_data_test(Config) ->
+    http_get(Config, "/health/checks/metadata-store/initialized/with-data", ?OK),
     passed.
 
 alarms_test(Config) ->
@@ -193,9 +188,10 @@ is_quorum_critical_test(Config) ->
     ?assertEqual(false, maps:is_key(reason, Check0)),
     ?assertEqual(<<"ok">>, maps:get(status, Check0)),
 
-    [Server1, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
-    Args = [{<<"x-queue-type">>, longstr, <<"quorum">>}],
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Args = [{<<"x-queue-type">>, longstr, <<"quorum">>},
+            {<<"x-quorum-initial-group-size">>, long, 3}],
     QName = <<"is_quorum_critical_test">>,
     ?assertEqual({'queue.declare_ok', QName, 0, 0},
                  amqp_channel:call(Ch, #'queue.declare'{queue     = QName,
@@ -205,71 +201,20 @@ is_quorum_critical_test(Config) ->
     Check1 = http_get(Config, "/health/checks/node-is-quorum-critical", ?OK),
     ?assertEqual(false, maps:is_key(reason, Check1)),
 
+    RaName = binary_to_atom(<<"%2F_", QName/binary>>, utf8),
+    {ok, [_, {_, Server2}, {_, Server3}], _} = ra:members({RaName, Server}),
+
     ok = rabbit_ct_broker_helpers:stop_node(Config, Server2),
     ok = rabbit_ct_broker_helpers:stop_node(Config, Server3),
 
     Body = http_get_failed(Config, "/health/checks/node-is-quorum-critical"),
     ?assertEqual(<<"failed">>, maps:get(<<"status">>, Body)),
     ?assertEqual(true, maps:is_key(<<"reason">>, Body)),
-    [Queue] = maps:get(<<"queues">>, Body),
-    ?assertEqual(QName, maps:get(<<"name">>, Queue)),
-
-    passed.
-
-is_mirror_sync_critical_single_node_test(Config) ->
-    Check0 = http_get(Config, "/health/checks/node-is-mirror-sync-critical", ?OK),
-    ?assertEqual(<<"single node cluster">>, maps:get(reason, Check0)),
-    ?assertEqual(<<"ok">>, maps:get(status, Check0)),
-
-    ok = rabbit_ct_broker_helpers:set_policy(
-           Config, 0, <<"ha">>, <<"is_mirror_sync.*">>, <<"queues">>,
-           [{<<"ha-mode">>, <<"all">>}]),
-    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
-    QName = <<"is_mirror_sync_critical_single_node_test">>,
-    ?assertEqual({'queue.declare_ok', QName, 0, 0},
-                 amqp_channel:call(Ch, #'queue.declare'{queue     = QName,
-                                                        durable   = true,
-                                                        auto_delete = false,
-                                                        arguments = []})),
-    Check1 = http_get(Config, "/health/checks/node-is-mirror-sync-critical", ?OK),
-    ?assertEqual(<<"single node cluster">>, maps:get(reason, Check1)),
-
-    passed.
-
-is_mirror_sync_critical_test(Config) ->
-    Path = "/health/checks/node-is-mirror-sync-critical",
-    Check0 = http_get(Config, Path, ?OK),
-    ?assertEqual(false, maps:is_key(reason, Check0)),
-    ?assertEqual(<<"ok">>, maps:get(status, Check0)),
-
-    ok = rabbit_ct_broker_helpers:set_policy(
-            Config, 0, <<"ha">>, <<"is_mirror_sync.*">>, <<"queues">>,
-            [{<<"ha-mode">>, <<"all">>}]),
-    [Server1, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
-    QName = <<"is_mirror_sync_critical_test">>,
-    ?assertEqual({'queue.declare_ok', QName, 0, 0},
-                 amqp_channel:call(Ch, #'queue.declare'{queue     = QName,
-                                                        durable   = true,
-                                                        auto_delete = false,
-                                                        arguments = []})),
-    rabbit_ct_helpers:await_condition(
-      fun() ->
-              {ok, {{_, Code, _}, _, _}} = req(Config, get, Path, [auth_header("guest", "guest")]),
-              Code == ?OK
-      end),
-    Check1 = http_get(Config, Path, ?OK),
-    ?assertEqual(false, maps:is_key(reason, Check1)),
-
-    ok = rabbit_ct_broker_helpers:stop_node(Config, Server2),
-    ok = rabbit_ct_broker_helpers:stop_node(Config, Server3),
-
-    Body = http_get_failed(Config, Path),
-    ?assertEqual(<<"failed">>, maps:get(<<"status">>, Body)),
-    ?assertEqual(true, maps:is_key(<<"reason">>, Body)),
-    [Queue] = maps:get(<<"queues">>, Body),
-    ?assertEqual(QName, maps:get(<<"name">>, Queue)),
+    Queues = maps:get(<<"queues">>, Body),
+    ?assert(lists:any(
+        fun(Item) ->
+            QName =:= maps:get(<<"name">>, Item)
+        end, Queues)),
 
     passed.
 

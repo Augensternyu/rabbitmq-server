@@ -93,7 +93,7 @@
 %%
 %% 11) Internal buffer length is emitted as a core [RabbitMQ] metric.
 
-%% All modifications are (C) 2009-2023 VMware, Inc. or its affiliates.
+%% All modifications are (C) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 %% ``The contents of this file are subject to the Erlang Public License,
 %% Version 1.1, (the "License"); you may not use this file except in
@@ -805,18 +805,7 @@ in(Input, Priority, GS2State = #gs2_state { queue = Queue }) ->
 
 process_msg({system, From, Req},
             GS2State = #gs2_state { parent = Parent, debug  = Debug }) ->
-    case Req of
-        %% This clause will match only in R16B03.
-        %% Since 17.0 replace_state is not a system message.
-        {replace_state, StateFun} ->
-            GS2State1 = StateFun(GS2State),
-            _ = gen:reply(From, GS2State1),
-            system_continue(Parent, Debug, GS2State1);
-        _ ->
-            %% gen_server puts Hib on the end as the 7th arg, but that version
-            %% of the fun seems not to be documented so leaving out for now.
-            sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug, GS2State)
-    end;
+    sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug, GS2State);
 process_msg({'$with_state', From, Fun},
            GS2State = #gs2_state{state = State}) ->
     reply(From, catch Fun(State)),
@@ -1124,7 +1113,7 @@ system_code_change(GS2State = #gs2_state { mod   = Mod,
         {ok, NewState} ->
             NewGS2State = find_prioritisers(
                             GS2State #gs2_state { state = NewState }),
-            {ok, [NewGS2State]};
+            {ok, NewGS2State};
         Else ->
             Else
     end.

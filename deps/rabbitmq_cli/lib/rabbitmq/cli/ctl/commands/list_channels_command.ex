@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 ##
 
 defmodule RabbitMQ.CLI.Ctl.Commands.ListChannelsCommand do
@@ -16,7 +16,7 @@ defmodule RabbitMQ.CLI.Ctl.Commands.ListChannelsCommand do
   @info_keys ~w(pid connection name number user vhost transactional
                 confirm consumer_count messages_unacknowledged
                 messages_uncommitted acks_uncommitted messages_unconfirmed
-                prefetch_count global_prefetch_count)a
+                prefetch_count)a
 
   def info_keys(), do: @info_keys
 

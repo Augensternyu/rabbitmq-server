@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(amqp10_client).
@@ -35,14 +35,12 @@
          settle_msg/3,
          flow_link_credit/3,
          flow_link_credit/4,
-         echo/1,
+         stop_receiver_link/1,
          link_handle/1,
          get_msg/1,
          get_msg/2,
          parse_uri/1
         ]).
-
--define(DEFAULT_TIMEOUT, 5000).
 
 -type snd_settle_mode() :: amqp10_client_session:snd_settle_mode().
 -type rcv_settle_mode() :: amqp10_client_session:rcv_settle_mode().
@@ -55,7 +53,7 @@
 -type attach_role() :: amqp10_client_session:attach_role().
 -type attach_args() :: amqp10_client_session:attach_args().
 -type filter() :: amqp10_client_session:filter().
--type properties() :: amqp10_client_session:properties().
+-type properties() :: amqp10_client_types:properties().
 
 -type connection_config() :: amqp10_client_connection:connection_config().
 
@@ -87,6 +85,7 @@
 -spec open_connection(inet:socket_address() | inet:hostname(),
                       inet:port_number()) -> supervisor:startchild_ret().
 open_connection(Addr, Port) ->
+    _ = ensure_started(),
     open_connection(#{address => Addr, port => Port, notify => self(),
                       sasl => anon}).
 
@@ -97,16 +96,20 @@ open_connection(Addr, Port) ->
 -spec open_connection(connection_config()) ->
     supervisor:startchild_ret().
 open_connection(ConnectionConfig0) ->
+    _ = ensure_started(),
+
     Notify = maps:get(notify, ConnectionConfig0, self()),
     NotifyWhenOpened = maps:get(notify_when_opened, ConnectionConfig0, self()),
     NotifyWhenClosed = maps:get(notify_when_closed, ConnectionConfig0, self()),
-    amqp10_client_connection:open(ConnectionConfig0#{
+    ConnectionConfig1 = ConnectionConfig0#{
         notify => Notify,
         notify_when_opened => NotifyWhenOpened,
         notify_when_closed => NotifyWhenClosed
-    }).
+    },
+    ConnectionConfig = merge_default_tls_options(ConnectionConfig1),
+    amqp10_client_connection:open(ConnectionConfig).
 
-%% @doc Opens a connection using a connection_config map
+%% @doc Closes a connection.
 %% This is asynchronous and will notify completion to the caller using
 %% an amqp10_event of the following format:
 %% {amqp10_event, {connection, ConnectionPid, {closed, Why}}}
@@ -128,7 +131,7 @@ begin_session(Connection) when is_pid(Connection) ->
 -spec begin_session_sync(pid()) ->
     supervisor:startchild_ret() | session_timeout.
 begin_session_sync(Connection) when is_pid(Connection) ->
-    begin_session_sync(Connection, ?DEFAULT_TIMEOUT).
+    begin_session_sync(Connection, ?TIMEOUT).
 
 %% @doc Synchronously begins an amqp10 session using 'Connection'.
 %% This is a convenience function that awaits the 'begun' event
@@ -140,6 +143,8 @@ begin_session_sync(Connection, Timeout) when is_pid(Connection) ->
         {ok, Session} ->
             receive
                 {amqp10_event, {session, Session, begun}} ->
+                    {ok, Session};
+                {amqp10_event, {session, Session, {begun, #'v1_0.begin'{}}}} ->
                     {ok, Session};
                 {amqp10_event, {session, Session, {ended, Err}}} ->
                     {error, Err}
@@ -183,9 +188,11 @@ attach_sender_link_sync(Session, Name, Target, SettleMode, Durability) ->
     receive
         {amqp10_event, {link, Ref, attached}} ->
             {ok, Ref};
+        {amqp10_event, {link, Ref, {attached, #'v1_0.attach'{}}}} ->
+            {ok, Ref};
         {amqp10_event, {link, Ref, {detached, Err}}} ->
             {error, Err}
-    after ?DEFAULT_TIMEOUT -> link_timeout
+    after ?TIMEOUT -> link_timeout
     end.
 
 %% @doc Attaches a sender link to a target.
@@ -265,9 +272,8 @@ attach_receiver_link(Session, Name, Source, SettleMode, Durability, Filter) ->
 %% This is asynchronous and will notify completion of the attach request to the
 %% caller using an amqp10_event of the following format:
 %% {amqp10_event, {link, LinkRef, attached | {detached, Why}}}
--spec attach_receiver_link(pid(), binary(), binary(),
-                           snd_settle_mode(), terminus_durability(), filter(),
-                           properties()) ->
+-spec attach_receiver_link(pid(), binary(), binary(), snd_settle_mode(),
+                           terminus_durability(), filter(), properties()) ->
     {ok, link_ref()}.
 attach_receiver_link(Session, Name, Source, SettleMode, Durability, Filter, Properties)
   when is_pid(Session) andalso
@@ -296,52 +302,63 @@ attach_link(Session, AttachArgs) ->
 %% This is asynchronous and will notify completion of the attach request to the
 %% caller using an amqp10_event of the following format:
 %% {amqp10_event, {link, LinkRef, {detached, Why}}}
--spec detach_link(link_ref()) -> _.
+-spec detach_link(link_ref()) -> ok | {error, term()}.
 detach_link(#link_ref{link_handle = Handle, session = Session}) ->
     amqp10_client_session:detach(Session, Handle).
 
-%% @doc Grant credit to a sender.
-%% The amqp10_client will automatically grant more credit to the sender when
-%% the remaining link credit falls below the value of RenewWhenBelow.
-%% If RenewWhenBelow is 'never' the client will never grant new credit. Instead
-%% the caller will be notified when the link_credit reaches 0 with an
-%% amqp10_event of the following format:
+%% @doc Grant Credit to a sender.
+%%
+%% In addition, if RenewWhenBelow is an integer, the amqp10_client will automatically grant more
+%% Credit to the sender when the sum of the remaining link credit and the number of unsettled
+%% messages falls below the value of RenewWhenBelow.
+%% `Credit + RenewWhenBelow - 1` is the maximum number of in-flight unsettled messages.
+%%
+%% If RenewWhenBelow is `never` the amqp10_client will never grant more credit. Instead the caller
+%% will be notified when the link_credit reaches 0 with an amqp10_event of the following format:
 %% {amqp10_event, {link, LinkRef, credit_exhausted}}
 -spec flow_link_credit(link_ref(), Credit :: non_neg_integer(),
-                       RenewWhenBelow :: never | non_neg_integer()) -> ok.
+                       RenewWhenBelow :: never | pos_integer()) -> ok.
 flow_link_credit(Ref, Credit, RenewWhenBelow) ->
     flow_link_credit(Ref, Credit, RenewWhenBelow, false).
 
 -spec flow_link_credit(link_ref(), Credit :: non_neg_integer(),
-                       RenewWhenBelow :: never | non_neg_integer(),
+                       RenewWhenBelow :: never | pos_integer(),
                        Drain :: boolean()) -> ok.
 flow_link_credit(#link_ref{role = receiver, session = Session,
                            link_handle = Handle},
-                 Credit, RenewWhenBelow, Drain) ->
+                 Credit, RenewWhenBelow, Drain)
+  when
+      %% Drain together with auto renewal doesn't make sense, so disallow it in the API.
+      ((Drain) andalso RenewWhenBelow =:= never
+       orelse not(Drain))
+      andalso
+      %% Check that the RenewWhenBelow value make sense.
+      (RenewWhenBelow =:= never orelse
+       is_integer(RenewWhenBelow) andalso
+       RenewWhenBelow > 0 andalso
+       RenewWhenBelow =< Credit) ->
     Flow = #'v1_0.flow'{link_credit = {uint, Credit},
                         drain = Drain},
     ok = amqp10_client_session:flow(Session, Handle, Flow, RenewWhenBelow).
 
-%% @doc Request that the sender's flow state is echoed back
-%% This may be used to determine when the Link has finally quiesced.
-%% see §2.6.10 of the spec
-echo(#link_ref{role = receiver, session = Session,
-               link_handle = Handle}) ->
+%% @doc Stop a receiving link.
+%% See AMQP 1.0 spec §2.6.10.
+stop_receiver_link(#link_ref{role = receiver,
+                             session = Session,
+                             link_handle = Handle}) ->
     Flow = #'v1_0.flow'{link_credit = {uint, 0},
                         echo = true},
-    ok = amqp10_client_session:flow(Session, Handle, Flow, 0).
+    ok = amqp10_client_session:flow(Session, Handle, Flow, never).
 
 %%% messages
 
 %% @doc Send a message on a the link referred to be the 'LinkRef'.
-%% Returns ok for "async" transfers when messages are sent with settled=true
-%% else it returns the delivery state from the disposition
 -spec send_msg(link_ref(), amqp10_msg:amqp10_msg()) ->
-    ok | {error, insufficient_credit | link_not_found | half_attached}.
+    ok | amqp10_client_session:transfer_error().
 send_msg(#link_ref{role = sender, session = Session,
                    link_handle = Handle}, Msg0) ->
     Msg = amqp10_msg:set_handle(Handle, Msg0),
-    amqp10_client_session:transfer(Session, Msg, ?DEFAULT_TIMEOUT).
+    amqp10_client_session:transfer(Session, Msg, ?TIMEOUT).
 
 %% @doc Accept a message on a the link referred to be the 'LinkRef'.
 -spec accept_msg(link_ref(), amqp10_msg:amqp10_msg()) -> ok.
@@ -352,16 +369,15 @@ accept_msg(LinkRef, Msg) ->
 %% the chosen delivery state.
 -spec settle_msg(link_ref(), amqp10_msg:amqp10_msg(),
                  amqp10_client_types:delivery_state()) -> ok.
-settle_msg(#link_ref{role = receiver,
-                     session = Session}, Msg, Settlement) ->
+settle_msg(LinkRef, Msg, Settlement) ->
     DeliveryId = amqp10_msg:delivery_id(Msg),
-    amqp10_client_session:disposition(Session, receiver, DeliveryId,
-                                      DeliveryId, true, Settlement).
+    amqp10_client_session:disposition(LinkRef, DeliveryId, DeliveryId, true, Settlement).
+
 %% @doc Get a single message from a link.
 %% Flows a single link credit then awaits delivery or timeout.
 -spec get_msg(link_ref()) -> {ok, amqp10_msg:amqp10_msg()} | {error, timeout}.
 get_msg(LinkRef) ->
-    get_msg(LinkRef, ?DEFAULT_TIMEOUT).
+    get_msg(LinkRef, ?TIMEOUT).
 
 %% @doc Get a single message from a link.
 %% Flows a single link credit then awaits delivery or timeout.
@@ -417,8 +433,8 @@ parse_result(Map) ->
                    throw(plain_sasl_missing_userinfo);
                _ ->
                    case UserInfo of
-                       [] -> none;
-                       undefined -> none;
+                       [] -> anon;
+                       undefined -> anon;
                        U -> parse_usertoken(U)
                    end
            end,
@@ -444,11 +460,6 @@ parse_result(Map) ->
             Ret0#{tls_opts => {secure_port, TlsOpts}}
     end.
 
-
-parse_usertoken(undefined) ->
-    none;
-parse_usertoken("") ->
-    none;
 parse_usertoken(U) ->
     [User, Pass] = string:tokens(U, ":"),
     {plain,
@@ -497,6 +508,21 @@ try_to_existing_atom(L) when is_list(L) ->
             throw({non_existent_atom, L})
     end.
 
+ensure_started() ->
+    _ = application:ensure_all_started(credentials_obfuscation).
+
+
+-spec merge_default_tls_options(connection_config()) -> connection_config().
+merge_default_tls_options(#{tls_opts := {secure_port, TlsOpts0}} = Config) ->
+    GlobalTlsOpts = application:get_env(amqp10_client, ssl_options, []),
+    TlsOpts =
+        orddict:to_list(
+          orddict:merge(fun (_, _A, B) -> B end,
+                        orddict:from_list(GlobalTlsOpts),
+                        orddict:from_list(TlsOpts0))),
+    Config#{tls_opts => {secure_port, TlsOpts}};
+merge_default_tls_options(Config) ->
+    Config.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -505,7 +531,7 @@ parse_uri_test_() ->
     [?_assertEqual({ok, #{address => "my_host",
                           port => 9876,
                           hostname => <<"my_host">>,
-                          sasl => none}}, parse_uri("amqp://my_host:9876")),
+                          sasl => anon}}, parse_uri("amqp://my_host:9876")),
      %% port defaults
      ?_assertMatch({ok, #{port := 5671}}, parse_uri("amqps://my_host")),
      ?_assertMatch({ok, #{port := 5672}}, parse_uri("amqp://my_host")),

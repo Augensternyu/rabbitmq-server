@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% This module is a debugging utility mainly meant for debugging
@@ -28,7 +28,7 @@ start(Pid, Apps) ->
     TracerPid = spawn_link(?MODULE, init, []),
     {ok, _} = dbg:tracer(process, {fun (Msg, _) -> TracerPid ! Msg end, []}),
     _ = [dbg:tpl(M, []) || M <- Mods],
-    dbg:p(Pid, [c]),
+    _ = dbg:p(Pid, [c]),
     ok.
 
 apps_to_mods([], Acc) ->
@@ -47,7 +47,7 @@ print() ->
     ok.
 
 stop() ->
-    dbg:stop_clear(),
+    dbg:stop(),
     ?MODULE ! stop,
     ok.
 

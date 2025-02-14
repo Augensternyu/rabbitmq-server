@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(rabbit_mgmt_metrics_collector).
 
@@ -15,7 +15,7 @@
 
 -spec start_link(atom()) -> rabbit_types:ok_pid_or_error().
 
--export([name/1]).
+-export([name/1, all_names/0]).
 -export([start_link/1]).
 -export([override_lookups/2, reset_lookups/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
@@ -48,6 +48,9 @@ reset(Table) ->
 
 name(Table) ->
     list_to_atom((atom_to_list(Table) ++ "_metrics_collector")).
+
+all_names() ->
+    [name(Table) || {Table, _} <- ?CORE_TABLES].
 
 
 start_link(Table) ->
@@ -82,6 +85,13 @@ handle_call({override_lookups, Lookups}, _From, State) ->
                             lookup_exchange = pget(exchange, Lookups)}};
 handle_call({submit, Fun}, _From, State) ->
     {reply, Fun(), State};
+handle_call(wait, _From, State) ->
+    {reply, ok, State};
+handle_call(force_collect, _From, State0) ->
+    Timestamp = exometer_slide:timestamp(),
+    State = aggregate_metrics(Timestamp, State0),
+    %% used for testing
+    {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {noreply, State}.
 
@@ -150,6 +160,7 @@ handle_deleted_queues(queue_coarse_metrics, Remainders,
                                           QNegStats, Size, Interval, false)
                              || {Size, Interval} <- BPolicies],
                             ets:delete(queue_stats, Queue),
+                            ets:delete(queue_basic_stats, Queue),
                             ets:delete(queue_process_stats, Queue)
                   end, maps:to_list(Remainders));
 handle_deleted_queues(_T, _R, _P) -> ok.
@@ -441,13 +452,17 @@ aggregate_entry({Id, Metrics, 0}, NextStats, Ops0,
                             GPolicies),
     Ops2 = case QueueFun(Id) of
                true ->
-                   O = insert_entry_ops(queue_msg_rates, Id, false, Stats, Ops1,
-                                        BPolicies),
+                   O_1 = insert_entry_ops(queue_msg_rates, Id, false, Stats, Ops1,
+                                          BPolicies),
                    Fmt = rabbit_mgmt_format:format(
                            Metrics,
                            {fun rabbit_mgmt_format:format_queue_stats/1, false}),
-                   insert_op(queue_stats, Id, ?queue_stats(Id, Fmt), O);
-               false ->
+                   FmtBasic = rabbit_mgmt_format:format(
+                                Metrics,
+                                {fun rabbit_mgmt_format:format_queue_basic_stats/1, false}),
+                   O_2 = insert_op(queue_basic_stats, Id, ?queue_stats(Id, FmtBasic), O_1),
+                   insert_op(queue_stats, Id, ?queue_stats(Id, Fmt), O_2);
+               _ ->
                    Ops1
            end,
     {insert_old_aggr_stats(NextStats, Id, Stats), Ops2, State};
@@ -648,6 +663,8 @@ difference({A0, A1, A2, A3, A4, A5, A6, A7}, {B0, B1, B2, B3, B4, B5, B6, B7}) -
 vhost(#resource{virtual_host = VHost}) ->
     VHost;
 vhost({queue_stats, #resource{virtual_host = VHost}}) ->
+    VHost;
+vhost({queue_basic_stats, #resource{virtual_host = VHost}}) ->
     VHost;
 vhost({TName, Pid}) ->
     pget(vhost, lookup_element(TName, Pid, 2)).

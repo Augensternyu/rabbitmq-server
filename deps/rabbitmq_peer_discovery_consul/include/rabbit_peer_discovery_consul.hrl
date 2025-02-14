@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -define(BACKEND_CONFIG_KEY, peer_discovery_consul).
@@ -68,6 +68,11 @@
                                                    type          = atom,
                                                    env_variable  = "CONSUL_SVC_ADDR_NODENAME",
                                                    default_value = false
+                                                  },
+          consul_svc_id                      => #peer_discovery_config_entry_meta{
+                                                   type          = string,
+                                                   env_variable  = "CONSUL_SVC_ID",
+                                                   default_value = "undefined"
                                                   },
           consul_svc_port                    => #peer_discovery_config_entry_meta{
                                                    type          = integer,

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_autoheal).
@@ -200,6 +200,8 @@ process_down(_, State) ->
 
 %% By receiving this message we become the leader
 %% TODO should we try to debounce this?
+handle_msg({request_start, _Node}, not_healing, []) ->
+    not_healing;
 handle_msg({request_start, Node},
            not_healing, Partitions) ->
     rabbit_log:info("Autoheal request received from ~tp", [Node]),
@@ -259,6 +261,12 @@ handle_msg({winner_is, Winner}, State = not_healing,
 handle_msg({winner_is, Winner}, State = {leader_waiting, Winner, _},
            _Partitions) ->
     %% This node is the leader and a loser at the same time.
+    Pid = restart_loser(State, Winner),
+    {restarting, Pid};
+handle_msg({winner_is, Winner}, State = {winner_waiting, _OutstandingStops, _Notify},
+           _Partitions) ->
+    %% This node is still in winner_waiting with a winner reported, restart loser
+    %% and update state
     Pid = restart_loser(State, Winner),
     {restarting, Pid};
 
@@ -403,7 +411,7 @@ make_decision(AllPartitions) ->
 partition_value(Partition) ->
     Connections = [Res || Node <- Partition,
                           Res <- [rpc:call(Node, rabbit_networking,
-                                           connections_local, [])],
+                                           local_connections, [])],
                           is_list(Res)],
     {length(lists:append(Connections)), length(Partition)}.
 

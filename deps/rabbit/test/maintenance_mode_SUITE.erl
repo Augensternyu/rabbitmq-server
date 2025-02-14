@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(maintenance_mode_SUITE).
@@ -12,6 +12,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 all() ->
@@ -29,7 +30,8 @@ groups() ->
           maintenance_mode_status,
           listener_suspension_status,
           client_connection_closure,
-          quorum_queue_leadership_transfer
+          quorum_queue_leadership_transfer,
+          metadata_store_leadership_transfer
       ]}
     ].
 
@@ -67,6 +69,24 @@ init_per_testcase(quorum_queue_leadership_transfer = Testcase, Config) ->
       Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
       rabbit_ct_client_helpers:setup_steps());
+init_per_testcase(metadata_store_leadership_transfer = Testcase, Config) ->
+    case rabbit_ct_broker_helpers:configured_metadata_store(Config) of
+        mnesia ->
+            {skip, "Leadership transfer does not apply to mnesia"};
+        _ ->
+            rabbit_ct_helpers:testcase_started(Config, Testcase),
+            ClusterSize = ?config(rmq_nodes_count, Config),
+            TestNumber = rabbit_ct_helpers:testcase_number(Config, ?MODULE, Testcase),
+            Config1 = rabbit_ct_helpers:set_config(Config, [
+                {rmq_nodes_clustered, true},
+                {rmq_nodename_suffix, Testcase},
+                {tcp_ports_base, {skip_n_nodes, TestNumber * ClusterSize}}
+              ]),
+            rabbit_ct_helpers:run_steps(
+              Config1,
+              rabbit_ct_broker_helpers:setup_steps() ++
+              rabbit_ct_client_helpers:setup_steps())
+    end;
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase),
     ClusterSize = ?config(rmq_nodes_count, Config),
@@ -79,8 +99,7 @@ init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:run_steps(
       Config1,
       rabbit_ct_broker_helpers:setup_steps() ++
-      rabbit_ct_client_helpers:setup_steps() ++
-      [fun rabbit_ct_broker_helpers:set_ha_policy_all/1]).
+      rabbit_ct_client_helpers:setup_steps()).
 
 end_per_testcase(Testcase, Config) ->
     Config1 = rabbit_ct_helpers:run_steps(Config,
@@ -242,7 +261,7 @@ quorum_queue_leadership_transfer(Config) ->
         fun () -> rabbit_ct_broker_helpers:is_being_drained_local_read(Config, A) end, 10000),
 
     %% quorum queue leader election is asynchronous
-    AllTheSame = quorum_queue_utils:fifo_machines_use_same_version(
+    AllTheSame = queue_utils:fifo_machines_use_same_version(
                    Config, Nodenames),
     case AllTheSame of
         true ->
@@ -262,3 +281,31 @@ quorum_queue_leadership_transfer(Config) ->
     end,
 
     rabbit_ct_broker_helpers:revive_node(Config, A).
+
+metadata_store_leadership_transfer(Config) ->
+    [A | _] = Nodenames = rabbit_ct_broker_helpers:get_node_configs(
+                            Config, nodename),
+
+    {_, LeaderNode} = rabbit_ct_broker_helpers:rpc(Config, A, ra_leaderboard, lookup_leader,
+                                                   [rabbit_khepri:get_ra_cluster_name()]),
+    rabbit_ct_helpers:await_condition(
+      fun () -> not rabbit_ct_broker_helpers:is_being_drained_local_read(Config, LeaderNode) end,
+      10000),
+    rabbit_ct_broker_helpers:drain_node(Config, LeaderNode),
+    rabbit_ct_helpers:await_condition(
+      fun () -> rabbit_ct_broker_helpers:is_being_drained_local_read(Config, LeaderNode) end,
+      10000),
+
+    %% Check it is still functional
+    [N | _] = Nodenames -- [LeaderNode],
+    Conn = rabbit_ct_client_helpers:open_connection(Config, N),
+    {ok, Ch} = amqp_connection:open_channel(Conn),
+    QName = <<"qq.1">>,
+    amqp_channel:call(Ch,
+                      #'queue.declare'{queue = QName, durable = true,
+                                       arguments = [{<<"x-queue-type">>, longstr, <<"quorum">>}]}),
+
+    {_, NewLeaderNode} = rabbit_ct_broker_helpers:rpc(Config, N, ra_leaderboard, lookup_leader,
+                                                      [rabbit_khepri:get_ra_cluster_name()]),
+    ?assertNot(LeaderNode == NewLeaderNode),
+    rabbit_ct_broker_helpers:revive_node(Config, LeaderNode).

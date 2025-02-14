@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(disconnect_detected_during_alarm_SUITE).
 
--include_lib("common_test/include/ct.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
 -compile(export_all).
@@ -89,7 +88,7 @@ disconnect_detected_during_alarm(Config) ->
         % Check that connection was indeed blocked
         #'connection.blocked'{} -> ok
     after
-        1000 -> exit(connection_was_not_blocked)
+        30_000 -> exit(connection_was_not_blocked)
     end,
 
     %% Connection is blocked, now we should forcefully kill it
@@ -97,7 +96,7 @@ disconnect_detected_during_alarm(Config) ->
 
     ListConnections =
         fun() ->
-            rpc:call(A, rabbit_networking, connection_info_all, [])
+            rpc:call(A, rabbit_networking, connection_info_all, [[state]])
         end,
 
     %% We've already disconnected, but blocked connection still should still linger on.

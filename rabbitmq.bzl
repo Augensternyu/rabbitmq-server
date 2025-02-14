@@ -22,8 +22,6 @@ STARTS_BACKGROUND_BROKER_TAG = "starts-background-broker"
 
 MIXED_VERSION_CLUSTER_TAG = "mixed-version-cluster"
 
-ENABLE_FEATURE_MAYBE_EXPR = "-enable-feature maybe_expr"
-
 RABBITMQ_ERLC_OPTS = DEFAULT_ERLC_OPTS + [
     "-DINSTR_MOD=gm",
 ]
@@ -39,7 +37,7 @@ RABBITMQ_DIALYZER_OPTS = [
     "-Wunknown",
 ]
 
-APP_VERSION = "3.13.0"
+APP_VERSION = "4.0.0"
 
 BROKER_VERSION_REQUIREMENTS_ANY = """
 	{broker_version_requirements, []}
@@ -57,6 +55,7 @@ ALL_PLUGINS = [
     "//deps/rabbitmq_event_exchange:erlang_app",
     "//deps/rabbitmq_federation:erlang_app",
     "//deps/rabbitmq_federation_management:erlang_app",
+    "//deps/rabbitmq_federation_prometheus:erlang_app",
     "//deps/rabbitmq_jms_topic_exchange:erlang_app",
     "//deps/rabbitmq_management:erlang_app",
     "//deps/rabbitmq_mqtt:erlang_app",
@@ -70,6 +69,7 @@ ALL_PLUGINS = [
     "//deps/rabbitmq_sharding:erlang_app",
     "//deps/rabbitmq_shovel:erlang_app",
     "//deps/rabbitmq_shovel_management:erlang_app",
+    "//deps/rabbitmq_shovel_prometheus:erlang_app",
     "//deps/rabbitmq_stomp:erlang_app",
     "//deps/rabbitmq_stream:erlang_app",
     "//deps/rabbitmq_stream_management:erlang_app",
@@ -78,14 +78,16 @@ ALL_PLUGINS = [
     "//deps/rabbitmq_trust_store:erlang_app",
     "//deps/rabbitmq_web_dispatch:erlang_app",
     "//deps/rabbitmq_web_mqtt:erlang_app",
+    "//deps/rabbitmq_web_mqtt_examples:erlang_app",
     "//deps/rabbitmq_web_stomp:erlang_app",
+    "//deps/rabbitmq_web_stomp_examples:erlang_app",
 ]
 
 LABELS_WITH_TEST_VERSIONS = [
     "//deps/amqp10_common:erlang_app",
     "//deps/rabbit_common:erlang_app",
+    "//deps/rabbitmq_prelaunch:erlang_app",
     "//deps/rabbit:erlang_app",
-    "//deps/rabbit/apps/rabbitmq_prelaunch:erlang_app",
 ]
 
 def all_plugins(rabbitmq_workspace = "@rabbitmq-server"):
@@ -173,20 +175,23 @@ def rabbitmq_suite(
         deps = [],
         runtime_deps = [],
         **kwargs):
+    app_name = native.package_name().rpartition("/")[-1]
     # suite_name exists in the underying ct_test macro, but we don't
     # want to use the arg in rabbitmq-server, for the sake of clarity
     if suite_name != None:
         fail("rabbitmq_suite cannot be called with a suite_name attr")
     ct_test(
         name = name,
+        app_name = app_name,
         compiled_suites = [":{}_beam_files".format(name)] + additional_beam,
-        ct_run_extra_args = [ENABLE_FEATURE_MAYBE_EXPR],
         data = native.glob(["test/{}_data/**/*".format(name)]) + data,
         test_env = dict({
             "RABBITMQ_CT_SKIP_AS_ERROR": "true",
             "LANG": "C.UTF-8",
+            "COVERDATA_TO_LCOV_APPS_DIRS": "deps:deps/rabbit/apps",
         }.items() + test_env.items()),
         deps = [":test_erlang_app"] + deps + runtime_deps,
+        ct_run_extra_args = ["-kernel net_ticktime 5"],
         **kwargs
     )
     return name
@@ -219,6 +224,7 @@ def rabbitmq_integration_suite(
         deps = [],
         runtime_deps = [],
         **kwargs):
+    app_name = native.package_name().rpartition("/")[-1]
     # suite_name exists in the underying ct_test macro, but we don't
     # want to use the arg in rabbitmq-server, for the sake of clarity
     if suite_name != None:
@@ -227,7 +233,7 @@ def rabbitmq_integration_suite(
         ":test_erlang_app",
         "//deps/rabbit_common:erlang_app",
         "//deps/rabbitmq_ct_helpers:erlang_app",
-        "//deps/rabbitmq_cli:elixir",
+        "@rules_elixir//elixir",
         "//deps/rabbitmq_cli:erlang_app",
         "//deps/rabbitmq_ct_client_helpers:erlang_app",
     ]
@@ -237,10 +243,10 @@ def rabbitmq_integration_suite(
 
     ct_test(
         name = name,
+        app_name = app_name,
         suite_name = name,
         compiled_suites = [":{}_beam_files".format(name)] + additional_beam,
         tags = tags + [STARTS_BACKGROUND_BROKER_TAG],
-        ct_run_extra_args = [ENABLE_FEATURE_MAYBE_EXPR],
         data = native.glob(["test/{}_data/**/*".format(name)]) + data,
         test_env = dict({
             "SKIP_MAKE_TEST_DIST": "true",
@@ -250,11 +256,13 @@ def rabbitmq_integration_suite(
             "RABBITMQ_PLUGINS": "$TEST_SRCDIR/$TEST_WORKSPACE/{}/broker-for-tests-home/sbin/rabbitmq-plugins".format(package),
             "RABBITMQ_QUEUES": "$TEST_SRCDIR/$TEST_WORKSPACE/{}/broker-for-tests-home/sbin/rabbitmq-queues".format(package),
             "LANG": "C.UTF-8",
+            "COVERDATA_TO_LCOV_APPS_DIRS": "deps:deps/rabbit/apps",
         }.items() + test_env.items()),
         tools = [
             ":rabbitmq-for-tests-run",
         ] + tools,
         deps = assumed_deps + deps + runtime_deps,
+        ct_run_extra_args = ["-kernel net_ticktime 5"],
         **kwargs
     )
 
@@ -263,7 +271,6 @@ def rabbitmq_integration_suite(
         suite_name = name,
         compiled_suites = [":{}_beam_files".format(name)] + additional_beam,
         tags = tags + [STARTS_BACKGROUND_BROKER_TAG, MIXED_VERSION_CLUSTER_TAG],
-        ct_run_extra_args = [ENABLE_FEATURE_MAYBE_EXPR],
         data = native.glob(["test/{}_data/**/*".format(name)]) + data,
         test_env = dict({
             "SKIP_MAKE_TEST_DIST": "true",
@@ -274,21 +281,24 @@ def rabbitmq_integration_suite(
             "quorum_queue,implicit_default_bindings,virtual_host_metadata,maintenance_mode_status,user_limits," +
             # required starting from 3.12.0 in rabbit:
             "feature_flags_v2,stream_queue,classic_queue_type_delivery_support,classic_mirrored_queue_version," +
-            "stream_single_active_consumer,direct_exchange_routing_v2,listener_records_in_ets,tracking_records_in_ets",
+            "stream_single_active_consumer,direct_exchange_routing_v2,listener_records_in_ets,tracking_records_in_ets," +
             # required starting from 3.12.0 in rabbitmq_management_agent:
             # empty_basic_get_metric, drop_unroutable_metric
+            # required starting from 4.0 in rabbit:
+            "message_containers,stream_update_config_command,stream_filtering,stream_sac_coordinator_unblock_group,restart_streams",
             "RABBITMQ_RUN": "$(location :rabbitmq-for-tests-run)",
             "RABBITMQCTL": "$TEST_SRCDIR/$TEST_WORKSPACE/{}/broker-for-tests-home/sbin/rabbitmqctl".format(package),
             "RABBITMQ_PLUGINS": "$TEST_SRCDIR/$TEST_WORKSPACE/{}/broker-for-tests-home/sbin/rabbitmq-plugins".format(package),
             "RABBITMQ_QUEUES": "$TEST_SRCDIR/$TEST_WORKSPACE/{}/broker-for-tests-home/sbin/rabbitmq-queues".format(package),
-            "RABBITMQ_RUN_SECONDARY": "$(location @rabbitmq-server-generic-unix-3.11//:rabbitmq-run)",
+            "RABBITMQ_RUN_SECONDARY": "$(location @rabbitmq-server-generic-unix-4.0//:rabbitmq-run)",
             "LANG": "C.UTF-8",
         }.items() + test_env.items()),
         tools = [
             ":rabbitmq-for-tests-run",
-            "@rabbitmq-server-generic-unix-3.11//:rabbitmq-run",
+            "@rabbitmq-server-generic-unix-4.0//:rabbitmq-run",
         ] + tools,
         deps = assumed_deps + deps + runtime_deps,
+        ct_run_extra_args = ["-kernel net_ticktime 5"],
         **kwargs
     )
 

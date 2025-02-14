@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit).
@@ -26,20 +26,21 @@
 -export([product_info/0,
          product_name/0,
          product_version/0,
+         product_license_line/0,
          base_product_name/0,
          base_product_version/0,
          motd_file/0,
-         motd/0]).
+         motd/0,
+         pg_local_scope/1]).
 %% For CLI, testing and mgmt-agent.
 -export([set_log_level/1, log_locations/0, config_files/0]).
 -export([is_booted/1, is_booted/0, is_booting/1, is_booting/0]).
 
 %%---------------------------------------------------------------------------
 %% Boot steps.
--export([maybe_insert_default_data/0, boot_delegate/0, recover/0]).
-
-%% for tests
--export([validate_msg_store_io_batch_size_and_credit_disc_bound/2]).
+-export([update_cluster_tags/0, maybe_insert_default_data/0, boot_delegate/0, recover/0,
+         pg_local_amqp_session/0,
+         pg_local_amqp_connection/0]).
 
 -rabbit_boot_step({pre_boot, [{description, "rabbit boot start"}]}).
 
@@ -148,13 +149,6 @@
                    [{description, "kernel ready"},
                     {requires,    external_infrastructure}]}).
 
--rabbit_boot_step({rabbit_memory_monitor,
-                   [{description, "memory monitor"},
-                    {mfa,         {rabbit_sup, start_restartable_child,
-                                   [rabbit_memory_monitor]}},
-                    {requires,    rabbit_alarm},
-                    {enables,     core_initialized}]}).
-
 -rabbit_boot_step({guid_generator,
                    [{description, "guid generator"},
                     {mfa,         {rabbit_sup, start_restartable_child,
@@ -175,6 +169,12 @@
                     {requires,    [rabbit_alarm, guid_generator]},
                     {enables,     core_initialized}]}).
 
+-rabbit_boot_step({rabbit_quorum_queue_periodic_membership_reconciliation,
+                   [{description, "Quorums Queue membership reconciliation"},
+                    {mfa,         {rabbit_sup, start_restartable_child,
+                                   [rabbit_quorum_queue_periodic_membership_reconciliation]}},
+                    {requires, [database]}]}).
+
 -rabbit_boot_step({rabbit_epmd_monitor,
                    [{description, "epmd monitor"},
                     {mfa,         {rabbit_sup, start_restartable_child,
@@ -193,12 +193,6 @@
                    [{description, "core initialized"},
                     {requires,    kernel_ready}]}).
 
--rabbit_boot_step({deprecate_cmqs,
-                   [{description, "checks whether mirrored queues are disabled"},
-                    {mfa, {rabbit_mirror_queue_misc, prevent_startup_when_mirroring_is_disabled_but_configured, []}},
-                    {requires, [database]},
-                    {enables, [recovery]}]}).
-
 -rabbit_boot_step({recovery,
                    [{description, "exchange, queue and binding recovery"},
                     {mfa,         {rabbit, recover, []}},
@@ -210,6 +204,12 @@
                     {mfa,         {?MODULE, maybe_insert_default_data, []}},
                     {requires,    recovery},
                     {enables,     routing_ready}]}).
+
+
+-rabbit_boot_step({cluster_tags,
+                   [{description, "Set cluster tags"},
+                    {mfa,         {?MODULE, update_cluster_tags, []}},
+                    {requires,    core_initialized}]}).
 
 -rabbit_boot_step({routing_ready,
                    [{description, "message delivery logic ready"},
@@ -226,12 +226,6 @@
                    [{description, "background core metrics garbage collection"},
                     {mfa,         {rabbit_sup, start_restartable_child,
                                    [rabbit_core_metrics_gc]}},
-                    {requires,    [core_initialized, recovery]},
-                    {enables,     routing_ready}]}).
-
--rabbit_boot_step({rabbit_looking_glass,
-                   [{description, "Looking Glass tracer and profiler"},
-                    {mfa,         {rabbit_looking_glass, boot, []}},
                     {requires,    [core_initialized, recovery]},
                     {enables,     routing_ready}]}).
 
@@ -267,14 +261,32 @@
                     {mfa,         {logger, debug, ["'networking' boot step skipped and moved to end of startup", [], #{domain => ?RMQLOG_DOMAIN_GLOBAL}]}},
                     {requires,    notify_cluster}]}).
 
+%% This mechanism is necessary in environments where a cluster is formed in parallel,
+%% which is the case with many container orchestration tools.
+%% In such scenarios, a virtual host can be declared before the cluster is formed and all
+%% cluster members are known, e.g. via definition import.
+-rabbit_boot_step({virtual_host_reconciliation,
+    [{description, "makes sure all virtual host have running processes on all nodes"},
+        {mfa,         {rabbit_vhosts, boot, []}},
+        {requires,    notify_cluster}]}).
+
+-rabbit_boot_step({pg_local_amqp_session,
+                   [{description, "local-only pg scope for AMQP sessions"},
+                    {mfa,         {rabbit, pg_local_amqp_session, []}},
+                    {requires,    kernel_ready},
+                    {enables,     core_initialized}]}).
+
+-rabbit_boot_step({pg_local_amqp_connection,
+                   [{description, "local-only pg scope for AMQP connections"},
+                    {mfa,         {rabbit, pg_local_amqp_connection, []}},
+                    {requires,    kernel_ready},
+                    {enables,     core_initialized}]}).
+
 %%---------------------------------------------------------------------------
 
--include_lib("rabbit_common/include/rabbit_framing.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -define(APPS, [os_mon, mnesia, rabbit_common, rabbitmq_prelaunch, ra, sysmon_handler, rabbit, osiris]).
-
--define(DIRTY_IO_SCHEDULERS_WARNING_THRESHOLD, 10).
 
 %% 1 minute
 -define(BOOT_START_TIMEOUT,     1 * 60 * 1000).
@@ -356,14 +368,40 @@ run_prelaunch_second_phase() ->
     %% 3. Logging.
     ok = rabbit_prelaunch_logging:setup(Context),
 
-    %% 4. Clustering.
+    %% The clustering steps requires Khepri to be started to check for
+    %% consistency. This is the opposite compared to Mnesia which must be
+    %% stopped. That's why we setup Khepri and the coordination Ra system it
+    %% depends on before, but only handle Mnesia after.
+    %%
+    %% We also always set it up, even when using Mnesia, to ensure it is ready
+    %% if/when the migration begins.
+    %%
+    %% Note that this is only the Khepri store which is started here. We
+    %% perform additional initialization steps in `rabbit_db:init()' which is
+    %% triggered from a boot step. This boot step handles both Mnesia and
+    %% Khepri and synchronizes the feature flags.
+    %%
+    %% To sum up:
+    %% 1. We start the Khepri store (always)
+    %% 2. We verify the cluster, including the feature flags compatibility
+    %% 3. We start Mnesia (if Khepri is unused)
+    %% 4. We synchronize feature flags in `rabbit_db:init()'
+    %% 4. We finish to initialize either Mnesia or Khepri in `rabbit_db:init()'
+    ok = rabbit_ra_systems:setup(Context),
+    ok = rabbit_khepri:setup(Context),
+
+    %% 4. Clustering checks. This covers the compatibility between nodes,
+    %% feature-flags-wise.
     ok = rabbit_prelaunch_cluster:setup(Context),
 
-    %% Start Mnesia now that everything is ready.
-    ?LOG_DEBUG("Starting Mnesia"),
-    ok = mnesia:start(),
-
-    ok = rabbit_ra_systems:setup(Context),
+    case rabbit_khepri:is_enabled() of
+        true ->
+            ok;
+        false ->
+            %% Start Mnesia now that everything is ready.
+            ?LOG_DEBUG("Starting Mnesia"),
+            ok = mnesia:start()
+    end,
 
     ?LOG_DEBUG(""),
     ?LOG_DEBUG("== Prelaunch DONE =="),
@@ -377,24 +415,32 @@ run_prelaunch_second_phase() ->
 start_it(StartType) ->
     case spawn_boot_marker() of
         {ok, Marker} ->
-            T0 = erlang:timestamp(),
             ?LOG_INFO("RabbitMQ is asked to start...", [],
                       #{domain => ?RMQLOG_DOMAIN_PRELAUNCH}),
             try
-                {ok, _} = application:ensure_all_started(rabbitmq_prelaunch,
-                                                         StartType),
-                {ok, _} = application:ensure_all_started(rabbit,
-                                                         StartType),
-                ok = wait_for_ready_or_stopped(),
-
-                T1 = erlang:timestamp(),
-                ?LOG_DEBUG(
-                  "Time to start RabbitMQ: ~tp us",
-                  [timer:now_diff(T1, T0)]),
+                {Millis, ok} = timer:tc(
+                                 fun() ->
+                                         {ok, _} = application:ensure_all_started(
+                                                     rabbitmq_prelaunch, StartType),
+                                         {ok, _} = application:ensure_all_started(
+                                                     rabbit, StartType),
+                                         wait_for_ready_or_stopped()
+                                 end, millisecond),
+                ?LOG_INFO("Time to start RabbitMQ: ~b ms", [Millis]),
                 stop_boot_marker(Marker),
                 ok
             catch
                 error:{badmatch, Error}:_ ->
+                    %% `rabbitmq_prelaunch' was started before `rabbit' above.
+                    %% If the latter fails to start, we must stop the former as
+                    %% well.
+                    %%
+                    %% This is important if the environment changes between
+                    %% that error and the next attempt to start `rabbit': the
+                    %% environment is only read during the start of
+                    %% `rabbitmq_prelaunch' (and the cached context is cleaned
+                    %% on stop).
+                    _ = application:stop(rabbitmq_prelaunch),
                     stop_boot_marker(Marker),
                     case StartType of
                         temporary -> throw(Error);
@@ -512,7 +558,10 @@ start_apps(Apps, RestartTypes) ->
     %% We need to load all applications involved in order to be able to
     %% find new feature flags.
     app_utils:load_applications(Apps),
-    ok = rabbit_feature_flags:refresh_feature_flags_after_app_load(),
+    case rabbit_feature_flags:refresh_feature_flags_after_app_load() of
+        ok    -> ok;
+        Error -> throw(Error)
+    end,
     rabbit_prelaunch_conf:decrypt_config(Apps),
     lists:foreach(
       fun(App) ->
@@ -678,7 +727,6 @@ maybe_print_boot_progress(true, IterationsLeft) ->
 status() ->
     Version = base_product_version(),
     [CryptoLibInfo] = crypto:info_lib(),
-    SeriesSupportStatus = rabbit_release_series:readable_support_status(),
     S1 = [{pid,                  list_to_integer(os:getpid())},
           %% The timeout value used is twice that of gen_server:call/2.
           {running_applications, rabbit_misc:which_applications()},
@@ -686,9 +734,9 @@ status() ->
           {rabbitmq_version,     Version},
           {crypto_lib_info,      CryptoLibInfo},
           {erlang_version,       erlang:system_info(system_version)},
-          {release_series_support_status, SeriesSupportStatus},
           {memory,               rabbit_vm:memory()},
           {alarms,               alarms()},
+          {tags,                 tags()},
           {is_under_maintenance, rabbit_maintenance:is_being_drained_local_read(node())},
           {listeners,            listeners()},
           {vm_memory_calculation_strategy, vm_memory_monitor:get_memory_calculation_strategy()}],
@@ -723,7 +771,7 @@ status() ->
                  true ->
                      [{virtual_host_count, rabbit_vhost:count()},
                       {connection_count,
-                       length(rabbit_networking:connections_local()) +
+                       length(rabbit_networking:local_connections()) +
                        length(rabbit_networking:local_non_amqp_connections())},
                       {queue_count, total_queue_count()}];
                  false ->
@@ -747,6 +795,9 @@ alarms() ->
     N = node(),
     %% [{{resource_limit,memory,rabbit@mercurio},[]}]
     [{resource_limit, Limit, Node} || {{resource_limit, Limit, Node}, _} <- Alarms, Node =:= N].
+
+tags() ->
+    application:get_env(rabbit, node_tags, []).
 
 listeners() ->
     Listeners = try
@@ -875,17 +926,16 @@ start(normal, []) ->
                    [product_name(), product_version(), rabbit_misc:otp_release(),
                     emu_flavor(),
                     BaseName, BaseVersion,
-                    ?COPYRIGHT_MESSAGE, ?INFORMATION_MESSAGE],
+                    ?COPYRIGHT_MESSAGE, product_license_line()],
                    #{domain => ?RMQLOG_DOMAIN_PRELAUNCH});
             _ ->
                 ?LOG_INFO(
                    "~n Starting ~ts ~ts on Erlang ~ts [~ts]~n ~ts~n ~ts",
                    [product_name(), product_version(), rabbit_misc:otp_release(),
                     emu_flavor(),
-                    ?COPYRIGHT_MESSAGE, ?INFORMATION_MESSAGE],
+                    ?COPYRIGHT_MESSAGE, product_license_line()],
                    #{domain => ?RMQLOG_DOMAIN_PRELAUNCH})
         end,
-        maybe_warn_about_release_series_eol(),
         log_motd(),
         {ok, SupPid} = rabbit_sup:start_link(),
 
@@ -916,7 +966,6 @@ start(normal, []) ->
         print_banner(),
         log_banner(),
         warn_if_kernel_config_dubious(),
-        warn_if_disc_io_options_dubious(),
 
         ?LOG_DEBUG(""),
         ?LOG_DEBUG("== Plugins (prelaunch phase) =="),
@@ -932,7 +981,10 @@ start(normal, []) ->
         %% once, because it does not involve running code from the
         %% plugins.
         ok = app_utils:load_applications(Plugins),
-        ok = rabbit_feature_flags:refresh_feature_flags_after_app_load(),
+        case rabbit_feature_flags:refresh_feature_flags_after_app_load() of
+            ok     -> ok;
+            Error1 -> throw(Error1)
+        end,
 
         persist_static_configuration(),
 
@@ -978,6 +1030,20 @@ do_run_postlaunch_phase(Plugins) ->
         ?LOG_DEBUG(""),
         ?LOG_DEBUG("== Plugins (postlaunch phase) =="),
 
+        %% Before loading plugins, set the prometheus collectors and
+        %% instrumenters to the empty list. By default, prometheus will attempt
+        %% to find all implementers of its collector and instrumenter
+        %% behaviours by scanning all available modules during application
+        %% start. This can take significant time (on the order of seconds) due
+        %% to the large number of modules available.
+        %%
+        %% * Collectors: the `rabbitmq_prometheus' plugin explicitly registers
+        %%   all collectors.
+        %% * Instrumenters: no instrumenters are used.
+        _ = application:load(prometheus),
+        ok = application:set_env(prometheus, collectors, [default]),
+        ok = application:set_env(prometheus, instrumenters, []),
+
         %% However, we want to run their boot steps and actually start
         %% them one by one, to ensure a dependency is fully started
         %% before a plugin which depends on it gets a chance to start.
@@ -1009,7 +1075,13 @@ do_run_postlaunch_phase(Plugins) ->
         ok = log_broker_started(StrictlyPlugins),
 
         ?LOG_DEBUG("Marking ~ts as running", [product_name()]),
-        rabbit_boot_state:set(ready)
+        rabbit_boot_state:set(ready),
+
+        %% Now that everything is ready, trigger the garbage collector. With
+        %% Khepri enabled, it seems to be more important than before; see #5515
+        %% for context.
+        _ = rabbit_runtime:gc_all_processes(),
+        ok
     catch
         throw:{error, _} = Error ->
             rabbit_prelaunch_errors:log_error(Error),
@@ -1025,6 +1097,10 @@ do_run_postlaunch_phase(Plugins) ->
 
 prep_stop(State) ->
     rabbit_boot_state:set(stopping),
+    %% Wait for any in-flight feature flag changes to finish. This way, we
+    %% increase the chance of letting an `enable' operation to finish if the
+    %% controller waits for anything in-flight before is actually exits.
+    ok = rabbit_ff_controller:wait_for_task_and_stop(),
     rabbit_peer_discovery:maybe_unregister(),
     State.
 
@@ -1032,14 +1108,12 @@ prep_stop(State) ->
 
 stop(State) ->
     ok = rabbit_alarm:stop(),
-    ok = case rabbit_db_cluster:is_clustered() of
-             true  -> ok;
-             false -> rabbit_table:clear_ram_only_tables()
-         end,
+    ok = rabbit_table:maybe_clear_ram_only_tables(),
     case State of
         [] -> rabbit_prelaunch:set_stop_reason(normal);
         _  -> rabbit_prelaunch:set_stop_reason(State)
     end,
+    rabbit_db:clear_init_finished(),
     rabbit_boot_state:set(stopped),
     ok.
 
@@ -1055,8 +1129,27 @@ boot_delegate() ->
 -spec recover() -> 'ok'.
 
 recover() ->
-    ok = rabbit_vhost:recover(),
-    ok.
+    ok = rabbit_vhost:recover().
+
+pg_local_amqp_session() ->
+    PgScope = pg_local_scope(amqp_session),
+    rabbit_sup:start_child(pg_amqp_session, pg, [PgScope]).
+
+pg_local_amqp_connection() ->
+    PgScope = pg_local_scope(amqp_connection),
+    rabbit_sup:start_child(pg_amqp_connection, pg, [PgScope]).
+
+pg_local_scope(Prefix) ->
+    list_to_atom(io_lib:format("~s_~s", [Prefix, node()])).
+
+
+-spec update_cluster_tags() -> 'ok'.
+
+update_cluster_tags() ->
+    Tags = application:get_env(rabbit, cluster_tags, []),
+    ?LOG_DEBUG("Seeding cluster tags from application environment key...",
+                       #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
+    rabbit_runtime_parameters:set_global(cluster_tags, Tags, <<"internal_user">>).
 
 -spec maybe_insert_default_data() -> 'ok'.
 
@@ -1231,7 +1324,6 @@ print_banner() ->
     %% padded list lines
     {LogFmt, LogLocations} = LineListFormatter("~n        ~ts", log_locations()),
     {CfgFmt, CfgLocations} = LineListFormatter("~n                  ~ts", config_locations()),
-    SeriesSupportStatus    = rabbit_release_series:readable_support_status(),
     {MOTDFormat, MOTDArgs} = case motd() of
                                  undefined ->
                                      {"", []};
@@ -1249,33 +1341,22 @@ print_banner() ->
               MOTDFormat ++
               "~n  Erlang:      ~ts [~ts]"
               "~n  TLS Library: ~ts"
-              "~n  Release series support status: ~ts"
+              "~n  Release series support status: see https://www.rabbitmq.com/release-information"
               "~n"
-              "~n  Doc guides:  https://rabbitmq.com/documentation.html"
-              "~n  Support:     https://rabbitmq.com/contact.html"
-              "~n  Tutorials:   https://rabbitmq.com/getstarted.html"
-              "~n  Monitoring:  https://rabbitmq.com/monitoring.html"
+              "~n  Doc guides:  https://www.rabbitmq.com/docs"
+              "~n  Support:     https://www.rabbitmq.com/docs/contact"
+              "~n  Tutorials:   https://www.rabbitmq.com/tutorials"
+              "~n  Monitoring:  https://www.rabbitmq.com/docs/monitoring"
+              "~n  Upgrading:   https://www.rabbitmq.com/docs/upgrade"
               "~n"
               "~n  Logs: ~ts" ++ LogFmt ++ "~n"
               "~n  Config file(s): ~ts" ++ CfgFmt ++ "~n"
               "~n  Starting broker...",
-              [Product, Version, ?COPYRIGHT_MESSAGE, ?INFORMATION_MESSAGE] ++
-              [rabbit_misc:otp_release(), emu_flavor(), crypto_version(),
-               SeriesSupportStatus] ++
+              [Product, Version, ?COPYRIGHT_MESSAGE, product_license_line()] ++
+              [rabbit_misc:otp_release(), emu_flavor(), crypto_version()] ++
               MOTDArgs ++
               LogLocations ++
               CfgLocations).
-
-maybe_warn_about_release_series_eol() ->
-    case rabbit_release_series:is_currently_supported() of
-        false ->
-            %% we intentionally log this as an error for increased visibiity
-            ?LOG_ERROR("This release series has reached end of life "
-                       "and is no longer supported. "
-                       "Please visit https://rabbitmq.com/versions.html "
-                       "to learn more and upgrade");
-        _ -> ok
-    end.
 
 emu_flavor() ->
     %% emu_flavor was introduced in Erlang 24 so we need to catch the error on Erlang 23
@@ -1347,14 +1428,6 @@ warn_if_kernel_config_dubious() ->
                            #{domain => ?RMQLOG_DOMAIN_GLOBAL})
             end
     end,
-    DirtyIOSchedulers = erlang:system_info(dirty_io_schedulers),
-    case DirtyIOSchedulers < ?DIRTY_IO_SCHEDULERS_WARNING_THRESHOLD of
-        true  -> ?LOG_WARNING(
-                   "Erlang VM is running with ~b dirty I/O schedulers, "
-                   "file I/O performance may worsen", [DirtyIOSchedulers],
-                   #{domain => ?RMQLOG_DOMAIN_GLOBAL});
-        false -> ok
-    end,
     IDCOpts = case application:get_env(kernel, inet_default_connect_options) of
                   undefined -> [];
                   {ok, Val} -> Val
@@ -1366,87 +1439,6 @@ warn_if_kernel_config_dubious() ->
         true  -> ok
     end.
 
-warn_if_disc_io_options_dubious() ->
-    %% if these values are not set, it doesn't matter since
-    %% rabbit_variable_queue will pick up the values defined in the
-    %% IO_BATCH_SIZE and CREDIT_DISC_BOUND constants.
-    CreditDiscBound = rabbit_misc:get_env(rabbit, msg_store_credit_disc_bound,
-                                          undefined),
-    IoBatchSize = rabbit_misc:get_env(rabbit, msg_store_io_batch_size,
-                                      undefined),
-    case catch validate_msg_store_io_batch_size_and_credit_disc_bound(
-                 CreditDiscBound, IoBatchSize) of
-        ok -> ok;
-        {error, {Reason, Vars}} ->
-            ?LOG_WARNING(Reason, Vars,
-                         #{domain => ?RMQLOG_DOMAIN_GLOBAL})
-    end.
-
-validate_msg_store_io_batch_size_and_credit_disc_bound(CreditDiscBound,
-                                                       IoBatchSize) ->
-    case IoBatchSize of
-        undefined ->
-            ok;
-        IoBatchSize when is_integer(IoBatchSize) ->
-            if IoBatchSize < ?IO_BATCH_SIZE ->
-                    throw({error,
-                     {"io_batch_size of ~b lower than recommended value ~b, "
-                      "paging performance may worsen",
-                      [IoBatchSize, ?IO_BATCH_SIZE]}});
-               true ->
-                    ok
-            end;
-        IoBatchSize ->
-            throw({error,
-             {"io_batch_size should be an integer, but ~b given",
-              [IoBatchSize]}})
-    end,
-
-    %% CreditDiscBound = {InitialCredit, MoreCreditAfter}
-    {RIC, RMCA} = ?CREDIT_DISC_BOUND,
-    case CreditDiscBound of
-        undefined ->
-            ok;
-        {IC, MCA} when is_integer(IC), is_integer(MCA) ->
-            if IC < RIC; MCA < RMCA ->
-                    throw({error,
-                     {"msg_store_credit_disc_bound {~b, ~b} lower than"
-                      "recommended value {~b, ~b},"
-                      " paging performance may worsen",
-                      [IC, MCA, RIC, RMCA]}});
-               true ->
-                    ok
-            end;
-        {IC, MCA} ->
-            throw({error,
-             {"both msg_store_credit_disc_bound values should be integers, but ~tp given",
-              [{IC, MCA}]}});
-        CreditDiscBound ->
-            throw({error,
-             {"invalid msg_store_credit_disc_bound value given: ~tp",
-              [CreditDiscBound]}})
-    end,
-
-    case {CreditDiscBound, IoBatchSize} of
-        {undefined, undefined} ->
-            ok;
-        {_CDB, undefined} ->
-            ok;
-        {undefined, _IBS} ->
-            ok;
-        {{InitialCredit, _MCA}, IoBatchSize} ->
-            if IoBatchSize < InitialCredit ->
-                    throw(
-                      {error,
-                       {"msg_store_io_batch_size ~b should be bigger than the initial "
-                        "credit value from msg_store_credit_disc_bound ~b,"
-                        " paging performance may worsen",
-                        [IoBatchSize, InitialCredit]}});
-               true ->
-                    ok
-            end
-    end.
-
 -spec product_name() -> string().
 
 product_name() ->
@@ -1454,6 +1446,10 @@ product_name() ->
         #{product_name := ProductName}   -> ProductName;
         #{product_base_name := BaseName} -> BaseName
     end.
+
+-spec product_license_line() -> string().
+product_license_line() ->
+    application:get_env(rabbit, license_line, ?INFORMATION_MESSAGE).
 
 -spec product_version() -> string().
 
@@ -1599,8 +1595,9 @@ config_files() ->
 start_fhc() ->
     ok = rabbit_sup:start_restartable_child(
       file_handle_cache,
-      [fun rabbit_alarm:set_alarm/1, fun rabbit_alarm:clear_alarm/1]),
-    ensure_working_fhc().
+      [fun(_) -> ok end, fun(_) -> ok end]),
+    ensure_working_fhc(),
+    maybe_warn_low_fd_limit().
 
 ensure_working_fhc() ->
     %% To test the file handle cache, we simply read a file we know it
@@ -1622,7 +1619,7 @@ ensure_working_fhc() ->
                   #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
         ?LOG_INFO("FHC write buffering: ~ts", [WriteBuf],
                   #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
-        Filename = filename:join(code:lib_dir(kernel, ebin), "kernel.app"),
+        Filename = filename:join(code:lib_dir(kernel), "ebin/kernel.app"),
         {ok, Fd} = file_handle_cache:open(Filename, [raw, binary, read], []),
         {ok, _} = file_handle_cache:read(Fd, 1),
         ok = file_handle_cache:close(Fd),
@@ -1640,24 +1637,64 @@ ensure_working_fhc() ->
             throw({ensure_working_fhc, {timeout, TestPid}})
     end.
 
+maybe_warn_low_fd_limit() ->
+    case file_handle_cache:ulimit() of
+        %% unknown is included as atom() > integer().
+        L when L > 1024 ->
+            ok;
+        L ->
+            rabbit_log:warning("Available file handles: ~tp. "
+                "Please consider increasing system limits", [L])
+    end.
+
 %% Any configuration that
 %% 1. is not allowed to change while RabbitMQ is running, and
 %% 2. is read often
 %% should be placed into persistent_term for efficiency.
 persist_static_configuration() ->
     persist_static_configuration(
-      [{rabbit, classic_queue_index_v2_segment_entry_count},
-       {rabbit, classic_queue_store_v2_max_cache_size},
-       {rabbit, classic_queue_store_v2_check_crc32}
-      ]).
+      [classic_queue_index_v2_segment_entry_count,
+       classic_queue_store_v2_max_cache_size,
+       classic_queue_store_v2_check_crc32,
+       incoming_message_interceptors
+      ]),
 
-persist_static_configuration(AppParams) ->
+    %% Disallow the following two cases:
+    %% 1. Negative values
+    %% 2. MoreCreditAfter greater than InitialCredit
+    CreditFlowDefaultCredit = case application:get_env(?MODULE, credit_flow_default_credit) of
+                     {ok, {InitialCredit, MoreCreditAfter}}
+                       when is_integer(InitialCredit) andalso
+                            is_integer(MoreCreditAfter) andalso
+                            InitialCredit >= 0 andalso
+                            MoreCreditAfter >= 0 andalso
+                            MoreCreditAfter =< InitialCredit ->
+                         {InitialCredit, MoreCreditAfter};
+                     Other ->
+                       rabbit_log:error("Refusing to boot due to an invalid value of 'rabbit.credit_flow_default_credit'"),
+                       throw({error, {invalid_credit_flow_default_credit_value, Other}})
+               end,
+    ok = persistent_term:put(credit_flow_default_credit, CreditFlowDefaultCredit),
+
+    %% Disallow 0 as it means unlimited:
+    %% "If this field is zero or unset, there is no maximum
+    %% size imposed by the link endpoint." [AMQP 1.0 §2.7.3]
+    MaxMsgSize = case application:get_env(?MODULE, max_message_size) of
+                     {ok, Size}
+                       when is_integer(Size) andalso Size > 0 ->
+                         erlang:min(Size, ?MAX_MSG_SIZE);
+                     _ ->
+                         ?MAX_MSG_SIZE
+                 end,
+    ok = persistent_term:put(max_message_size, MaxMsgSize).
+
+persist_static_configuration(Params) ->
     lists:foreach(
-      fun(Key = {App, Param}) ->
-              case application:get_env(App, Param) of
+      fun(Param) ->
+              case application:get_env(?MODULE, Param) of
                   {ok, Value} ->
-                      ok = persistent_term:put(Key, Value);
+                      ok = persistent_term:put(Param, Value);
                   undefined ->
                       ok
               end
-      end, AppParams).
+      end, Params).

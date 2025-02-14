@@ -11,18 +11,12 @@ def all_beam_files(name = "all_beam_files"):
         srcs = [
             "src/rabbit_peer_discovery_k8s.erl",
             "src/rabbitmq_peer_discovery_k8s.erl",
-            "src/rabbitmq_peer_discovery_k8s_app.erl",
-            "src/rabbitmq_peer_discovery_k8s_node_monitor.erl",
-            "src/rabbitmq_peer_discovery_k8s_sup.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
         app_name = "rabbitmq_peer_discovery_k8s",
         dest = "ebin",
         erlc_opts = "//:erlc_opts",
-        deps = [
-            "//deps/rabbit_common:erlang_app",
-            "//deps/rabbitmq_peer_discovery_common:erlang_app",
-        ],
+        deps = ["//deps/rabbit_common:erlang_app"],
     )
 
 def all_test_beam_files(name = "all_test_beam_files"):
@@ -37,18 +31,12 @@ def all_test_beam_files(name = "all_test_beam_files"):
         srcs = [
             "src/rabbit_peer_discovery_k8s.erl",
             "src/rabbitmq_peer_discovery_k8s.erl",
-            "src/rabbitmq_peer_discovery_k8s_app.erl",
-            "src/rabbitmq_peer_discovery_k8s_node_monitor.erl",
-            "src/rabbitmq_peer_discovery_k8s_sup.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
         app_name = "rabbitmq_peer_discovery_k8s",
         dest = "test",
         erlc_opts = "//:test_erlc_opts",
-        deps = [
-            "//deps/rabbit_common:erlang_app",
-            "//deps/rabbitmq_peer_discovery_common:erlang_app",
-        ],
+        deps = ["//deps/rabbit_common:erlang_app"],
     )
 
 def all_srcs(name = "all_srcs"):
@@ -73,14 +61,10 @@ def all_srcs(name = "all_srcs"):
         srcs = [
             "src/rabbit_peer_discovery_k8s.erl",
             "src/rabbitmq_peer_discovery_k8s.erl",
-            "src/rabbitmq_peer_discovery_k8s_app.erl",
-            "src/rabbitmq_peer_discovery_k8s_node_monitor.erl",
-            "src/rabbitmq_peer_discovery_k8s_sup.erl",
         ],
     )
     filegroup(
         name = "public_hdrs",
-        srcs = ["include/rabbit_peer_discovery_k8s.hrl"],
     )
     filegroup(
         name = "license_files",

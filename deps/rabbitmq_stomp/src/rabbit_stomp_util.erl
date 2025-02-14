@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_stomp_util).
@@ -296,8 +296,12 @@ build_argument(?HEADER_X_STREAM_MAX_SEGMENT_SIZE_BYTES, Val) ->
     {list_to_binary(?HEADER_X_STREAM_MAX_SEGMENT_SIZE_BYTES), long,
      list_to_integer(string:strip(Val))};
 build_argument(?HEADER_X_QUEUE_TYPE, Val) ->
-  {list_to_binary(?HEADER_X_QUEUE_TYPE), longstr,
-    list_to_binary(string:strip(Val))}.
+    {list_to_binary(?HEADER_X_QUEUE_TYPE), longstr,
+     list_to_binary(string:strip(Val))};
+build_argument(?HEADER_X_STREAM_FILTER_SIZE_BYTES, Val) ->
+    {list_to_binary(?HEADER_X_STREAM_FILTER_SIZE_BYTES), long,
+     list_to_integer(string:strip(Val))}.
+
 
 build_params(EndPoint, Headers) ->
     Params = lists:foldl(fun({K, V}, Acc) ->

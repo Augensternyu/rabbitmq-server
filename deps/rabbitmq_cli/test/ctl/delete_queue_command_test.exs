@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule DeleteQueueCommandTest do
   use ExUnit.Case, async: false
@@ -73,6 +73,42 @@ defmodule DeleteQueueCommandTest do
     publish_messages(@vhost, q, n)
 
     assert @command.run([q], context[:opts]) == {:ok, n}
+    {:error, :not_found} = lookup_queue(q, @vhost)
+  end
+
+  @tag test_timeout: 30000
+  test "run: request to an existing crashed queue on active node succeeds", context do
+    add_vhost(@vhost)
+    set_permissions(@user, @vhost, [".*", ".*", ".*"])
+    on_exit(context, fn -> delete_vhost(@vhost) end)
+
+    q = "foo"
+    n = 20
+
+    declare_queue(q, @vhost, true)
+    publish_messages(@vhost, q, n)
+    q_resource = :rabbit_misc.r(@vhost, :queue, q)
+    crash_queue(q_resource)
+
+    assert @command.run([q], context[:opts]) == {:ok, 0}
+    {:error, :not_found} = lookup_queue(q, @vhost)
+  end
+
+  @tag test_timeout: 30000
+  test "run: request to an existing stopped queue on active node succeeds", context do
+    add_vhost(@vhost)
+    set_permissions(@user, @vhost, [".*", ".*", ".*"])
+    on_exit(context, fn -> delete_vhost(@vhost) end)
+
+    q = "bar"
+    n = 20
+
+    declare_queue(q, @vhost, true)
+    publish_messages(@vhost, q, n)
+    q_resource = :rabbit_misc.r(@vhost, :queue, q)
+    stop_queue(q_resource)
+
+    assert @command.run([q], context[:opts]) == {:ok, 0}
     {:error, :not_found} = lookup_queue(q, @vhost)
   end
 

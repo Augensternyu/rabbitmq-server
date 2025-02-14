@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_backing_queue).
@@ -21,14 +21,11 @@
 -type ack()   :: any().
 -type state() :: any().
 
--type flow() :: 'flow' | 'noflow'.
 -type msg_ids() :: [rabbit_types:msg_id()].
--type publish() :: {rabbit_types:basic_message(),
-                    rabbit_types:message_properties(), boolean()}.
--type delivered_publish() :: {rabbit_types:basic_message(),
+-type delivered_publish() :: {mc:state(),
                               rabbit_types:message_properties()}.
 -type fetch_result(Ack) ::
-        ('empty' | {rabbit_types:basic_message(), boolean(), Ack}).
+        ('empty' | {mc:state(), boolean(), Ack}).
 -type drop_result(Ack) ::
         ('empty' | {rabbit_types:msg_id(), Ack}).
 -type recovery_terms() :: [term()] | 'non_clean_shutdown'.
@@ -36,9 +33,8 @@
 -type purged_msg_count() :: non_neg_integer().
 -type async_callback() ::
         fun ((atom(), fun ((atom(), state()) -> state())) -> 'ok').
--type duration() :: ('undefined' | 'infinity' | number()).
 
--type msg_fun(A) :: fun ((rabbit_types:basic_message(), ack(), A) -> A).
+-type msg_fun(A) :: fun ((mc:state(), ack(), A) -> A).
 -type msg_pred() :: fun ((rabbit_types:message_properties()) -> boolean()).
 
 -type queue_mode() :: atom().
@@ -95,29 +91,21 @@
 -callback purge_acks(state()) -> state().
 
 %% Publish a message.
--callback publish(rabbit_types:basic_message(),
-                  rabbit_types:message_properties(), boolean(), pid(), flow(),
+-callback publish(mc:state(),
+                  rabbit_types:message_properties(), boolean(), pid(),
                   state()) -> state().
-
-%% Like publish/6 but for batches of publishes.
--callback batch_publish([publish()], pid(), flow(), state()) -> state().
 
 %% Called for messages which have already been passed straight
 %% out to a client. The queue will be empty for these calls
 %% (i.e. saves the round trip through the backing queue).
--callback publish_delivered(rabbit_types:basic_message(),
-                            rabbit_types:message_properties(), pid(), flow(),
+-callback publish_delivered(mc:state(),
+                            rabbit_types:message_properties(), pid(),
                             state())
                            -> {ack(), state()}.
 
-%% Like publish_delivered/5 but for batches of publishes.
--callback batch_publish_delivered([delivered_publish()], pid(), flow(),
-                                  state())
-                                 -> {[ack()], state()}.
-
 %% Called to inform the BQ about messages which have reached the
 %% queue, but are not going to be further passed to BQ.
--callback discard(rabbit_types:msg_id(), pid(), flow(), state()) -> state().
+-callback discard(rabbit_types:msg_id(), pid(), state()) -> state().
 
 %% Return ids of messages which have been confirmed since the last
 %% invocation of this function (or initialisation).
@@ -187,7 +175,7 @@
 
 %% Fold over all the messages in a queue and return the accumulated
 %% results, leaving the queue undisturbed.
--callback fold(fun((rabbit_types:basic_message(),
+-callback fold(fun((mc:state(),
                     rabbit_types:message_properties(),
                     boolean(), A) -> {('stop' | 'cont'), A}),
                A, state()) -> {A, state()}.
@@ -201,21 +189,8 @@
 %% What's the queue depth, where depth = length + number of pending acks
 -callback depth(state()) -> non_neg_integer().
 
-%% For the next three functions, the assumption is that you're
-%% monitoring something like the ingress and egress rates of the
-%% queue. The RAM duration is thus the length of time represented by
-%% the messages held in RAM given the current rates. If you want to
-%% ignore all of this stuff, then do so, and return 0 in
-%% ram_duration/1.
-
-%% The target is to have no more messages in RAM than indicated by the
-%% duration and the current queue rates.
--callback set_ram_duration_target(duration(), state()) -> state().
-
-%% Optionally recalculate the duration internally (likely to be just
-%% update your internal rates), and report how many seconds the
-%% messages in RAM represent given the current rates of the queue.
--callback ram_duration(state()) -> {duration(), state()}.
+%% Update the internal message rates.
+-callback update_rates(state()) -> state().
 
 %% Should 'timeout' be called as soon as the queue process can manage
 %% (either on an empty mailbox, or when a timer fires)?
@@ -245,9 +220,8 @@
 
 %% Called prior to a publish or publish_delivered call. Allows the BQ
 %% to signal that it's already seen this message, (e.g. it was published
-%% or discarded previously) specifying whether to drop the message or reject it.
--callback is_duplicate(rabbit_types:basic_message(), state())
-                      -> {{true, drop} | {true, reject} | boolean(), state()}.
+%% or discarded previously).
+-callback is_duplicate(mc:state(), state()) -> {boolean(), state()}.
 
 -callback set_queue_mode(queue_mode(), state()) -> state().
 

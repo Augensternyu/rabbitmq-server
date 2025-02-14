@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(amqqueue). %% Could become amqqueue_v2 in the future.
@@ -28,9 +28,6 @@
          set_decorators/2,
          % exclusive_owner
          get_exclusive_owner/1,
-         % gm_pids
-         get_gm_pids/1,
-         set_gm_pids/2,
          get_leader/1,
          % name (#resource)
          get_name/1,
@@ -53,34 +50,26 @@
          % type_state
          get_type_state/1,
          set_type_state/2,
-         % recoverable_slaves
-         get_recoverable_slaves/1,
-         set_recoverable_slaves/2,
-         % slave_pids
-         get_slave_pids/1,
-         set_slave_pids/2,
-         % slave_pids_pending_shutdown
-         get_slave_pids_pending_shutdown/1,
-         set_slave_pids_pending_shutdown/2,
          % state
          get_state/1,
          set_state/2,
-         % sync_slave_pids
-         get_sync_slave_pids/1,
-         set_sync_slave_pids/2,
          get_type/1,
          get_vhost/1,
          is_amqqueue/1,
          is_auto_delete/1,
          is_durable/1,
+         is_exclusive/1,
          is_classic/1,
          is_quorum/1,
          pattern_match_all/0,
          pattern_match_on_name/1,
          pattern_match_on_type/1,
-         reset_mirroring_and_decorators/1,
+         pattern_match_on_durable/1,
+         pattern_match_on_type_and_durable/2,
+         reset_decorators/1,
          set_immutable/1,
          qnode/1,
+         to_printable/1,
          macros/0]).
 
 -define(record_version, amqqueue_v2).
@@ -88,33 +77,38 @@
         (T =:= classic orelse T =:= ?amqqueue_v1_type)).
 
 -record(amqqueue, {
-          name :: rabbit_amqqueue:name() | '_', %% immutable
-          durable :: boolean() | '_',           %% immutable
-          auto_delete :: boolean() | '_',       %% immutable
-          exclusive_owner = none :: pid() | none | '_', %% immutable
-          arguments = [] :: rabbit_framing:amqp_table() | '_', %% immutable
-          pid :: pid() | ra_server_id() | none | '_', %% durable (just so we
-                                                      %% know home node)
-          slave_pids = [] :: [pid()] | none | '_',    %% transient
-          sync_slave_pids = [] :: [pid()] | none| '_',%% transient
-          recoverable_slaves = [] :: [atom()] | none | '_', %% durable
-          policy :: proplists:proplist() |
-                    none | undefined | '_', %% durable, implicit update as
-                                            %% above
-          operator_policy :: proplists:proplist() |
-                             none | undefined | '_', %% durable, implicit
-                                                     %% update as above
-          gm_pids = [] :: [{pid(), pid()}] | none | '_', %% transient
-          decorators :: [atom()] | none | undefined | '_', %% transient,
-                                                           %% recalculated
-                                                           %% as above
-          state = live :: atom() | none | '_', %% durable (have we crashed?)
-          policy_version = 0 :: non_neg_integer() | '_',
-          slave_pids_pending_shutdown = [] :: [pid()] | '_',
-          vhost :: rabbit_types:vhost() | undefined | '_', %% secondary index
-          options = #{} :: map() | '_',
-          type = ?amqqueue_v1_type :: module() | '_',
-          type_state = #{} :: map() | '_'
+          %% immutable
+          name :: rabbit_amqqueue:name() | ets:match_pattern(),
+          %% immutable
+          durable :: boolean() | ets:match_pattern(),
+          %% immutable
+          auto_delete :: boolean() | ets:match_pattern(),
+          %% immutable
+          exclusive_owner = none :: pid() | none | ets:match_pattern(),
+          %% immutable
+          arguments = [] :: rabbit_framing:amqp_table() | ets:match_pattern(),
+          %% durable (just so we know home node)
+          pid :: pid() | ra_server_id() | none | ets:match_pattern(),
+          slave_pids = [], %% reserved
+          sync_slave_pids = [], %% reserved
+          recoverable_slaves = [], %% reserved
+          %% durable, implicit update as above
+          policy :: proplists:proplist() | none | undefined | ets:match_pattern(),
+          %% durable, implicit update as above
+          operator_policy :: proplists:proplist() | none | undefined | ets:match_pattern(),
+          %% transient
+          gm_pids = [] :: [{pid(), pid()}] | none | ets:match_pattern(),
+          %% transient, recalculated as above
+          decorators :: [atom()] | none | undefined | ets:match_pattern(),
+          %% durable (have we crashed?)
+          state = live :: atom() | none | ets:match_pattern(),
+          policy_version = 0 :: non_neg_integer() | ets:match_pattern(),
+          slave_pids_pending_shutdown = [], %% reserved
+          %% secondary index
+          vhost :: rabbit_types:vhost() | undefined | ets:match_pattern(),
+          options = #{} :: map() | ets:match_pattern(),
+          type = ?amqqueue_v1_type :: module() | ets:match_pattern(),
+          type_state = #{} :: map() | ets:match_pattern()
          }).
 
 -type amqqueue() :: amqqueue_v2().
@@ -146,26 +140,26 @@
 
 -type amqqueue_pattern() :: amqqueue_v2_pattern().
 -type amqqueue_v2_pattern() :: #amqqueue{
-                                  name :: rabbit_amqqueue:name() | '_',
-                                  durable :: '_',
-                                  auto_delete :: '_',
-                                  exclusive_owner :: '_',
-                                  arguments :: '_',
-                                  pid :: '_',
-                                  slave_pids :: '_',
-                                  sync_slave_pids :: '_',
-                                  recoverable_slaves :: '_',
-                                  policy :: '_',
-                                  operator_policy :: '_',
-                                  gm_pids :: '_',
-                                  decorators :: '_',
-                                  state :: '_',
-                                  policy_version :: '_',
-                                  slave_pids_pending_shutdown :: '_',
-                                  vhost :: '_',
-                                  options :: '_',
-                                  type :: atom() | '_',
-                                  type_state :: '_'
+                                  name :: rabbit_amqqueue:name() | ets:match_pattern(),
+                                  durable :: ets:match_pattern(),
+                                  auto_delete :: ets:match_pattern(),
+                                  exclusive_owner :: ets:match_pattern(),
+                                  arguments :: ets:match_pattern(),
+                                  pid :: ets:match_pattern(),
+                                  slave_pids :: ets:match_pattern(),
+                                  sync_slave_pids :: ets:match_pattern(),
+                                  recoverable_slaves :: ets:match_pattern(),
+                                  policy :: ets:match_pattern(),
+                                  operator_policy :: ets:match_pattern(),
+                                  gm_pids :: ets:match_pattern(),
+                                  decorators :: ets:match_pattern(),
+                                  state :: ets:match_pattern(),
+                                  policy_version :: ets:match_pattern(),
+                                  slave_pids_pending_shutdown :: ets:match_pattern(),
+                                  vhost :: ets:match_pattern(),
+                                  options :: ets:match_pattern(),
+                                  type :: atom() | ets:match_pattern(),
+                                  type_state :: ets:match_pattern()
                                  }.
 
 -export_type([amqqueue/0,
@@ -372,18 +366,6 @@ set_decorators(#amqqueue{} = Queue, Decorators) ->
 get_exclusive_owner(#amqqueue{exclusive_owner = Owner}) ->
     Owner.
 
-% gm_pids
-
--spec get_gm_pids(amqqueue()) -> [{pid(), pid()}] | none.
-
-get_gm_pids(#amqqueue{gm_pids = GMPids}) ->
-    GMPids.
-
--spec set_gm_pids(amqqueue(), [{pid(), pid()}] | none) -> amqqueue().
-
-set_gm_pids(#amqqueue{} = Queue, GMPids) ->
-    Queue#amqqueue{gm_pids = GMPids}.
-
 -spec get_leader(amqqueue_v2()) -> node().
 
 get_leader(#amqqueue{type = rabbit_quorum_queue, pid = {_, Leader}}) -> Leader.
@@ -454,18 +436,6 @@ get_policy_version(#amqqueue{policy_version = PV}) ->
 set_policy_version(#amqqueue{} = Queue, PV) ->
     Queue#amqqueue{policy_version = PV}.
 
-% recoverable_slaves
-
--spec get_recoverable_slaves(amqqueue()) -> [atom()] | none.
-
-get_recoverable_slaves(#amqqueue{recoverable_slaves = Slaves}) ->
-    Slaves.
-
--spec set_recoverable_slaves(amqqueue(), [atom()] | none) -> amqqueue().
-
-set_recoverable_slaves(#amqqueue{} = Queue, Slaves) ->
-    Queue#amqqueue{recoverable_slaves = Slaves}.
-
 % type_state (new in v2)
 
 -spec get_type_state(amqqueue()) -> map().
@@ -480,31 +450,6 @@ set_type_state(#amqqueue{} = Queue, TState) ->
 set_type_state(Queue, _TState) ->
     Queue.
 
-% slave_pids
-
--spec get_slave_pids(amqqueue()) -> [pid()] | none.
-
-get_slave_pids(#amqqueue{slave_pids = Slaves}) ->
-    Slaves.
-
--spec set_slave_pids(amqqueue(), [pid()] | none) -> amqqueue().
-
-set_slave_pids(#amqqueue{} = Queue, SlavePids) ->
-    Queue#amqqueue{slave_pids = SlavePids}.
-
-% slave_pids_pending_shutdown
-
--spec get_slave_pids_pending_shutdown(amqqueue()) -> [pid()].
-
-get_slave_pids_pending_shutdown(
-  #amqqueue{slave_pids_pending_shutdown = Slaves}) ->
-    Slaves.
-
--spec set_slave_pids_pending_shutdown(amqqueue(), [pid()]) -> amqqueue().
-
-set_slave_pids_pending_shutdown(#amqqueue{} = Queue, SlavePids) ->
-    Queue#amqqueue{slave_pids_pending_shutdown = SlavePids}.
-
 % state
 
 -spec get_state(amqqueue()) -> atom() | none.
@@ -515,18 +460,6 @@ get_state(#amqqueue{state = State}) -> State.
 
 set_state(#amqqueue{} = Queue, State) ->
     Queue#amqqueue{state = State}.
-
-% sync_slave_pids
-
--spec get_sync_slave_pids(amqqueue()) -> [pid()] | none.
-
-get_sync_slave_pids(#amqqueue{sync_slave_pids = Pids}) ->
-    Pids.
-
--spec set_sync_slave_pids(amqqueue(), [pid()] | none) -> amqqueue().
-
-set_sync_slave_pids(#amqqueue{} = Queue, Pids) ->
-    Queue#amqqueue{sync_slave_pids = Pids}.
 
 %% New in v2.
 
@@ -546,6 +479,11 @@ is_auto_delete(#amqqueue{auto_delete = AutoDelete}) ->
 -spec is_durable(amqqueue()) -> boolean().
 
 is_durable(#amqqueue{durable = Durable}) -> Durable.
+
+-spec is_exclusive(amqqueue()) -> boolean().
+
+is_exclusive(Queue) ->
+    is_pid(get_exclusive_owner(Queue)).
 
 -spec is_classic(amqqueue()) -> boolean().
 
@@ -570,7 +508,9 @@ field_vhost() ->
 pattern_match_all() ->
     #amqqueue{_ = '_'}.
 
--spec pattern_match_on_name(rabbit_amqqueue:name()) -> amqqueue_pattern().
+-spec pattern_match_on_name(Name) -> Pattern when
+      Name :: rabbit_amqqueue:name() | ets:match_pattern(),
+      Pattern :: amqqueue_pattern().
 
 pattern_match_on_name(Name) ->
     #amqqueue{name = Name, _ = '_'}.
@@ -580,22 +520,26 @@ pattern_match_on_name(Name) ->
 pattern_match_on_type(Type) ->
     #amqqueue{type = Type, _ = '_'}.
 
--spec reset_mirroring_and_decorators(amqqueue()) -> amqqueue().
+-spec pattern_match_on_durable(boolean()) -> amqqueue_pattern().
 
-reset_mirroring_and_decorators(#amqqueue{} = Queue) ->
-    Queue#amqqueue{slave_pids      = [],
-                   sync_slave_pids = [],
-                   gm_pids         = [],
-                   decorators      = undefined}.
+pattern_match_on_durable(IsDurable) ->
+    #amqqueue{durable = IsDurable, _ = '_'}.
+
+-spec pattern_match_on_type_and_durable(atom(), boolean()) ->
+    amqqueue_pattern().
+
+pattern_match_on_type_and_durable(Type, IsDurable) ->
+    #amqqueue{type = Type, durable = IsDurable, _ = '_'}.
+
+-spec reset_decorators(amqqueue()) -> amqqueue().
+
+reset_decorators(#amqqueue{} = Queue) ->
+    Queue#amqqueue{decorators      = undefined}.
 
 -spec set_immutable(amqqueue()) -> amqqueue().
 
 set_immutable(#amqqueue{} = Queue) ->
     Queue#amqqueue{pid                = none,
-                   slave_pids         = [],
-                   sync_slave_pids    = none,
-                   recoverable_slaves = none,
-                   gm_pids            = none,
                    policy             = none,
                    decorators         = none,
                    state              = none}.
@@ -611,6 +555,14 @@ qnode(none) ->
     undefined;
 qnode({_, Node}) ->
     Node.
+
+-spec to_printable(amqqueue()) -> #{binary() => any()}.
+to_printable(#amqqueue{name = QName = #resource{name = Name},
+                       vhost = VHost, type = Type}) ->
+     #{<<"readable_name">> => rabbit_data_coercion:to_binary(rabbit_misc:rs(QName)),
+       <<"name">> => Name,
+       <<"virtual_host">> => VHost,
+       <<"type">> => Type}.
 
 % private
 

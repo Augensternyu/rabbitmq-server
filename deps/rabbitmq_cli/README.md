@@ -1,7 +1,5 @@
 # RabbitMQ CLI Tools
 
-[![Build Status](https://travis-ci.org/rabbitmq/rabbitmq-cli.svg?branch=master)](https://travis-ci.org/rabbitmq/rabbitmq-cli)
-
 This repository contains [RabbitMQ CLI tools](https://rabbitmq.com/cli.html) ([rabbitmqctl](https://www.rabbitmq.com/man/rabbitmqctl.1.man.html) and
 others).
 
@@ -125,5 +123,5 @@ but not entirely trivial examples.
 The project is [licensed under the MPL](LICENSE-MPL-RabbitMQ), the same license
 as RabbitMQ.
 
-(c) 2007-2020 VMware, Inc. or its affiliates.
+(c) 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 

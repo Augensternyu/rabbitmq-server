@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(clustering_prop_SUITE).
@@ -11,7 +11,6 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("rabbit_common/include/rabbit_core_metrics.hrl").
--include_lib("rabbitmq_management_agent/include/rabbit_mgmt_metrics.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_mgmt_test.hrl").
 
 
@@ -19,7 +18,9 @@
 -import(rabbit_mgmt_test_util, [http_get/2, http_get_from_node/3]).
 -import(rabbit_misc, [pget/2]).
 
--compile([export_all, nowarn_format]).
+-compile([export_all,
+          nowarn_format,
+          nowarn_export_all]).
 
 -export_type([rmqnode/0, queues/0]).
 
@@ -34,6 +35,8 @@ groups() ->
                               ]}
     ].
 
+-define(COLLECT_INTERVAL, 500).
+
 %% -------------------------------------------------------------------
 %% Testsuite setup/teardown.
 %% -------------------------------------------------------------------
@@ -42,7 +45,9 @@ merge_app_env(Config) ->
     Config1 = rabbit_ct_helpers:merge_app_env(Config,
                                     {rabbit, [
                                               {collect_statistics, fine},
-                                              {collect_statistics_interval, 500}
+                                              {collect_statistics_interval,
+                                               ?COLLECT_INTERVAL},
+                                              {core_metrics_gc_interval, 1000}
                                              ]}),
     rabbit_ct_helpers:merge_app_env(Config1,
                                     {rabbitmq_management, [
@@ -104,14 +109,25 @@ prop_connection_channel_counts(Config) ->
                                  {1, force_stats}])),
             begin
                 % ensure we begin with no connections
+                ct:pal("Init testcase"),
                 true = validate_counts(Config, []),
                 Cons = lists:foldl(fun (Op, Agg) ->
                                           execute_op(Config, Op, Agg)
                                    end, [], Ops),
-                force_stats(),
-                Res = validate_counts(Config, Cons),
-                cleanup(Cons),
-                force_stats(),
+                %% TODO retry a few times
+                ct:pal("Check testcase"),
+                Res = retry_for(
+                        fun() ->
+                                force_stats(Config),
+                                validate_counts(Config, Cons) end,
+                        60),
+                ct:pal("Cleanup testcase"),
+                rabbit_ct_helpers:await_condition(
+                  fun () ->
+                          cleanup(Cons),
+                          force_stats(Config),
+                          validate_counts(Config, []) end,
+                  60000),
                 Res
             end).
 
@@ -124,8 +140,16 @@ validate_counts(Config, Conns) ->
     Ch1 = length(http_get_from_node(Config, 0, "/channels")),
     Ch2 = length(http_get_from_node(Config, 1, "/channels")),
     Ch3 = length(http_get_from_node(Config, 2, "/channels")),
-    [Expected, Expected, Expected, ChanCount, ChanCount, ChanCount]
-    =:= [C1, C2, C3, Ch1, Ch2, Ch3].
+    Res = ([Expected, Expected, Expected, ChanCount, ChanCount, ChanCount]
+           =:= [C1, C2, C3, Ch1, Ch2, Ch3]),
+    case Res of
+        false ->
+            ct:pal("Validate counts connections: ~p channels: ~p got ~p",
+                   [Expected, ChanCount, [C1, C2, C3, Ch1, Ch2, Ch3]]);
+        true ->
+            ok
+    end,
+    Res.
 
 
 cleanup(Conns) ->
@@ -148,29 +172,36 @@ execute_op(_Config, rem_conn, []) ->
 execute_op(_Config, rem_conn, [{conn, Conn, _Chans} | Rem]) ->
     rabbit_ct_client_helpers:close_connection(Conn),
     Rem;
-execute_op(_Config, force_stats, State) ->
-    force_stats(),
+execute_op(Config, force_stats, State) ->
+    force_stats(Config),
     State.
 
 %%----------------------------------------------------------------------------
 %%
 
-force_stats() ->
-    force_all(),
-    timer:sleep(5000).
+force_stats(Config) ->
+    Nodes = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    Names = force_all(Nodes),
+    %% wait for all collectors to do their work
+    %% need to catch as mixed versions tests may timeout
+    [catch gen_server:call(Name, wait, ?COLLECT_INTERVAL * 2)
+     || Name <- Names],
+    ok.
 
-force_all() ->
-    [begin
-          {rabbit_mgmt_external_stats, N} ! emit_update,
-          timer:sleep(100),
-          [{rabbit_mgmt_metrics_collector:name(Table), N} ! collect_metrics
-           || {Table, _} <- ?CORE_TABLES]
-     end
-     || N <- [node() | nodes()]].
+force_all(Nodes) ->
+    lists:append(
+      [begin
+           [begin
+                Name = {rabbit_mgmt_metrics_collector:name(Table), N},
+                Name ! collect_metrics,
+                Name
+            end
+            || {Table, _} <- ?CORE_TABLES]
+       end || N <- Nodes]).
 
 clear_all_table_data() ->
     [ets:delete_all_objects(T) || {T, _} <- ?CORE_TABLES],
-    [ets:delete_all_objects(T) || {T, _} <- ?TABLES],
+    rabbit_mgmt_storage:reset(),
     [gen_server:call(P, purge_cache)
      || {_, P, _, _} <- supervisor:which_children(rabbit_mgmt_db_cache_sup)].
 
@@ -219,23 +250,6 @@ queue_bind(Chan, Ex, Q, Key) ->
                             routing_key = Key},
     #'queue.bind_ok'{} = amqp_channel:call(Chan, Binding).
 
-wait_for(Config, Path) ->
-    wait_for(Config, Path, [slave_nodes, synchronised_slave_nodes]).
-
-wait_for(Config, Path, Keys) ->
-    wait_for(Config, Path, Keys, 1000).
-
-wait_for(_Config, Path, Keys, 0) ->
-    exit({timeout, {Path, Keys}});
-
-wait_for(Config, Path, Keys, Count) ->
-    Res = http_get(Config, Path),
-    case present(Keys, Res) of
-        false -> timer:sleep(10),
-                 wait_for(Config, Path, Keys, Count - 1);
-        true  -> Res
-    end.
-
 present(Keys, Res) ->
     lists:all(fun (Key) ->
                       X = pget(Key, Res),
@@ -278,3 +292,13 @@ dump_table(Config, Table) ->
     Data0 = rabbit_ct_broker_helpers:rpc(Config, 1, ets, tab2list, [Table]),
     ct:pal(?LOW_IMPORTANCE, "Node 1: Dump of table ~tp:~n~tp~n", [Table, Data0]).
 
+retry_for(_Fun, 0) ->
+    false;
+retry_for(Fun, Retries) ->
+    case Fun() of
+        true ->
+            true;
+        false ->
+            timer:sleep(1000),
+            retry_for(Fun, Retries - 1)
+    end.

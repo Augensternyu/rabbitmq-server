@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(cluster_SUITE).
@@ -13,6 +13,7 @@
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include("amqqueue.hrl").
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -define(TIMEOUT, 30000).
@@ -92,6 +93,16 @@ end_per_group(Group, Config) ->
             Config
     end.
 
+init_per_testcase(queue_cleanup = Testcase, Config) ->
+    case lists:any(fun(B) -> B end,
+                   rabbit_ct_broker_helpers:rpc_all(
+                     Config, rabbit_feature_flags, is_enabled,
+                     [khepri_db])) of
+        true ->
+            {skip, "Invalid testcase using Khepri. All queues are durable"};
+        false ->
+            rabbit_ct_helpers:testcase_started(Config, Testcase)
+    end;
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, Testcase).
 

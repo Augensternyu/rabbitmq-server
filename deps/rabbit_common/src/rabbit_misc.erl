@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_misc).
@@ -10,7 +10,6 @@
 -ignore_xref([{maps, get, 2}]).
 
 -include("rabbit.hrl").
--include("rabbit_framing.hrl").
 -include("rabbit_misc.hrl").
 
 -include_lib("kernel/include/file.hrl").
@@ -21,13 +20,12 @@
 
 -export([method_record_type/1, polite_pause/0, polite_pause/1]).
 -export([die/1, frame_error/2, amqp_error/4, quit/1,
-         protocol_error/3, protocol_error/4, protocol_error/1]).
+         protocol_error/3, protocol_error/4, protocol_error/1,
+         precondition_failed/1, precondition_failed/2]).
 -export([type_class/1, assert_args_equivalence/4, assert_field_equivalence/4]).
 -export([table_lookup/2, set_table_value/4, amqp_table/1, to_amqp_table/1]).
--export([r/3, r/2, r_arg/4, rs/1]).
--export([enable_cover/0, report_cover/0]).
--export([enable_cover/1, report_cover/1]).
--export([start_cover/1]).
+-export([r/3, r/2, r_arg/4, rs/1,
+         queue_resource/2, exchange_resource/2]).
 -export([throw_on_error/2, with_exit_handler/2, is_abnormal_exit/1,
          filter_exit_map/2]).
 -export([ensure_ok/2]).
@@ -42,7 +40,7 @@
          pid_change_node/2, node_to_fake_pid/1]).
 -export([hexify/1]).
 -export([version_compare/2, version_compare/3]).
--export([version_minor_equivalent/2, strict_version_minor_equivalent/2]).
+-export([strict_version_minor_equivalent/2]).
 -export([dict_cons/3, orddict_cons/3, maps_cons/3, gb_trees_cons/3]).
 -export([gb_trees_fold/3, gb_trees_foreach/2]).
 -export([all_module_attributes/1,
@@ -52,7 +50,8 @@
          build_acyclic_graph/3]).
 -export([const/1]).
 -export([ntoa/1, ntoab/1]).
--export([is_process_alive/1]).
+-export([is_process_alive/1,
+         process_info/2]).
 -export([pget/2, pget/3, pupdate/3, pget_or_die/2, pmerge/3, pset/3, plmerge/2]).
 -export([deep_pget/2, deep_pget/3]).
 -export([format_message_queue/2]).
@@ -79,6 +78,16 @@
 -export([raw_read_file/1]).
 -export([find_child/2]).
 -export([is_regular_file/1]).
+-export([safe_ets_update_counter/3, safe_ets_update_counter/4, safe_ets_update_counter/5,
+         safe_ets_update_element/3, safe_ets_update_element/4, safe_ets_update_element/5]).
+-export([is_even/1, is_odd/1]).
+
+-export([maps_any/2,
+         maps_put_truthy/3,
+         maps_put_falsy/3
+        ]).
+-export([remote_sup_child/2]).
+-export([for_each_while_ok/2, fold_while_ok/3]).
 
 %% Horrible macro to use in guards
 -define(IS_BENIGN_EXIT(R),
@@ -135,7 +144,7 @@
         (any(), any(), rabbit_types:r(any()), atom() | binary()) ->
             rabbit_types:connection_exit().
 -spec table_lookup(rabbit_framing:amqp_table(), binary()) ->
-          'undefined' | {rabbit_framing:amqp_field_type(), any()}.
+    'undefined' | {rabbit_framing:amqp_field_type(), rabbit_framing:amqp_value()}.
 -spec set_table_value
         (rabbit_framing:amqp_table(), binary(), rabbit_framing:amqp_field_type(),
          rabbit_framing:amqp_value()) ->
@@ -154,11 +163,6 @@
               {invalid_type, rabbit_framing:amqp_field_type()}) |
             rabbit_types:r(K) when is_subtype(K, atom()).
 -spec rs(rabbit_types:r(atom())) -> string().
--spec enable_cover() -> ok_or_error().
--spec start_cover([{string(), string()} | string()]) -> 'ok'.
--spec report_cover() -> 'ok'.
--spec enable_cover([file:filename() | atom()]) -> ok_or_error().
--spec report_cover([file:filename() | atom()]) -> 'ok'.
 -spec throw_on_error
         (atom(), thunk(rabbit_types:error(any()) | {ok, A} | A)) -> A.
 -spec with_exit_handler(thunk(A), thunk(A)) -> A.
@@ -187,7 +191,6 @@
 -spec version_compare
         (rabbit_semver:version_string(), rabbit_semver:version_string(),
          ('lt' | 'lte' | 'eq' | 'gte' | 'gt')) -> boolean().
--spec version_minor_equivalent(rabbit_semver:version_string(), rabbit_semver:version_string()) -> boolean().
 -spec dict_cons(any(), any(), dict:dict()) -> dict:dict().
 -spec orddict_cons(any(), any(), orddict:orddict()) -> orddict:orddict().
 -spec gb_trees_cons(any(), any(), gb_trees:tree()) -> gb_trees:tree().
@@ -246,6 +249,8 @@
 -spec group_proplists_by(fun((proplists:proplist()) -> any()),
                          list(proplists:proplist())) -> list(list(proplists:proplist())).
 
+-spec precondition_failed(string()) -> no_return().
+-spec precondition_failed(string(), [any()]) -> no_return().
 
 %%----------------------------------------------------------------------------
 
@@ -278,6 +283,11 @@ protocol_error(Name, ExplanationFormat, Params, Method) ->
 
 protocol_error(#amqp_error{} = Error) ->
     exit(Error).
+
+precondition_failed(Format) -> precondition_failed(Format, []).
+
+precondition_failed(Format, Params) ->
+    protocol_error(precondition_failed, Format, Params).
 
 type_class(byte)          -> int;
 type_class(short)         -> int;
@@ -349,8 +359,8 @@ val(Value) ->
 
 table_lookup(Table, Key) ->
     case lists:keysearch(Key, 1, Table) of
-        {value, {_, TypeBin, ValueBin}} -> {TypeBin, ValueBin};
-        false                           -> undefined
+        {value, {_, Type, Value}} -> {Type, Value};
+        false -> undefined
     end.
 
 set_table_value(Table, Key, Type, Value) ->
@@ -422,58 +432,15 @@ rs(#resource{virtual_host = VHostPath, kind = topic, name = Name}) ->
 rs(#resource{virtual_host = VHostPath, kind = Kind, name = Name}) ->
     format("~ts '~ts' in vhost '~ts'", [Kind, Name, VHostPath]).
 
-enable_cover() -> enable_cover(["."]).
+-spec queue_resource(rabbit_types:vhost(), resource_name()) ->
+    rabbit_types:r(queue).
+queue_resource(VHostPath, Name) ->
+    r(VHostPath, queue, Name).
 
-enable_cover(Dirs) ->
-    lists:foldl(fun (Dir, ok) ->
-                        case cover:compile_beam_directory(
-                               filename:join(lists:concat([Dir]),"ebin")) of
-                            {error, _} = Err -> Err;
-                            _                -> ok
-                        end;
-                    (_Dir, Err) ->
-                        Err
-                end, ok, Dirs).
-
-start_cover(NodesS) ->
-    {ok, _} = cover:start([rabbit_nodes_common:make(N) || N <- NodesS]),
-    ok.
-
-report_cover() -> report_cover(["."]).
-
-report_cover(Dirs) -> [report_cover1(lists:concat([Dir])) || Dir <- Dirs], ok.
-
-report_cover1(Root) ->
-    Dir = filename:join(Root, "cover"),
-    ok = filelib:ensure_dir(filename:join(Dir, "junk")),
-    lists:foreach(fun (F) -> file:delete(F) end,
-                  filelib:wildcard(filename:join(Dir, "*.html"))),
-    {ok, SummaryFile} = file:open(filename:join(Dir, "summary.txt"), [write]),
-    {CT, NCT} =
-        lists:foldl(
-          fun (M,{CovTot, NotCovTot}) ->
-                  {ok, {M, {Cov, NotCov}}} = cover:analyze(M, module),
-                  ok = report_coverage_percentage(SummaryFile,
-                                                  Cov, NotCov, M),
-                  {ok,_} = cover:analyze_to_file(
-                             M,
-                             filename:join(Dir, atom_to_list(M) ++ ".html"),
-                             [html]),
-                  {CovTot+Cov, NotCovTot+NotCov}
-          end,
-          {0, 0},
-          lists:sort(cover:modules())),
-    ok = report_coverage_percentage(SummaryFile, CT, NCT, 'TOTAL'),
-    ok = file:close(SummaryFile),
-    ok.
-
-report_coverage_percentage(File, Cov, NotCov, Mod) ->
-    io:fwrite(File, "~6.2f ~tp~n",
-              [if
-                   Cov+NotCov > 0 -> 100.0*Cov/(Cov+NotCov);
-                   true -> 100.0
-               end,
-               Mod]).
+-spec exchange_resource(rabbit_types:vhost(), resource_name()) ->
+    rabbit_types:r(exchange).
+exchange_resource(VHostPath, Name) ->
+    r(VHostPath, exchange, Name).
 
 %% @doc Halts the emulator returning the given status code to the os.
 %% On Windows this function will block indefinitely so as to give the io
@@ -716,60 +683,15 @@ version_compare(A, B) ->
                  end
     end.
 
-%% For versions starting from 3.7.x:
-%% Versions are considered compatible (except for special cases; see
-%% below). The feature flags will determine if they are actually
-%% compatible.
-%%
-%% For versions up-to 3.7.x:
-%% a.b.c and a.b.d match, but a.b.c and a.d.e don't. If
-%% versions do not match that pattern, just compare them.
-%%
-%% Special case for 3.6.6 because it introduced a change to the schema.
-%% e.g. 3.6.6 is not compatible with 3.6.5
-%% This special case can be removed once 3.6.x reaches EOL
-version_minor_equivalent(A, B) ->
-    {{MajA, MinA, PatchA, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(A)),
-    {{MajB, MinB, PatchB, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(B)),
-
-    case {MajA, MinA, MajB, MinB} of
-        {3, 6, 3, 6} ->
-            if
-                PatchA >= 6 -> PatchB >= 6;
-                PatchA < 6  -> PatchB < 6;
-                true -> false
-            end;
-        _
-          when (MajA < 3 orelse (MajA =:= 3 andalso MinA =< 6))
-               orelse
-               (MajB < 3 orelse (MajB =:= 3 andalso MinB =< 6)) ->
-            MajA =:= MajB andalso MinA =:= MinB;
-        _ ->
-            %% Starting with RabbitMQ 3.7.x, we consider this
-            %% minor release series and all subsequent series to
-            %% be possibly compatible, based on just the version.
-            %% The real compatibility check is deferred to the
-            %% rabbit_feature_flags module in rabbitmq-server.
-            true
-    end.
-
-%% This is the same as above except that e.g. 3.7.x and 3.8.x are
-%% considered incompatible (as if there were no feature flags). This is
-%% useful to check plugin compatibility (`broker_versions_requirement`
-%% field in plugins).
+%% The function below considers that e.g. 3.7.x and 3.8.x are incompatible (as
+%% if there were no feature flags). This is useful to check plugin
+%% compatibility (`broker_versions_requirement` field in plugins).
 
 strict_version_minor_equivalent(A, B) ->
-    {{MajA, MinA, PatchA, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(A)),
-    {{MajB, MinB, PatchB, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(B)),
+    {{MajA, MinA, _PatchA, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(A)),
+    {{MajB, MinB, _PatchB, _}, _} = rabbit_semver:normalize(rabbit_semver:parse(B)),
 
-    case {MajA, MinA, MajB, MinB} of
-        {3, 6, 3, 6} -> if
-                            PatchA >= 6 -> PatchB >= 6;
-                            PatchA < 6  -> PatchB < 6;
-                            true -> false
-                        end;
-        _            -> MajA =:= MajB andalso MinA =:= MinB
-    end.
+    MajA =:= MajB andalso MinA =:= MinB.
 
 dict_cons(Key, Value, Dict) ->
     dict:update(Key, fun (List) -> [Value | List] end, [Value], Dict).
@@ -890,6 +812,23 @@ is_process_alive(Pid) ->
     Node = node(Pid),
     lists:member(Node, [node() | nodes(connected)]) andalso
         rpc:call(Node, erlang, is_process_alive, [Pid]) =:= true.
+
+%% Get process info of a prossibly remote process.
+%% We try to avoid reconnecting to down nodes.
+-spec process_info(pid(), ItemSpec) -> Result| undefined | {badrpc, term()}
+              when
+      ItemSpec :: atom() | list() | tuple(),
+      Result :: {atom() | tuple(), term()} | [{atom() | tuple(), term()}].
+process_info(Pid, Items) when node(Pid) =:= node() ->
+    erlang:process_info(Pid, Items);
+process_info(Pid, Items) ->
+    Node = node(Pid),
+    case lists:member(Node, [node() | nodes(connected)]) of
+        true ->
+            rpc:call(Node, erlang, process_info, [Pid, Items]);
+        _ ->
+            {badrpc, nodedown}
+    end.
 
 -spec pget(term(), list() | map()) -> term().
 pget(K, M) when is_map(M) ->
@@ -1129,8 +1068,8 @@ rabbitmq_and_erlang_versions() ->
 which_applications() ->
     try
         application:which_applications(10000)
-    catch
-        exit:{timeout, _} -> []
+    catch _:_:_Stacktrace ->
+        []
     end.
 
 sequence_error([T])                      -> T;
@@ -1209,12 +1148,9 @@ get_proc_name() ->
             {ok, Name}
     end.
 
-%% application:get_env/3 is only available in R16B01 or later.
+%% application:get_env/3 is available in R16B01 or later.
 get_env(Application, Key, Def) ->
-    case application:get_env(Application, Key) of
-        {ok, Val} -> Val;
-        undefined -> Def
-    end.
+    application:get_env(Application, Key, Def).
 
 get_channel_operation_timeout() ->
     %% Default channel_operation_timeout set to net_ticktime + 10s to
@@ -1319,18 +1255,170 @@ is_regular_file(Name) ->
         _ -> false
     end.
 
-%% not exported by supervisor
--type supervisor_child_id() :: term().
--type supervisor_sup_ref() :: (Name :: atom())
-                            | {Name :: atom(), Node :: node()}
-                            | {'global', Name :: atom()}
-                            | {'via', Module :: module(), Name :: any()}
-                            | pid().
+-spec safe_ets_update_counter(Table, Key, UpdateOp) -> Result when
+      Table :: ets:table(),
+      Key :: term(),
+      UpdateOp :: {Pos, Incr}
+      | {Pos, Incr, Threshold, SetValue},
+      Pos :: integer(),
+      Incr :: integer(),
+      Threshold :: integer(),
+      SetValue :: integer(),
+      Result :: integer();
+    (Table, Key, [UpdateOp]) -> [Result] when
+      Table :: ets:table(),
+      Key :: term(),
+      UpdateOp :: {Pos, Incr}
+      | {Pos, Incr, Threshold, SetValue},
+      Pos :: integer(),
+      Incr :: integer(),
+      Threshold :: integer(),
+      SetValue :: integer(),
+      Result :: integer();
+    (Table, Key, Incr) -> Result when
+      Table :: ets:table(),
+      Key :: term(),
+      Incr :: integer(),
+      Result :: integer().
+safe_ets_update_counter(Tab, Key, UpdateOp) ->
+  try
+    ets:update_counter(Tab, Key, UpdateOp)
+  catch error:badarg:E ->
+    rabbit_log:debug("error updating ets counter ~p in table ~p: ~p", [Key, Tab, E]),
+    ok
+  end.
+
+-spec safe_ets_update_counter(Table, Key, UpdateOp, OnFailure) -> Result when
+    Table :: ets:table(),
+    Key :: term(),
+    UpdateOp :: {Pos, Incr}
+    | {Pos, Incr, Threshold, SetValue},
+    Pos :: integer(),
+    Incr :: integer(),
+    Threshold :: integer(),
+    SetValue :: integer(),
+    Result :: integer(),
+    OnFailure :: fun(() -> any());
+  (Table, Key, [UpdateOp], OnFailure) -> [Result] when
+    Table :: ets:table(),
+    Key :: term(),
+    UpdateOp :: {Pos, Incr}
+    | {Pos, Incr, Threshold, SetValue},
+    Pos :: integer(),
+    Incr :: integer(),
+    Threshold :: integer(),
+    SetValue :: integer(),
+    Result :: integer(),
+    OnFailure :: fun(() -> any());
+  (Table, Key, Incr, OnFailure) -> Result when
+    Table :: ets:table(),
+    Key :: term(),
+    Incr :: integer(),
+    Result :: integer(),
+    OnFailure :: fun(() -> any()).
+safe_ets_update_counter(Tab, Key, UpdateOp, OnFailure) ->
+  safe_ets_update_counter(Tab, Key, UpdateOp, fun(_) -> ok end, OnFailure).
+
+-spec safe_ets_update_counter(Table, Key, UpdateOp, OnSuccess, OnFailure) -> Result when
+    Table :: ets:table(),
+    Key :: term(),
+    UpdateOp :: {Pos, Incr}
+    | {Pos, Incr, Threshold, SetValue},
+    Pos :: integer(),
+    Incr :: integer(),
+    Threshold :: integer(),
+    SetValue :: integer(),
+    Result :: integer(),
+    OnSuccess :: fun((boolean()) -> any()),
+    OnFailure :: fun(() -> any());
+  (Table, Key, [UpdateOp], OnSuccess, OnFailure) -> [Result] when
+    Table :: ets:table(),
+    Key :: term(),
+    UpdateOp :: {Pos, Incr}
+    | {Pos, Incr, Threshold, SetValue},
+    Pos :: integer(),
+    Incr :: integer(),
+    Threshold :: integer(),
+    SetValue :: integer(),
+    Result :: integer(),
+    OnSuccess :: fun((boolean()) -> any()),
+    OnFailure :: fun(() -> any());
+  (Table, Key, Incr, OnSuccess, OnFailure) -> Result when
+  Table :: ets:table(),
+  Key :: term(),
+  Incr :: integer(),
+  Result :: integer(),
+  OnSuccess :: fun((integer()) -> any()),
+  OnFailure :: fun(() -> any()).
+safe_ets_update_counter(Tab, Key, UpdateOp, OnSuccess, OnFailure) ->
+  try
+    OnSuccess(ets:update_counter(Tab, Key, UpdateOp))
+  catch error:badarg:E ->
+    rabbit_log:debug("error updating ets counter ~p in table ~p: ~p", [Key, Tab, E]),
+    OnFailure()
+  end.
+
+
+-spec safe_ets_update_element(Table, Key, ElementSpec :: {Pos, Value}) -> boolean() when
+    Table :: ets:table(),
+    Key :: term(),
+    Pos :: pos_integer(),
+    Value :: term();
+  (Table, Key, ElementSpec :: [{Pos, Value}]) -> boolean() when
+    Table :: ets:table(),
+    Key :: term(),
+    Pos :: pos_integer(),
+    Value :: term().
+safe_ets_update_element(Tab, Key, ElementSpec) ->
+  try
+    ets:update_element(Tab, Key, ElementSpec)
+  catch error:badarg:E ->
+    rabbit_log:debug("error updating ets element ~p in table ~p: ~p", [Key, Tab, E]),
+    false
+  end.
+
+-spec safe_ets_update_element(Table, Key, ElementSpec :: {Pos, Value}, OnFailure) -> boolean() when
+    Table :: ets:table(),
+    Key :: term(),
+    Pos :: pos_integer(),
+    Value :: term(),
+    OnFailure :: fun(() -> any());
+  (Table, Key, ElementSpec :: [{Pos, Value}], OnFailure) -> boolean() when
+    Table :: ets:table(),
+    Key :: term(),
+    Pos :: pos_integer(),
+    Value :: term(),
+    OnFailure :: fun(() -> any()).
+safe_ets_update_element(Tab, Key, ElementSpec, OnFailure) ->
+  safe_ets_update_element(Tab, Key, ElementSpec, fun(_) -> ok end, OnFailure).
+
+-spec safe_ets_update_element(Table, Key, ElementSpec :: {Pos, Value}, OnSuccess, OnFailure) -> boolean() when
+    Table :: ets:table(),
+    Key :: term(),
+    Pos :: pos_integer(),
+    Value :: term(),
+    OnSuccess :: fun((boolean()) -> any()),
+    OnFailure :: fun(() -> any());
+  (Table, Key, ElementSpec :: [{Pos, Value}], OnSuccess, OnFailure) -> boolean() when
+    Table :: ets:table(),
+    Key :: term(),
+    Pos :: pos_integer(),
+    Value :: term(),
+    OnSuccess :: fun((boolean()) -> any()),
+    OnFailure :: fun(() -> any()).
+safe_ets_update_element(Tab, Key, ElementSpec, OnSuccess, OnFailure) ->
+  try
+    OnSuccess(ets:update_element(Tab, Key, ElementSpec))
+  catch error:badarg:E ->
+    rabbit_log:debug("error updating ets element ~p in table ~p: ~p", [Key, Tab, E]),
+    OnFailure(),
+    false
+  end.
 
 %% this used to be in supervisor2
 -spec find_child(Supervisor, Name) -> [pid()] when
-      Supervisor :: supervisor_sup_ref(),
-      Name :: supervisor_child_id().
+      Supervisor :: rabbit_types:sup_ref(),
+      Name :: rabbit_types:child_id().
 find_child(Supervisor, Name) ->
     [Pid || {Name1, Pid, _Type, _Modules} <- supervisor:which_children(Supervisor),
             Name1 =:= Name].
@@ -1449,3 +1537,99 @@ find_powershell() ->
         PwshExe ->
             PwshExe
     end.
+
+%% Returns true if Pred(Key, Value) returns true for at least one Key to Value association in Map.
+%% The Pred function must return a boolean.
+-spec maps_any(Pred, Map) -> boolean() when
+      Pred :: fun((Key, Value) -> boolean()),
+      Map :: #{Key => Value}.
+maps_any(Pred, Map)
+  when is_function(Pred, 2) andalso is_map(Map) ->
+    I = maps:iterator(Map),
+    maps_any_1(Pred, maps:next(I)).
+
+maps_any_1(_Pred, none) ->
+    false;
+maps_any_1(Pred, {K, V, I}) ->
+    case Pred(K, V) of
+        true ->
+            true;
+        false ->
+            maps_any_1(Pred, maps:next(I))
+    end.
+
+-spec is_even(integer()) -> boolean().
+is_even(N) ->
+    (N band 1) =:= 0.
+-spec is_odd(integer()) -> boolean().
+is_odd(N) ->
+    (N band 1) =:= 1.
+
+-spec maps_put_truthy(Key, Value, Map) -> Map when
+      Map :: #{Key => Value}.
+maps_put_truthy(_K, undefined, M) ->
+    M;
+maps_put_truthy(_K, false, M) ->
+    M;
+maps_put_truthy(K, V, M) ->
+    maps:put(K, V, M).
+
+-spec maps_put_falsy(Key, Value, Map) -> Map when
+      Map :: #{Key => Value}.
+maps_put_falsy(K, undefined, M) ->
+    maps:put(K, undefined, M);
+maps_put_falsy(K, false, M) ->
+    maps:put(K, false, M);
+maps_put_falsy(_K, _V, M) ->
+    M.
+
+-spec remote_sup_child(node(), rabbit_types:sup_ref()) -> rabbit_types:ok_or_error2(rabbit_types:child(), no_child | no_sup).
+remote_sup_child(Node, Sup) ->
+    case rpc:call(Node, supervisor, which_children, [Sup]) of
+        [{_, Child, _, _}]              -> {ok, Child};
+        []                              -> {error, no_child};
+        {badrpc, {'EXIT', {noproc, _}}} -> {error, no_sup}
+    end.
+
+-spec for_each_while_ok(ForEachFun, List) -> Ret when
+      ForEachFun :: fun((Element) -> ok | {error, ErrReason}),
+      ErrReason :: any(),
+      Element :: any(),
+      List :: [Element],
+      Ret :: ok | {error, ErrReason}.
+%% @doc Calls the given `ForEachFun' for each element in the given `List',
+%% short-circuiting if the function returns `{error,_}'.
+%%
+%% @returns the first `{error,_}' returned by `ForEachFun' or `ok' if
+%% `ForEachFun' never returns an error tuple.
+
+for_each_while_ok(Fun, [Elem | Rest]) ->
+    case Fun(Elem) of
+        ok ->
+            for_each_while_ok(Fun, Rest);
+        {error, _} = Error ->
+            Error
+    end;
+for_each_while_ok(_, []) ->
+    ok.
+
+-spec fold_while_ok(FoldFun, Acc, List) -> Ret when
+      FoldFun :: fun((Element, Acc) -> {ok, Acc} | {error, ErrReason}),
+      Element :: any(),
+      List :: Element,
+      Ret :: {ok, Acc} | {error, ErrReason}.
+%% @doc Calls the given `FoldFun' on each element of the given `List' and the
+%% accumulator value, short-circuiting if the function returns `{error,_}'.
+%%
+%% @returns the first `{error,_}' returned by `FoldFun' or `{ok,Acc}' if
+%% `FoldFun' never returns an error tuple.
+
+fold_while_ok(Fun, Acc0, [Elem | Rest]) ->
+    case Fun(Elem, Acc0) of
+        {ok, Acc} ->
+            fold_while_ok(Fun, Acc, Rest);
+        {error, _} = Error ->
+            Error
+    end;
+fold_while_ok(_Fun, Acc, []) ->
+    {ok, Acc}.

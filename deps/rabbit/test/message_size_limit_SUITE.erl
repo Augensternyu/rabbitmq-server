@@ -2,34 +2,30 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(message_size_limit_SUITE).
 
--include_lib("common_test/include/ct.hrl").
--include_lib("kernel/include/file.hrl").
+-compile([export_all, nowarn_export_all]).
 -include_lib("amqp_client/include/amqp_client.hrl").
 -include_lib("eunit/include/eunit.hrl").
-
--compile(export_all).
-
--define(TIMEOUT_LIST_OPS_PASS, 5000).
--define(TIMEOUT, 30000).
 -define(TIMEOUT_CHANNEL_EXCEPTION, 5000).
-
--define(CLEANUP_QUEUE_NAME, <<"cleanup-queue">>).
 
 all() ->
     [
-      {group, parallel_tests}
+     {group, tests},
+     {group, default}
     ].
 
 groups() ->
     [
-      {parallel_tests, [parallel], [
-          max_message_size
-       ]}
+     {tests, [], [
+                  max_message_size
+                 ]},
+     {default, [], [
+                    default_max_message_size
+                   ]}
     ].
 
 suite() ->
@@ -78,11 +74,7 @@ max_message_size(Config) ->
     Binary6M  = gen_binary_mb(6),
     Binary10M = gen_binary_mb(10),
 
-    Size2Mb = 1024 * 1024 * 2,
-    Size2Mb = byte_size(Binary2M),
-
-    rabbit_ct_broker_helpers:rpc(Config, 0,
-                                 application, set_env, [rabbit, max_message_size, 1024 * 1024 * 3]),
+    ok = rabbit_ct_broker_helpers:rpc(Config, persistent_term, put, [max_message_size, 1024 * 1024 * 3]),
 
     {_, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
 
@@ -96,8 +88,7 @@ max_message_size(Config) ->
     assert_channel_fail_max_size(Ch, Monitor),
 
     %% increase the limit
-    rabbit_ct_broker_helpers:rpc(Config, 0,
-                                 application, set_env, [rabbit, max_message_size, 1024 * 1024 * 8]),
+    ok = rabbit_ct_broker_helpers:rpc(Config, persistent_term, put, [max_message_size, 1024 * 1024 * 8]),
 
     {_, Ch1} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
 
@@ -112,15 +103,22 @@ max_message_size(Config) ->
 
     Monitor1 = monitor(process, Ch1),
     amqp_channel:call(Ch1, #'basic.publish'{routing_key = <<"none">>}, #amqp_msg{payload = Binary10M}),
-    assert_channel_fail_max_size(Ch1, Monitor1),
+    assert_channel_fail_max_size(Ch1, Monitor1).
 
-    %% increase beyond the hard limit
-    rabbit_ct_broker_helpers:rpc(Config, 0,
-                                 application, set_env, [rabbit, max_message_size, 1024 * 1024 * 600]),
-    Val = rabbit_ct_broker_helpers:rpc(Config, 0,
-                                       rabbit_channel, get_max_message_size, []),
+default_max_message_size(Config) ->
+    Binary15M = gen_binary_mb(15),
+    Binary17M = gen_binary_mb(20),
 
-    ?assertEqual(?MAX_MSG_SIZE, Val).
+    {_, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+
+    %% Binary is within the default max size limit of 16MB
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = <<"none">>}, #amqp_msg{payload = Binary15M}),
+    %% The channel process is alive
+    assert_channel_alive(Ch),
+
+    Monitor = monitor(process, Ch),
+    amqp_channel:call(Ch, #'basic.publish'{routing_key = <<"none">>}, #amqp_msg{payload = Binary17M}),
+    assert_channel_fail_max_size(Ch, Monitor).
 
 %% -------------------------------------------------------------------
 %% Implementation

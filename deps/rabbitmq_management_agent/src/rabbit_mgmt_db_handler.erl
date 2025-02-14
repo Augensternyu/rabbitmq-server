@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_db_handler).
@@ -92,6 +92,10 @@ handle_event(_, State) ->
 handle_info(_Info, State) ->
     {ok, State}.
 
+terminate(stop, _State) ->
+    %% if the node is stopping, we don't want to wait
+    %% 5 seconds for the statistics to get disabled
+    ok;
 terminate(_Arg, _State) ->
     ensure_statistics_disabled(),
     ok.

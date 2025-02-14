@@ -2,28 +2,27 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_vhost).
 
--include_lib("kernel/include/logger.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("vhost.hrl").
 
 -export([recover/0, recover/1, read_config/1]).
--export([add/2, add/3, add/4, delete/2, exists/1, assert/1,
+-export([add/2, add/3, add/4, delete/2, delete_ignoring_protection/2, exists/1, assert/1,
          set_limits/2, vhost_cluster_state/1, is_running_on_all_nodes/1, await_running_on_all_nodes/2,
         list/0, count/0, list_names/0, all/0, all_tagged_with/1]).
 -export([parse_tags/1, update_tags/3]).
--export([update_metadata/3]).
+-export([update_metadata/3, enable_protection_from_deletion/1, disable_protection_from_deletion/1]).
 -export([lookup/1, default_name/0]).
 -export([info/1, info/2, info_all/0, info_all/1, info_all/2, info_all/3]).
--export([dir/1, msg_store_dir_path/1, msg_store_dir_wildcard/0, config_file_path/1, ensure_config_file/1]).
+-export([dir/1, msg_store_dir_path/1, msg_store_dir_wildcard/0, msg_store_dir_base/0, config_file_path/1, ensure_config_file/1]).
 -export([delete_storage/1]).
 -export([vhost_down/1]).
--export([put_vhost/5,
-         put_vhost/6]).
+-export([put_vhost/6]).
+-export([default_queue_type/1, default_queue_type/2]).
 
 %%
 %% API
@@ -36,8 +35,6 @@ recover() ->
     %% Clear out remnants of old incarnation, in case we restarted
     %% faster than other nodes handled DOWN messages from us.
     rabbit_amqqueue:on_node_down(node()),
-
-    rabbit_amqqueue:warn_file_limit(),
 
     %% Prepare rabbit_semi_durable_route table
     {Time, _} = timer:tc(fun() ->
@@ -69,8 +66,6 @@ recover(VHost) ->
     rabbit_log:debug("rabbit_binding:recover/2 for vhost ~ts completed in ~fs", [VHost, Time/1000000]),
 
     ok = rabbit_amqqueue:start(Recovered),
-    %% Start queue mirrors.
-    ok = rabbit_mirror_queue_misc:on_vhost_up(VHost),
     ok.
 
 ensure_config_file(VHost) ->
@@ -171,6 +166,7 @@ do_add(Name, Metadata, ActingUser) ->
     case Metadata of
         #{default_queue_type := DQT} ->
             %% check that the queue type is known
+            rabbit_log:debug("Default queue type of virtual host '~ts' is ~tp", [Name, DQT]),
             try rabbit_queue_type:discover(DQT) of
                 _ ->
                     case rabbit_queue_type:feature_flag_name(DQT) of
@@ -182,7 +178,7 @@ do_add(Name, Metadata, ActingUser) ->
                             end
                     end
             catch _:_ ->
-                      throw({error, invalid_queue_type})
+                throw({error, invalid_queue_type, DQT})
             end;
         _ ->
             ok
@@ -200,116 +196,166 @@ do_add(Name, Metadata, ActingUser) ->
     {NewOrNot, VHost} = rabbit_db_vhost:create_or_get(Name, DefaultLimits, Metadata),
     case NewOrNot of
         new ->
-            rabbit_log:info("Inserted a virtual host record ~tp", [VHost]);
+            rabbit_log:debug("Inserted a virtual host record ~tp", [VHost]);
         existing ->
             ok
     end,
     rabbit_db_vhost_defaults:apply(Name, ActingUser),
-    _ = [begin
-         Resource = rabbit_misc:r(Name, exchange, ExchangeName),
-         rabbit_log:debug("Will declare an exchange ~tp", [Resource]),
-         _ = rabbit_exchange:declare(Resource, Type, true, false, Internal, [], ActingUser)
-     end || {ExchangeName, Type, Internal} <-
-            [{<<"">>,                   direct,  false},
-             {<<"amq.direct">>,         direct,  false},
-             {<<"amq.topic">>,          topic,   false},
-             %% per 0-9-1 pdf
-             {<<"amq.match">>,          headers, false},
-             %% per 0-9-1 xml
-             {<<"amq.headers">>,        headers, false},
-             {<<"amq.fanout">>,         fanout,  false},
-             {<<"amq.rabbitmq.trace">>, topic,   true}]],
-    case rabbit_vhost_sup_sup:start_on_all_nodes(Name) of
+    case declare_default_exchanges(Name, ActingUser) of
         ok ->
-            rabbit_event:notify(vhost_created, info(VHost)
-                                ++ [{user_who_performed_action, ActingUser},
-                                    {description, Description},
-                                    {tags, Tags}]),
-            ok;
-        {error, Reason} ->
-            Msg = rabbit_misc:format("failed to set up vhost '~ts': ~tp",
-                                     [Name, Reason]),
+            case rabbit_vhost_sup_sup:start_on_all_nodes(Name) of
+                ok ->
+                    rabbit_event:notify(vhost_created, info(VHost)
+                                        ++ [{user_who_performed_action, ActingUser},
+                                            {description, Description},
+                                            {tags, Tags}]),
+                    ok;
+                {error, Reason} ->
+                    Msg = rabbit_misc:format("failed to set up vhost '~ts': ~tp",
+                                             [Name, Reason]),
+                    {error, Msg}
+            end;
+        {error, timeout} ->
+            Msg = rabbit_misc:format(
+                    "failed to set up vhost '~ts' because a timeout occurred "
+                    "while adding default exchanges",
+                    [Name]),
             {error, Msg}
     end.
 
+-spec declare_default_exchanges(VHostName, ActingUser) -> Ret when
+      VHostName :: vhost:name(),
+      ActingUser :: rabbit_types:username(),
+      Ret :: ok | {error, timeout}.
+
+declare_default_exchanges(VHostName, ActingUser) ->
+    DefaultExchanges = [{<<"">>,                   direct,  false},
+                        {<<"amq.direct">>,         direct,  false},
+                        {<<"amq.topic">>,          topic,   false},
+                        %% per 0-9-1 pdf
+                        {<<"amq.match">>,          headers, false},
+                        %% per 0-9-1 xml
+                        {<<"amq.headers">>,        headers, false},
+                        {<<"amq.fanout">>,         fanout,  false},
+                        {<<"amq.rabbitmq.trace">>, topic,   true}],
+    rabbit_misc:for_each_while_ok(
+      fun({ExchangeName, Type, Internal}) ->
+              Resource = rabbit_misc:r(VHostName, exchange, ExchangeName),
+              rabbit_log:debug("Will declare an exchange ~tp", [Resource]),
+              case rabbit_exchange:declare(
+                     Resource, Type, true, false, Internal, [],
+                     ActingUser) of
+                   {ok, _} ->
+                       ok;
+                   {error, timeout} = Err ->
+                       Err
+              end
+      end, DefaultExchanges).
+
 -spec update_metadata(vhost:name(), vhost:metadata(), rabbit_types:username()) -> rabbit_types:ok_or_error(any()).
+update_metadata(Name, undefined, _ActingUser) ->
+    case rabbit_db_vhost:exists(Name) of
+        true ->
+            ok;
+        false ->
+            {error, {no_such_vhost, Name}}
+    end;
+update_metadata(Name, Metadata0, _ActingUser) when is_map(Metadata0) andalso map_size(Metadata0) =:= 0 ->
+    case rabbit_db_vhost:exists(Name) of
+        true ->
+            ok;
+        false ->
+            {error, {no_such_vhost, Name}}
+    end;
 update_metadata(Name, Metadata0, ActingUser) ->
-    Metadata = maps:with([description, tags, default_queue_type], Metadata0),
+    KnownKeys = [description, tags, default_queue_type, protected_from_deletion],
+    Metadata = maps:with(KnownKeys, Metadata0),
 
     case rabbit_db_vhost:merge_metadata(Name, Metadata) of
         {ok, VHost} ->
             Description = vhost:get_description(VHost),
             Tags = vhost:get_tags(VHost),
             DefaultQueueType = vhost:get_default_queue_type(VHost),
+            IsProtected = vhost:is_protected_from_deletion(VHost),
             rabbit_event:notify(
               vhost_updated,
               info(VHost) ++ [{user_who_performed_action, ActingUser},
                               {description, Description},
                               {tags, Tags},
-                              {default_queue_type, DefaultQueueType}]),
+                              {default_queue_type, DefaultQueueType},
+                              {deletion_protection, IsProtected}]),
             ok;
         {error, _} = Error ->
             Error
     end.
 
--spec update(vhost:name(), binary(), [atom()], rabbit_types:username()) -> rabbit_types:ok_or_error(any()).
-update(Name, Description, Tags, ActingUser) ->
-    Metadata = #{description => Description, tags => Tags},
+-spec update(vhost:name(), binary(), [atom()], rabbit_queue_type:queue_type() | 'undefined', rabbit_types:username()) -> rabbit_types:ok_or_error(any()).
+update(Name, Description, Tags, DefaultQueueType, ActingUser) ->
+    Metadata = vhost:new_metadata(Description, Tags, DefaultQueueType),
     update_metadata(Name, Metadata, ActingUser).
 
 -spec delete(vhost:name(), rabbit_types:username()) -> rabbit_types:ok_or_error(any()).
+delete(Name, ActingUser) ->
+    case rabbit_db_vhost:get(Name) of
+        %% preserve the original behavior for backwards compatibility
+        undefined -> delete_ignoring_protection(Name, ActingUser);
+        VHost ->
+            case vhost:is_protected_from_deletion(VHost) of
+                true ->
+                    Msg = "Refusing to delete virtual host '~ts' because it is protected from deletion",
+                    rabbit_log:debug(Msg, [Name]),
+                    {error, protected_from_deletion};
+                false ->
+                    delete_ignoring_protection(Name, ActingUser)
+            end
+    end.
 
-delete(VHost, ActingUser) ->
+-spec delete_ignoring_protection(vhost:name(), rabbit_types:username()) -> rabbit_types:ok_or_error(any()).
+delete_ignoring_protection(Name, ActingUser) ->
     %% FIXME: We are forced to delete the queues and exchanges outside
     %% the TX below. Queue deletion involves sending messages to the queue
     %% process, which in turn results in further database actions and
     %% eventually the termination of that process. Exchange deletion causes
     %% notifications which must be sent outside the TX
-    rabbit_log:info("Deleting vhost '~ts'", [VHost]),
+    rabbit_log:info("Deleting vhost '~ts'", [Name]),
     %% TODO: This code does a lot of "list resources, walk through the list to
     %% delete each resource". This feature should be provided by each called
     %% modules, like `rabbit_amqqueue:delete_all_for_vhost(VHost)'. These new
     %% calls would be responsible for the atomicity, not this code.
     %% Clear the permissions first to prohibit new incoming connections when deleting a vhost
-    _ = rabbit_auth_backend_internal:clear_permissions_for_vhost(VHost, ActingUser),
-    _ = rabbit_auth_backend_internal:clear_topic_permissions_for_vhost(VHost, ActingUser),
+    rabbit_log:info("Clearing permissions in vhost '~ts' because it's being deleted", [Name]),
+    ok = rabbit_auth_backend_internal:clear_all_permissions_for_vhost(Name, ActingUser),
+    rabbit_log:info("Deleting queues in vhost '~ts' because it's being deleted", [Name]),
     QDelFun = fun (Q) -> rabbit_amqqueue:delete(Q, false, false, ActingUser) end,
     [begin
-         Name = amqqueue:get_name(Q),
-         assert_benign(rabbit_amqqueue:with(Name, QDelFun), ActingUser)
-     end || Q <- rabbit_amqqueue:list(VHost)],
-    [assert_benign(rabbit_exchange:delete(Name, false, ActingUser), ActingUser) ||
-        #exchange{name = Name} <- rabbit_exchange:list(VHost)],
-    _ = rabbit_runtime_parameters:clear_vhost(VHost, ActingUser),
-    _ = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
-         || Info <- rabbit_policy:list(VHost)],
-    case rabbit_db_vhost:delete(VHost) of
-        true ->
-            ok = rabbit_event:notify(
-                   vhost_deleted,
-                   [{name, VHost},
-                    {user_who_performed_action, ActingUser}]);
-        false ->
-            ok
-    end,
+         QName = amqqueue:get_name(Q),
+         assert_benign(rabbit_amqqueue:with(QName, QDelFun), ActingUser)
+     end || Q <- rabbit_amqqueue:list(Name)],
+    rabbit_log:info("Deleting exchanges in vhost '~ts' because it's being deleted", [Name]),
+    ok = rabbit_exchange:delete_all(Name, ActingUser),
+    rabbit_log:info("Clearing policies and runtime parameters in vhost '~ts' because it's being deleted", [Name]),
+    _ = rabbit_runtime_parameters:clear_vhost(Name, ActingUser),
+    rabbit_log:debug("Removing vhost '~ts' from the metadata storage because it's being deleted", [Name]),
+    Ret = case rabbit_db_vhost:delete(Name) of
+             true ->
+                 ok = rabbit_event:notify(
+                        vhost_deleted,
+                        [{name, Name},
+                         {user_who_performed_action, ActingUser}]);
+             false ->
+                 {error, {no_such_vhost, Name}};
+             {error, _} = Err ->
+                 Err
+         end,
     %% After vhost was deleted from the database, we try to stop vhost
     %% supervisors on all the nodes.
-    rabbit_vhost_sup_sup:delete_on_all_nodes(VHost),
-    ok.
-
--spec put_vhost(vhost:name(),
-    binary(),
-    vhost:tags(),
-    boolean(),
-    rabbit_types:username()) ->
-    'ok' | {'error', any()} | {'EXIT', any()}.
-put_vhost(Name, Description, Tags0, Trace, Username) ->
-    put_vhost(Name, Description, Tags0, undefined, Trace, Username).
+    rabbit_vhost_sup_sup:delete_on_all_nodes(Name),
+    Ret.
 
 -spec put_vhost(vhost:name(),
     binary(),
     vhost:unparsed_tags() | vhost:tags(),
-    rabbit_queue_type:queue_type() | 'undefined',
+    rabbit_queue_type:queue_type() | 'undefined' | binary(),
     boolean(),
     rabbit_types:username()) ->
     'ok' | {'error', any()} | {'EXIT', any()}.
@@ -322,21 +368,13 @@ put_vhost(Name, Description, Tags0, DefaultQueueType, Trace, Username) ->
       Other       -> Other
     end,
     ParsedTags = parse_tags(Tags),
-    rabbit_log:debug("Parsed tags ~tp to ~tp", [Tags, ParsedTags]),
+    rabbit_log:debug("Parsed virtual host tags ~tp to ~tp", [Tags, ParsedTags]),
     Result = case exists(Name) of
                  true  ->
-                     update(Name, Description, ParsedTags, Username);
+                     update(Name, Description, ParsedTags, DefaultQueueType, Username);
                  false ->
-                     Metadata0 = #{description => Description,
-                                   tags => ParsedTags},
-                     Metadata = case DefaultQueueType of
-                                    undefined ->
-                                        Metadata0;
-                                    _ ->
-                                        Metadata0#{default_queue_type =>
-                                                       DefaultQueueType}
-                                end,
-                     case add(Name, Metadata, Username) of
+                     Metadata = vhost:new_metadata(Description, ParsedTags, DefaultQueueType),
+                     case catch do_add(Name, Metadata, Username) of
                          ok ->
                              %% wait for up to 45 seconds for the vhost to initialise
                              %% on all nodes
@@ -374,6 +412,7 @@ is_over_vhost_limit(Name, Limit) when is_integer(Limit) ->
             ErrorMsg = rabbit_misc:format("cannot create vhost '~ts': "
                                           "vhost limit of ~tp is reached",
                                           [Name, Limit]),
+            rabbit_log:error(ErrorMsg),
             exit({vhost_limit_exceeded, ErrorMsg})
     end.
 
@@ -432,6 +471,7 @@ vhost_cluster_state(VHost) ->
     Nodes).
 
 vhost_down(VHost) ->
+    rabbit_log:info("Virtual host '~ts' is stopping", [VHost]),
     ok = rabbit_event:notify(vhost_down,
                              [{name, VHost},
                               {node, node()},
@@ -459,7 +499,7 @@ assert_benign({error, not_found}, _) -> ok;
 assert_benign({error, {absent, Q, _}}, ActingUser) ->
     %% Removing the database entries here is safe. If/when the down node
     %% restarts, it will clear out the on-disk storage of the queue.
-    rabbit_amqqueue:internal_delete(Q, ActingUser).
+    ok = rabbit_amqqueue:internal_delete(Q, ActingUser).
 
 -spec exists(vhost:name()) -> boolean().
 
@@ -499,12 +539,37 @@ default_name() ->
         undefined   -> <<"/">>
     end.
 
+-spec default_queue_type(VirtualHost :: vhost:name()) -> rabbit_queue_type:queue_type().
+default_queue_type(VirtualHost) ->
+    default_queue_type(VirtualHost, rabbit_queue_type:fallback()).
+-spec default_queue_type(VirtualHost :: vhost:name(), Fallback :: rabbit_queue_type:queue_type()) -> rabbit_queue_type:queue_type().
+default_queue_type(VirtualHost, FallbackQueueType) ->
+    NodeDefault = application:get_env(rabbit, default_queue_type, FallbackQueueType),
+    case exists(VirtualHost) of
+        false -> NodeDefault;
+        true ->
+            Record = lookup(VirtualHost),
+            case vhost:get_default_queue_type(Record) of
+                undefined       -> NodeDefault;
+                <<"undefined">> -> NodeDefault;
+                Type            -> Type
+            end
+end.
+
 -spec lookup(vhost:name()) -> vhost:vhost() | rabbit_types:ok_or_error(any()).
 lookup(VHostName) ->
     case rabbit_db_vhost:get(VHostName) of
         undefined -> {error, {no_such_vhost, VHostName}};
         VHost     -> VHost
     end.
+
+-spec enable_protection_from_deletion(vhost:name()) -> vhost:vhost() | rabbit_types:ok_or_error(any()).
+enable_protection_from_deletion(VHostName) ->
+    rabbit_db_vhost:enable_protection_from_deletion(VHostName).
+
+-spec disable_protection_from_deletion(vhost:name()) -> vhost:vhost() | rabbit_types:ok_or_error(any()).
+disable_protection_from_deletion(VHostName) ->
+    rabbit_db_vhost:disable_protection_from_deletion(VHostName).
 
 -spec assert(vhost:name()) -> 'ok'.
 assert(VHostName) ->
@@ -599,8 +664,20 @@ i(tracing, VHost) -> rabbit_trace:enabled(vhost:get_name(VHost));
 i(cluster_state, VHost) -> vhost_cluster_state(vhost:get_name(VHost));
 i(description, VHost) -> vhost:get_description(VHost);
 i(tags, VHost) -> vhost:get_tags(VHost);
-i(default_queue_type, VHost) -> vhost:get_default_queue_type(VHost);
-i(metadata, VHost) -> vhost:get_metadata(VHost);
+i(default_queue_type, VHost) -> rabbit_queue_type:short_alias_of(default_queue_type(vhost:get_name(VHost)));
+i(protected_from_deletion, VHost) -> vhost:is_protected_from_deletion(VHost);
+i(metadata, VHost) ->
+    DQT = rabbit_queue_type:short_alias_of(default_queue_type(vhost:get_name(VHost))),
+    case vhost:get_metadata(VHost) of
+        undefined ->
+            #{default_queue_type => DQT};
+        M = #{default_queue_type := undefined} ->
+            M#{default_queue_type => DQT};
+        M = #{default_queue_type := QT} ->
+            M#{default_queue_type => rabbit_queue_type:short_alias_of(QT)};
+        M when is_map(M) ->
+            M#{default_queue_type => DQT}
+    end;
 i(Item, VHost)     ->
   rabbit_log:error("Don't know how to compute a virtual host info item '~ts' for virtual host '~tp'", [Item, VHost]),
   throw({bad_argument, Item}).

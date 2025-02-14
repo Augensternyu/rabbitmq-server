@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2016-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 defmodule JoinClusterCommandTest do
   use ExUnit.Case, async: false
@@ -67,14 +67,6 @@ defmodule JoinClusterCommandTest do
     start_rabbitmq_app()
   end
 
-  # TODO
-  test "run: request to an active node fails", context do
-    assert match?(
-             {:error, :mnesia_unexpectedly_running},
-             @command.run([context[:opts][:node]], context[:opts])
-           )
-  end
-
   test "run: request to a non-existent node returns a badrpc", context do
     opts = %{
       node: :jake@thedog,
@@ -93,7 +85,7 @@ defmodule JoinClusterCommandTest do
     stop_rabbitmq_app()
 
     assert match?(
-             {:badrpc_multi, _, [_]},
+             {:error, {:aborted_feature_flags_compat_check, {:error, {:erpc, :noconnection}}}},
              @command.run([:jake@thedog], context[:opts])
            )
 

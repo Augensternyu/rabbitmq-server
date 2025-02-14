@@ -1,9 +1,8 @@
 load(
     "@bazel_skylib//rules:common_settings.bzl",
     "bool_flag",
-    "string_flag",
 )
-load("@rules_pkg//:mappings.bzl", "pkg_files", "strip_prefix")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
 load("@rules_erlang//gazelle:def.bzl", "GAZELLE_ERLANG_RUNTIME_DEPS")
 load("@rules_erlang//:erlang_bytecode2.bzl", "erlc_opts")
@@ -11,7 +10,7 @@ load("@rules_erlang//:dialyze.bzl", "DEFAULT_PLT_APPS", "plt")
 load("@rules_erlang//:shell.bzl", "shell")
 load("@rules_erlang//:erl_eval.bzl", "erl_eval")
 load("@rules_erlang//gazelle:moduleindex.bzl", "moduleindex")
-load("//bazel/elixir:iex_eval.bzl", "iex_eval")
+load("@rules_elixir//:iex_eval.bzl", "iex_eval")
 load(":rabbitmq_home.bzl", "rabbitmq_home")
 load(":rabbitmq_run.bzl", "rabbitmq_run", "rabbitmq_run_command")
 load(":rabbitmqctl.bzl", "rabbitmqctl")
@@ -32,6 +31,7 @@ exports_files([
 
 # gazelle:exclude .github
 # gazelle:exclude .elixir_ls
+# gazelle:exclude .erlang.mk
 # gazelle:exclude bazel
 # gazelle:exclude bazel-out
 # gazelle:exclude deps/*/priv
@@ -42,6 +42,7 @@ exports_files([
 # gazelle:exclude deps/cowlib
 # gazelle:exclude deps/credentials_obfuscation
 # gazelle:exclude deps/csv
+# gazelle:exclude deps/cth_styledout
 # gazelle:exclude deps/cuttlefish
 # gazelle:exclude deps/eetcd
 # gazelle:exclude deps/elvis_mk
@@ -49,11 +50,14 @@ exports_files([
 # gazelle:exclude deps/gen_batch_server
 # gazelle:exclude deps/getopt
 # gazelle:exclude deps/gun
+# gazelle:exclude deps/inet_tcp_proxy
 # gazelle:exclude deps/jose
 # gazelle:exclude deps/json
+# gazelle:exclude deps/meck
 # gazelle:exclude deps/observer_cli
 # gazelle:exclude deps/osiris
 # gazelle:exclude deps/prometheus
+# gazelle:exclude deps/proper
 # gazelle:exclude deps/quantile_estimator
 # gazelle:exclude deps/ra
 # gazelle:exclude deps/ranch
@@ -65,8 +69,14 @@ exports_files([
 # gazelle:exclude deps/sysmon_handler
 # gazelle:exclude deps/systemd
 # gazelle:exclude deps/thoas
+# gazelle:exclude deps/*/deps
+# gazelle:exclude deps/*/.erlang.mk
+# gazelle:exclude deps/rabbitmq_cli/_build
+# gazelle:exclude extra_deps
 # gazelle:exclude packaging
 # gazelle:exclude PACKAGES
+# gazelle:exclude plugins
+# gazelle:exclude release-notes
 # gazelle:exclude logs
 # gazelle:erlang_apps_dirs deps
 # gazelle:erlang_skip_rules test_erlang_app
@@ -113,12 +123,6 @@ config_setting(
     },
 )
 
-string_flag(
-    name = "elixir_home",
-    build_setting_default = "",
-    visibility = ["//visibility:public"],
-)
-
 plt(
     name = "base_plt",
     apps = DEFAULT_PLT_APPS + [
@@ -143,7 +147,7 @@ rabbitmq_run(
     visibility = ["//visibility:public"],
 )
 
-# Allow us to `bazel run broker`
+# Allows us to `bazel run broker`
 # for the equivalent of `make run-broker`
 rabbitmq_run_command(
     name = "broker",
@@ -151,7 +155,23 @@ rabbitmq_run_command(
     subcommand = "run-broker",
 )
 
-# Allow us to `bazel run start-cluster`
+# Allows us to `bazel run background-broker`
+# to start a broker in the background
+rabbitmq_run_command(
+    name = "background-broker",
+    rabbitmq_run = ":rabbitmq-run",
+    subcommand = "start-background-broker",
+)
+
+# Allows us to `bazel run stop-broker`
+# Useful is broker started in the background
+rabbitmq_run_command(
+    name = "stop-broker",
+    rabbitmq_run = ":rabbitmq-run",
+    subcommand = "stop-node",
+)
+
+# Allows us to `bazel run start-cluster`
 # for the equivalent of `make start-cluster`
 rabbitmq_run_command(
     name = "start-cluster",
@@ -159,7 +179,7 @@ rabbitmq_run_command(
     subcommand = "start-cluster",
 )
 
-# Allow us to `bazel run stop-cluster`
+# Allows us to `bazel run stop-cluster`
 # for the equivalent of `make stop-cluster`
 rabbitmq_run_command(
     name = "stop-cluster",
@@ -194,6 +214,11 @@ rabbitmqctl(
     home = ":broker-home",
 )
 
+rabbitmqctl(
+    name = "rabbitmq-upgrade",
+    home = ":broker-home",
+)
+
 shell(
     name = "repl",
     deps = PLUGINS,
@@ -203,23 +228,19 @@ erl_eval(
     name = "otp_version",
     outs = ["otp_version.txt"],
     expression = """{ok, Version} = file:read_file(filename:join([code:root_dir(), "releases", erlang:system_info(otp_release), "OTP_VERSION"])), file:write_file(os:getenv("OUTS"), Version), halt().""",
+    visibility = ["//visibility:public"],
 )
 
 iex_eval(
     name = "elixir_version",
     outs = ["elixir_version.txt"],
     expression = """File.write!(System.get_env("OUTS"), System.version()); System.halt()""",
+    visibility = ["//visibility:public"],
 )
 
 filegroup(
     name = "root-licenses",
-    srcs = glob(
-        ["LICENSE*"],
-        exclude = [
-            "LICENSE.md",
-            "LICENSE.txt",
-        ],
-    ),
+    srcs = glob(["LICENSE*"]),
     visibility = ["//visibility:public"],
 )
 

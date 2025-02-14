@@ -79,7 +79,7 @@ plt(
     name = "deps_plt",
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
 )
 
@@ -94,7 +94,6 @@ eunit(
     name = "eunit",
     compiled_suites = [
         ":test_src_rabbit_ws_test_util_beam",
-        ":test_src_rfc6455_client_beam",
         ":test_src_stomp_beam",
     ],
     target = ":test_erlang_app",

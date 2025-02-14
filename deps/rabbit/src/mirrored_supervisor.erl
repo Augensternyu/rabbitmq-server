@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(mirrored_supervisor).
@@ -137,7 +137,11 @@
 -type startlink_err() :: {'already_started', pid()} | 'shutdown' | term().
 -type startlink_ret() :: {'ok', pid()} | 'ignore' | {'error', startlink_err()}.
 
--type group_name() :: any().
+-type group_name() :: module().
+-type child_id() :: term(). %% supervisor:child_id() is not exported.
+
+-export_type([group_name/0,
+              child_id/0]).
 
 -spec start_link(GroupName, Module, Args) -> startlink_ret() when
       GroupName :: group_name(),
@@ -341,7 +345,7 @@ handle_info({'DOWN', _Ref, process, Pid, _Reason},
                            child_order = ChildOrder}) ->
     %% No guarantee pg will have received the DOWN before us.
     R = case lists:sort(pg:get_members(Group)) -- [Pid] of
-            [O | _] -> ChildSpecs = update_all(O, Pid),
+            [O | _] -> ChildSpecs = retry_update_all(O, Pid),
                        [start(Delegate, ChildSpec)
                         || ChildSpec <- restore_child_order(ChildSpecs,
                                                             ChildOrder)];
@@ -423,6 +427,22 @@ check_stop(Group, Delegate, Id) ->
     end.
 
 id({Id, _, _, _, _, _}) -> Id.
+
+retry_update_all(O, Pid) ->
+    retry_update_all(O, Pid, 10000).
+
+retry_update_all(O, Pid, TimeLeft) when TimeLeft > 0 ->
+    case update_all(O, Pid) of
+        List when is_list(List) ->
+            List;
+        {error, timeout} ->
+            Sleep = 200,
+            TimeLeft1 = TimeLeft - Sleep,
+            timer:sleep(Sleep),
+            retry_update_all(O, Pid, TimeLeft1)
+    end;
+retry_update_all(O, Pid, _TimeLeft) ->
+    update_all(O, Pid).
 
 update_all(Overall, OldOverall) ->
     rabbit_db_msup:update_all(Overall, OldOverall).

@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule ClearOperatorPolicyCommandTest do
   use ExUnit.Case, async: false
@@ -67,7 +67,7 @@ defmodule ClearOperatorPolicyCommandTest do
     assert @command.run(
              [context[:key]],
              vhost_opts
-           ) == {:error_string, 'Parameter does not exist'}
+           ) == {:error_string, ~c"Parameter does not exist"}
   end
 
   test "run: an unreachable node throws a badrpc" do
@@ -96,7 +96,7 @@ defmodule ClearOperatorPolicyCommandTest do
     assert @command.run(
              [context[:key]],
              vhost_opts
-           ) == {:error_string, 'Parameter does not exist'}
+           ) == {:error_string, ~c"Parameter does not exist"}
   end
 
   @tag key: @key, pattern: @pattern, value: @value, vhost: @vhost

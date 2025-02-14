@@ -11,6 +11,9 @@ def all_beam_files(name = "all_beam_files"):
         name = "other_beam",
         testonly = True,
         srcs = [
+            "src/ct_master_event_fork.erl",
+            "src/ct_master_fork.erl",
+            "src/ct_master_logs_fork.erl",
             "src/cth_log_redirect_any_domains.erl",
             "src/rabbit_control_helper.erl",
             "src/rabbit_ct_broker_helpers.erl",
@@ -19,15 +22,13 @@ def all_beam_files(name = "all_beam_files"):
             "src/rabbit_ct_proper_helpers.erl",
             "src/rabbit_ct_vm_helpers.erl",
             "src/rabbit_mgmt_test_util.erl",
+            "src/stream_test_utils.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
         app_name = "rabbitmq_ct_helpers",
         dest = "ebin",
         erlc_opts = "//:erlc_opts",
-        deps = [
-            "//deps/rabbit_common:erlang_app",
-            "@proper//:erlang_app",
-        ],
+        deps = ["//deps/amqp10_common:erlang_app", "//deps/rabbit_common:erlang_app", "@proper//:erlang_app"],
     )
 
 def all_test_beam_files(name = "all_test_beam_files"):
@@ -40,6 +41,9 @@ def all_test_beam_files(name = "all_test_beam_files"):
         name = "test_other_beam",
         testonly = True,
         srcs = [
+            "src/ct_master_event_fork.erl",
+            "src/ct_master_fork.erl",
+            "src/ct_master_logs_fork.erl",
             "src/cth_log_redirect_any_domains.erl",
             "src/rabbit_control_helper.erl",
             "src/rabbit_ct_broker_helpers.erl",
@@ -48,15 +52,13 @@ def all_test_beam_files(name = "all_test_beam_files"):
             "src/rabbit_ct_proper_helpers.erl",
             "src/rabbit_ct_vm_helpers.erl",
             "src/rabbit_mgmt_test_util.erl",
+            "src/stream_test_utils.erl",
         ],
         hdrs = [":public_and_private_hdrs"],
         app_name = "rabbitmq_ct_helpers",
         dest = "test",
         erlc_opts = "//:test_erlc_opts",
-        deps = [
-            "//deps/rabbit_common:erlang_app",
-            "@proper//:erlang_app",
-        ],
+        deps = ["//deps/amqp10_common:erlang_app", "//deps/rabbit_common:erlang_app", "@proper//:erlang_app"],
     )
 
 def all_srcs(name = "all_srcs"):
@@ -105,6 +107,9 @@ def all_srcs(name = "all_srcs"):
         name = "srcs",
         testonly = True,
         srcs = [
+            "src/ct_master_event_fork.erl",
+            "src/ct_master_fork.erl",
+            "src/ct_master_logs_fork.erl",
             "src/cth_log_redirect_any_domains.erl",
             "src/rabbit_control_helper.erl",
             "src/rabbit_ct_broker_helpers.erl",
@@ -113,6 +118,7 @@ def all_srcs(name = "all_srcs"):
             "src/rabbit_ct_proper_helpers.erl",
             "src/rabbit_ct_vm_helpers.erl",
             "src/rabbit_mgmt_test_util.erl",
+            "src/stream_test_utils.erl",
         ],
     )
 

@@ -2,9 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 -module(amqp10_msg).
+
+-include_lib("amqp10_common/include/amqp10_types.hrl").
 
 -export([from_amqp_records/1,
          to_amqp_records/1,
@@ -36,9 +38,11 @@
          set_message_annotations/2
         ]).
 
+-import(amqp10_client_types, [utf8/1]).
+
 -include_lib("amqp10_common/include/amqp10_framing.hrl").
 
--type maybe(T) :: T | undefined.
+-type opt(T) :: T | undefined.
 
 -type delivery_tag() :: binary().
 -type content_type() :: term(). % TODO: refine
@@ -52,23 +56,23 @@
 
 -type amqp10_header() :: #{durable => boolean(), % false
                            priority => byte(), % 4
-                           ttl => maybe(non_neg_integer()),
+                           ttl => opt(non_neg_integer()),
                            first_acquirer => boolean(), % false
                            delivery_count => non_neg_integer()}. % 0
 
--type amqp10_properties() :: #{message_id => maybe(any()),
-                               user_id => maybe(binary()),
-                               to => maybe(any()),
-                               subject => maybe(binary()),
-                               reply_to => maybe(any()),
-                               correlation_id => maybe(any()),
-                               content_type => maybe(content_type()),
-                               content_encoding => maybe(content_encoding()),
-                               absolute_expiry_time => maybe(non_neg_integer()),
-                               creation_time => maybe(non_neg_integer()),
-                               group_id => maybe(binary()),
-                               group_sequence => maybe(non_neg_integer()),
-                               reply_to_group_id => maybe(binary())}.
+-type amqp10_properties() :: #{message_id => opt(any()),
+                               user_id => opt(binary()),
+                               to => opt(any()),
+                               subject => opt(binary()),
+                               reply_to => opt(any()),
+                               correlation_id => opt(any()),
+                               content_type => opt(content_type()),
+                               content_encoding => opt(content_encoding()),
+                               absolute_expiry_time => opt(non_neg_integer()),
+                               creation_time => opt(non_neg_integer()),
+                               group_id => opt(binary()),
+                               group_sequence => opt(non_neg_integer()),
+                               reply_to_group_id => opt(binary())}.
 
 -type amqp10_body() :: [#'v1_0.data'{}] |
                        [#'v1_0.amqp_sequence'{}] |
@@ -78,13 +82,13 @@
 
 -record(amqp10_msg,
         {transfer :: #'v1_0.transfer'{},
-         header :: maybe(#'v1_0.header'{}),
-         delivery_annotations :: maybe(#'v1_0.delivery_annotations'{}),
-         message_annotations :: maybe(#'v1_0.message_annotations'{}),
-         properties :: maybe(#'v1_0.properties'{}),
-         application_properties :: maybe(#'v1_0.application_properties'{}),
+         header :: opt(#'v1_0.header'{}),
+         delivery_annotations :: opt(#'v1_0.delivery_annotations'{}),
+         message_annotations :: opt(#'v1_0.message_annotations'{}),
+         properties :: opt(#'v1_0.properties'{}),
+         application_properties :: opt(#'v1_0.application_properties'{}),
          body :: amqp10_body() | unset,
-         footer :: maybe(#'v1_0.footer'{})
+         footer :: opt(#'v1_0.footer'{})
          }).
 
 -opaque amqp10_msg() :: #amqp10_msg{}.
@@ -106,8 +110,16 @@
 -spec from_amqp_records([amqp10_client_types:amqp10_msg_record()]) ->
     amqp10_msg().
 from_amqp_records([#'v1_0.transfer'{} = Transfer | Records]) ->
-    lists:foldl(fun parse_from_amqp/2, #amqp10_msg{transfer = Transfer,
-                                                   body = unset}, Records).
+    case lists:foldl(fun parse_from_amqp/2,
+                     #amqp10_msg{transfer = Transfer,
+                                 body = unset},
+                     Records) of
+        #amqp10_msg{body = Body} = Msg
+          when is_list(Body) ->
+            Msg#amqp10_msg{body = lists:reverse(Body)};
+        Msg ->
+            Msg
+    end.
 
 -spec to_amqp_records(amqp10_msg()) -> [amqp10_client_types:amqp10_msg_record()].
 to_amqp_records(#amqp10_msg{transfer = T,
@@ -142,7 +154,7 @@ settled(#amqp10_msg{transfer = #'v1_0.transfer'{settled = Settled}}) ->
 % the last 1 octet is the version
 % See 2.8.11 in the spec
 -spec message_format(amqp10_msg()) ->
-    maybe({non_neg_integer(), non_neg_integer()}).
+    opt({non_neg_integer(), non_neg_integer()}).
 message_format(#amqp10_msg{transfer =
                          #'v1_0.transfer'{message_format = undefined}}) ->
     undefined;
@@ -183,7 +195,8 @@ header(first_acquirer = K,
 header(delivery_count = K,
        #amqp10_msg{header = #'v1_0.header'{delivery_count = D}}) ->
     header_value(K, D);
-header(K, #amqp10_msg{header = undefined}) -> header_value(K, undefined).
+header(K, #amqp10_msg{header = undefined}) ->
+    header_value(K, undefined).
 
 -spec delivery_annotations(amqp10_msg()) -> #{annotations_key() => any()}.
 delivery_annotations(#amqp10_msg{delivery_annotations = undefined}) ->
@@ -256,12 +269,12 @@ body_bin(#amqp10_msg{body = #'v1_0.amqp_value'{} = Body}) ->
 new(DeliveryTag, Body, Settled) when is_binary(Body) ->
     #amqp10_msg{transfer = #'v1_0.transfer'{delivery_tag = {binary, DeliveryTag},
                                             settled = Settled,
-                                            message_format = {uint, 0}},
+                                            message_format = {uint, ?MESSAGE_FORMAT}},
                 body = [#'v1_0.data'{content = Body}]};
 new(DeliveryTag, Body, Settled) -> % TODO: constrain to amqp types
     #amqp10_msg{transfer = #'v1_0.transfer'{delivery_tag = {binary, DeliveryTag},
                                             settled = Settled,
-                                            message_format = {uint, 0}},
+                                            message_format = {uint, ?MESSAGE_FORMAT}},
                 body = Body}.
 
 %% @doc Create a new settled amqp10 message using the specified delivery tag
@@ -306,7 +319,7 @@ set_headers(Headers, #amqp10_msg{header = Current} = Msg) ->
     H = maps:fold(fun(durable, V, Acc) ->
                           Acc#'v1_0.header'{durable = V};
                      (priority, V, Acc) ->
-                          Acc#'v1_0.header'{priority = {uint, V}};
+                          Acc#'v1_0.header'{priority = {ubyte, V}};
                      (first_acquirer, V, Acc) ->
                           Acc#'v1_0.header'{first_acquirer = V};
                      (ttl, V, Acc) ->
@@ -322,11 +335,16 @@ set_properties(Props, #amqp10_msg{properties = undefined} = Msg) ->
     set_properties(Props, Msg#amqp10_msg{properties = #'v1_0.properties'{}});
 set_properties(Props, #amqp10_msg{properties = Current} = Msg) ->
     % TODO many fields are `any` types and we need to try to type tag them
-    P = maps:fold(fun(message_id, V, Acc) when is_binary(V) ->
-                          % message_id can be any type but we restrict it here
+    P = maps:fold(fun(message_id, {T, _V} = TypeVal, Acc) when T =:= ulong orelse
+                                                               T =:= uuid orelse
+                                                               T =:= binary orelse
+                                                               T =:= utf8 ->
+                          Acc#'v1_0.properties'{message_id = TypeVal};
+                     (message_id, V, Acc) when is_binary(V) ->
+                          %% backward compat clause
                           Acc#'v1_0.properties'{message_id = utf8(V)};
-                     (user_id, V, Acc) ->
-                          Acc#'v1_0.properties'{user_id = utf8(V)};
+                     (user_id, V, Acc) when is_binary(V) ->
+                          Acc#'v1_0.properties'{user_id = {binary, V}};
                      (to, V, Acc) ->
                           Acc#'v1_0.properties'{to = utf8(V)};
                      (subject, V, Acc) ->
@@ -364,13 +382,13 @@ set_application_properties(
   Props0, #amqp10_msg{application_properties =
                       #'v1_0.application_properties'{content = APs0}} = Msg) ->
     Props = maps:fold(fun (K, V, S) ->
-                              S#{utf8(K) => wrap_ap_value(V)}
+                              S#{utf8(K) => amqp10_client_types:infer(V)}
                       end, maps:from_list(APs0), Props0),
     APs = #'v1_0.application_properties'{content = maps:to_list(Props)},
     Msg#amqp10_msg{application_properties = APs}.
 
 -spec set_delivery_annotations(#{binary() => binary() | integer() | string()},
-                                 amqp10_msg()) -> amqp10_msg().
+                               amqp10_msg()) -> amqp10_msg().
 set_delivery_annotations(Props,
                          #amqp10_msg{delivery_annotations = undefined} =
                          Msg) ->
@@ -378,44 +396,30 @@ set_delivery_annotations(Props,
     set_delivery_annotations(Props,
                              Msg#amqp10_msg{delivery_annotations = Anns});
 set_delivery_annotations(
-  Props0, #amqp10_msg{delivery_annotations =
-                      #'v1_0.delivery_annotations'{content = Anns0}} = Msg) ->
-    Anns = maps:fold(fun (K, V, S) ->
-                             S#{sym(K) => wrap_ap_value(V)}
-                     end, maps:from_list(Anns0), Props0),
-    Anns1 = #'v1_0.delivery_annotations'{content = maps:to_list(Anns)},
-    Msg#amqp10_msg{delivery_annotations = Anns1}.
+  Props, #amqp10_msg{delivery_annotations =
+                     #'v1_0.delivery_annotations'{content = Anns0}} = Msg) ->
+    Anns1 = maps:fold(fun (K, V, S) ->
+                              S#{sym(K) => amqp10_client_types:infer(V)}
+                      end, maps:from_list(Anns0), Props),
+    Anns = #'v1_0.delivery_annotations'{content = maps:to_list(Anns1)},
+    Msg#amqp10_msg{delivery_annotations = Anns}.
 
--spec set_message_annotations(#{binary() => binary() | integer() | string()},
-                                 amqp10_msg()) -> amqp10_msg().
+-spec set_message_annotations(#{binary() => binary() | number() | string() | tuple()},
+                              amqp10_msg()) -> amqp10_msg().
 set_message_annotations(Props,
-                         #amqp10_msg{message_annotations = undefined} =
-                         Msg) ->
+                        #amqp10_msg{message_annotations = undefined} =
+                        Msg) ->
     Anns = #'v1_0.message_annotations'{content = []},
     set_message_annotations(Props,
-                             Msg#amqp10_msg{message_annotations = Anns});
+                            Msg#amqp10_msg{message_annotations = Anns});
 set_message_annotations(
-  Props0, #amqp10_msg{message_annotations =
-                      #'v1_0.message_annotations'{content = Anns0}} = Msg) ->
-    Anns = maps:fold(fun (K, V, S) ->
-                             S#{sym(K) => wrap_ap_value(V)}
-                     end, maps:from_list(Anns0), Props0),
-    Anns1 = #'v1_0.message_annotations'{content = maps:to_list(Anns)},
-    Msg#amqp10_msg{message_annotations = Anns1}.
-
-wrap_ap_value(true) ->
-    {boolean, true};
-wrap_ap_value(false) ->
-    {boolean, false};
-wrap_ap_value(V) when is_integer(V) ->
-    {uint, V};
-wrap_ap_value(V) when is_binary(V) ->
-    utf8(V);
-wrap_ap_value(V) when is_list(V) ->
-    utf8(list_to_binary(V));
-wrap_ap_value(V) when is_atom(V) ->
-    utf8(atom_to_list(V)).
-
+  Props, #amqp10_msg{message_annotations =
+                     #'v1_0.message_annotations'{content = Anns0}} = Msg) ->
+    Anns1 = maps:fold(fun (K, V, S) ->
+                              S#{sym(K) => amqp10_client_types:infer(V)}
+                      end, maps:from_list(Anns0), Props),
+    Anns = #'v1_0.message_annotations'{content = maps:to_list(Anns1)},
+    Msg#amqp10_msg{message_annotations = Anns}.
 
 %% LOCAL
 header_value(durable, undefined) -> false;
@@ -437,15 +441,20 @@ parse_from_amqp(#'v1_0.application_properties'{} = APs, AmqpMsg) ->
     AmqpMsg#amqp10_msg{application_properties = APs};
 parse_from_amqp(#'v1_0.amqp_value'{} = Value, AmqpMsg) ->
     AmqpMsg#amqp10_msg{body = Value};
-parse_from_amqp(#'v1_0.amqp_sequence'{} = Seq, AmqpMsg) ->
-    AmqpMsg#amqp10_msg{body = [Seq]};
-parse_from_amqp(#'v1_0.data'{} = Data, AmqpMsg) ->
-    AmqpMsg#amqp10_msg{body = [Data]};
+parse_from_amqp(#'v1_0.amqp_sequence'{} = Seq, AmqpMsg = #amqp10_msg{body = Body0}) ->
+    Body = if Body0 =:= unset -> [Seq];
+              is_list(Body0) -> [Seq | Body0]
+           end,
+    AmqpMsg#amqp10_msg{body = Body};
+parse_from_amqp(#'v1_0.data'{} = Data, AmqpMsg = #amqp10_msg{body = Body0}) ->
+    Body = if Body0 =:= unset -> [Data];
+              is_list(Body0) -> [Data | Body0]
+           end,
+    AmqpMsg#amqp10_msg{body = Body};
 parse_from_amqp(#'v1_0.footer'{} = Header, AmqpMsg) ->
     AmqpMsg#amqp10_msg{footer = Header}.
 
 unpack(V) -> amqp10_client_types:unpack(V).
-utf8(V) -> amqp10_client_types:utf8(V).
 sym(B) when is_list(B) -> {symbol, list_to_binary(B)};
 sym(B) when is_binary(B) -> {symbol, B}.
 uint(B) -> {uint, B}.

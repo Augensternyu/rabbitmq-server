@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% An HTTP API counterpart of 'rabbitmq-dignoastics check_local_alarms'
@@ -36,7 +36,7 @@ to_json(ReqData, Context) ->
               end,
     case rabbit_alarm:get_local_alarms(Timeout) of
         [] ->
-            rabbit_mgmt_util:reply([{status, ok}], ReqData, Context);
+            rabbit_mgmt_util:reply(#{status => ok}, ReqData, Context);
         Xs when length(Xs) > 0 ->
             Msg = "There are alarms in effect on the node",
             failure(Msg, Xs, ReqData, Context)

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(unit_config_value_encryption_SUITE).
@@ -68,7 +68,10 @@ decrypt_config(_Config) ->
     ok.
 
 do_decrypt_config(Algo = {C, H, I, P}) ->
-    ok = application:load(rabbit),
+    case application:load(rabbit) of
+        ok -> ok;
+        {error, {already_loaded, rabbit}} -> ok
+    end,
     RabbitConfig = application:get_all_env(rabbit),
     %% Encrypt a few values in configuration.
     %% Common cases.

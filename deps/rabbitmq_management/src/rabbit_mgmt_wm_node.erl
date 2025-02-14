@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_mgmt_wm_node).
@@ -12,8 +12,6 @@
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
--include_lib("rabbit_common/include/rabbit.hrl").
-
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
@@ -26,10 +24,7 @@ content_types_provided(ReqData, Context) ->
    {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
-    {case node0(ReqData) of
-         not_found -> false;
-         _         -> true
-     end, ReqData, Context}.
+    {rabbit_mgmt_nodes:node_exists(ReqData), ReqData, Context}.
 
 to_json(ReqData, Context) ->
     rabbit_mgmt_util:reply(node0(ReqData), ReqData, Context).
@@ -63,7 +58,7 @@ node_data(Node, ReqData) ->
     Nodes = proplists:get_value(nodes, S),
     Running = proplists:get_value(running_nodes, S),
     Type = find_type(Node, Nodes),
-    Basic = [[{name, Node}, {running, lists:member(Node, Running)}, {type, Type}]],
+    Basic = [[{name, Node}, {running, lists:member(Node, Running)}, {type, Type}, {being_drained, rabbit_maintenance:is_being_drained_local_read(Node)}]],
     case rabbit_mgmt_util:disable_stats(ReqData) of
         false ->
             rabbit_mgmt_db:augment_nodes(Basic, rabbit_mgmt_util:range_ceil(ReqData));

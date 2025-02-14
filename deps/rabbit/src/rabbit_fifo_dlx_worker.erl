@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 
 %% One rabbit_fifo_dlx_worker process exists per (source) quorum queue that has at-least-once dead lettering
 %% enabled. The rabbit_fifo_dlx_worker process is co-located on the quorum queue leader node.
@@ -23,8 +23,9 @@
 
 -module(rabbit_fifo_dlx_worker).
 
+-include("mc.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("rabbit_common/include/rabbit_framing.hrl").
+% -include_lib("rabbit_common/include/rabbit_framing.hrl").
 
 -behaviour(gen_server).
 
@@ -32,7 +33,7 @@
 %% gen_server callbacks
 -export([init/1, terminate/2, handle_continue/2,
          handle_cast/2, handle_call/3, handle_info/2,
-         code_change/3, format_status/2]).
+         code_change/3, format_status/1]).
 
 -define(HIBERNATE_AFTER, 4*60*1000).
 
@@ -43,8 +44,10 @@
           %% This rabbit_fifo_dlx_worker does not have the concept of delivery tags because it settles (acks)
           %% message IDs directly back to the queue (and there is no AMQP consumer).
           consumed_msg_id :: non_neg_integer(),
-          delivery :: rabbit_types:delivery(),
+          delivery :: mc:state(),
           reason :: rabbit_dead_letter:reason(),
+          %% routing keys (including CC keys) the message was published with to the source quorum queue
+          original_routing_keys :: [rabbit_types:routing_key(),...],
           %% target queues for which publisher confirm has not been received yet
           unsettled = [] :: [rabbit_amqqueue:name()],
           %% target queues for which publisher rejection was received recently
@@ -135,20 +138,21 @@ handle_call(Request, From, State) ->
     rabbit_log:info("~ts received unhandled call from ~tp: ~tp", [?MODULE, From, Request]),
     {noreply, State}.
 
-handle_cast({queue_event, QRef, {_From, {machine, lookup_topology}}},
-            #state{queue_ref = QRef} = State0) ->
+handle_cast({dlx_event, _LeaderPid, lookup_topology},
+            #state{queue_ref = _} = State0) ->
     State = lookup_topology(State0),
     redeliver_and_ack(State);
-handle_cast({queue_event, QRef, {From, Evt}},
-            #state{queue_ref = QRef,
+handle_cast({dlx_event, LeaderPid, Evt},
+            #state{queue_ref = _QRef,
                    dlx_client_state = DlxState0} = State0) ->
     %% received dead-letter message from source queue
-    {ok, DlxState, Actions} = rabbit_fifo_dlx_client:handle_ra_event(From, Evt, DlxState0),
+    {ok, DlxState, Actions} = rabbit_fifo_dlx_client:handle_ra_event(LeaderPid, Evt, DlxState0),
     State1 = State0#state{dlx_client_state = DlxState},
     State = handle_queue_actions(Actions, State1),
     {noreply, State};
 handle_cast({queue_event, QRef, Evt},
             #state{queue_type_state = QTypeState0} = State0) ->
+
     case rabbit_queue_type:handle_event(QRef, Evt, QTypeState0) of
         {ok, QTypeState1, Actions} ->
             %% received e.g. confirm from target queue
@@ -302,7 +306,7 @@ lookup_dlx(#state{exchange_ref = DLXRef} = State0) ->
             {X, State0}
     end.
 
--spec forward(rabbit_types:message(), non_neg_integer(), rabbit_amqqueue:name(),
+-spec forward(mc:state(), non_neg_integer(), rabbit_amqqueue:name(),
               rabbit_types:exchange() | not_found, rabbit_dead_letter:reason(), state()) ->
     state().
 forward(ConsumedMsg, ConsumedMsgId, ConsumedQRef, DLX, Reason,
@@ -310,34 +314,48 @@ forward(ConsumedMsg, ConsumedMsgId, ConsumedQRef, DLX, Reason,
                pendings = Pendings,
                exchange_ref = DLXRef,
                routing_key = RKey} = State0) ->
-    #basic_message{routing_keys = RKeys} = Msg = rabbit_dead_letter:make_msg(ConsumedMsg, Reason,
-                                                                             DLXRef, RKey, ConsumedQRef),
-    %% Field 'mandatory' is set to false because we check ourselves whether the message is routable.
-    Delivery = rabbit_basic:delivery(_Mandatory = false, _Confirm = true, Msg, OutSeq),
-    {TargetQs, State3} = case DLX of
-                             not_found ->
-                                 {[], State0};
-                             _ ->
-                                 RouteToQs0 = rabbit_exchange:route(DLX, Delivery),
-                                 {RouteToQs1, Cycles} = rabbit_dead_letter:detect_cycles(Reason, Msg, RouteToQs0),
-                                 State1 = log_cycles(Cycles, RKeys, State0),
-                                 RouteToQs2 = rabbit_amqqueue:lookup_many(RouteToQs1),
-                                 RouteToQs = rabbit_amqqueue:prepend_extra_bcc(RouteToQs2),
-                                 State2 = case RouteToQs of
-                                              [] ->
-                                                  log_no_route_once(State1);
-                                              _ ->
-                                                  State1
-                                          end,
-                                 {RouteToQs, State2}
-                         end,
     Now = os:system_time(millisecond),
-    Pend0 = #pending{
-               consumed_msg_id = ConsumedMsgId,
-               consumed_at = Now,
-               delivery = Delivery,
-               reason = Reason
-              },
+    #resource{name = SourceQName} = ConsumedQRef,
+    #resource{name = DLXName} = DLXRef,
+    OriginalRoutingKeys = mc:routing_keys(ConsumedMsg),
+    DLRKeys = case RKey of
+                  undefined ->
+                      OriginalRoutingKeys;
+                  _ ->
+                      [RKey]
+              end,
+    Env = case rabbit_feature_flags:is_enabled(?FF_MC_DEATHS_V2) of
+              true -> #{};
+              false -> #{?FF_MC_DEATHS_V2 => false}
+          end,
+    Msg0 = mc:record_death(Reason, SourceQName, ConsumedMsg, Env),
+    Msg1 = mc:set_ttl(undefined, Msg0),
+    Msg2 = mc:set_annotation(?ANN_ROUTING_KEYS, DLRKeys, Msg1),
+    Msg = mc:set_annotation(?ANN_EXCHANGE, DLXName, Msg2),
+    {TargetQs, State3} =
+        case DLX of
+            not_found ->
+                {[], State0};
+            _ ->
+                RouteToQs0 = rabbit_exchange:route(DLX, Msg),
+                {Cycles, RouteToQs1} = rabbit_dead_letter:detect_cycles(
+                                         Reason, Msg, RouteToQs0),
+                State1 = log_cycles(Cycles, [RKey], State0),
+                RouteToQs2 = rabbit_amqqueue:lookup_many(RouteToQs1),
+                RouteToQs = rabbit_amqqueue:prepend_extra_bcc(RouteToQs2),
+                State2 = case RouteToQs of
+                             [] ->
+                                 log_no_route_once(State1);
+                             _ ->
+                                 State1
+                         end,
+                {RouteToQs, State2}
+        end,
+    Pend0 = #pending{consumed_msg_id = ConsumedMsgId,
+                     consumed_at = Now,
+                     delivery = Msg,
+                     reason = Reason,
+                     original_routing_keys = OriginalRoutingKeys},
     case TargetQs of
         [] ->
             %% We can't deliver this message since there is no target queue we can route to.
@@ -350,26 +368,29 @@ forward(ConsumedMsg, ConsumedMsgId, ConsumedQRef, DLX, Reason,
                                  unsettled = queue_names(TargetQs)},
             State = State3#state{next_out_seq = OutSeq + 1,
                                  pendings = maps:put(OutSeq, Pend, Pendings)},
-            deliver_to_queues(Delivery, TargetQs, State)
+            Options = #{correlation => OutSeq},
+            deliver_to_queues(Msg, Options, TargetQs, State)
     end.
 
--spec deliver_to_queues(rabbit_types:delivery(), [amqqueue:amqqueue()], state()) ->
-    state().
-deliver_to_queues(#delivery{msg_seq_no = SeqNo} = Delivery, Qs, #state{queue_type_state = QTypeState0,
-                                                                       pendings = Pendings} = State0) ->
-    {State, Actions} = case rabbit_queue_type:deliver(Qs, Delivery, QTypeState0) of
-                           {ok, QTypeState, Actions0} ->
-                               {State0#state{queue_type_state = QTypeState}, Actions0};
-                           {error, Reason} ->
-                               %% rabbit_queue_type:deliver/3 does not tell us which target queue failed.
-                               %% Therefore, reject all target queues. We need to reject them such that
-                               %% we won't rely on rabbit_fifo_client to re-deliver on behalf of us
-                               %% (and therefore preventing messages to get stuck in our 'unsettled' state).
-                               QNames = queue_names(Qs),
-                               rabbit_log:debug("Failed to deliver message with seq_no ~b to queues ~tp: ~tp",
-                                                [SeqNo, QNames, Reason]),
-                               {State0#state{pendings = rejected(SeqNo, QNames, Pendings)}, []}
-                       end,
+deliver_to_queues(Msg, Options, Qs, #state{queue_type_state = QTypeState0,
+                                           pendings = Pendings} = State0) ->
+
+    SeqNo = maps:get(correlation, Options),
+    {State, Actions} =
+        case rabbit_queue_type:deliver(Qs, Msg, Options, QTypeState0) of
+            {ok, QTypeState, Actions0} ->
+                {State0#state{queue_type_state = QTypeState}, Actions0};
+            {error, Reason} ->
+                %% rabbit_queue_type:deliver/3 does not tell us which target queue failed.
+                %% Therefore, reject all target queues. We need to reject them such that
+                %% we won't rely on rabbit_fifo_client to re-deliver on behalf of us
+                %% (and therefore preventing messages to get stuck in our 'unsettled' state).
+                QNames = queue_names(Qs),
+                rabbit_log:debug("Failed to deliver message with seq_no ~b to "
+                                 "queues ~tp: ~tp",
+                                 [SeqNo, QNames, Reason]),
+                {State0#state{pendings = rejected(SeqNo, QNames, Pendings)}, []}
+        end,
     handle_queue_actions(Actions, State).
 
 handle_settled(QRef, MsgSeqs, State) ->
@@ -440,22 +461,21 @@ redeliver_messages(#state{pendings = Pendings,
                       end, State, Pendings)
     end.
 
-redeliver(#pending{delivery = #delivery{message = #basic_message{content = Content}}} = Pend,
-          DLX, OutSeq, #state{routing_key = undefined} = State) ->
+redeliver(#pending{original_routing_keys = RKeys} = Pend,
+          DLX,
+          OutSeq,
+          #state{routing_key = undefined} = State) ->
     %% No dead-letter-routing-key defined for source quorum queue.
     %% Therefore use all of messages's original routing keys (which can include CC and BCC recipients).
     %% This complies with the behaviour of the rabbit_dead_letter module.
-    %% We stored these original routing keys in the 1st (i.e. most recent) x-death entry.
-    #content{properties = #'P_basic'{headers = Headers}} =
-    rabbit_binary_parser:ensure_content_decoded(Content),
-    {array, [{table, MostRecentDeath}|_]} = rabbit_misc:table_lookup(Headers, <<"x-death">>),
-    {<<"routing-keys">>, array, Routes0} = lists:keyfind(<<"routing-keys">>, 1, MostRecentDeath),
-    Routes = [Route || {longstr, Route} <- Routes0],
-    redeliver0(Pend, DLX, Routes, OutSeq, State);
-redeliver(Pend, DLX, OutSeq, #state{routing_key = DLRKey} = State) ->
+    redeliver0(Pend, DLX, RKeys, OutSeq, State);
+redeliver(Pend,
+          DLX,
+          OutSeq,
+          #state{routing_key = DLRKey} = State) ->
     redeliver0(Pend, DLX, [DLRKey], OutSeq, State).
 
-redeliver0(#pending{delivery = #delivery{message = BasicMsg} = Delivery0,
+redeliver0(#pending{delivery = Msg0,
                     unsettled = Unsettled0,
                     settled = Settled,
                     publish_count = PublishCount,
@@ -467,14 +487,16 @@ redeliver0(#pending{delivery = #delivery{message = BasicMsg} = Delivery0,
                   exchange_ref = DLXRef,
                   queue_type_state = QTypeState} = State0)
   when is_list(DLRKeys) ->
-    Delivery = Delivery0#delivery{message = BasicMsg#basic_message{exchange_name = DLXRef,
-                                                                   routing_keys  = DLRKeys}},
+    #resource{name = DLXName} = DLXRef,
+    Msg1 = mc:set_ttl(undefined, Msg0),
+    Msg2 = mc:set_annotation(?ANN_ROUTING_KEYS, DLRKeys, Msg1),
+    Msg = mc:set_annotation(?ANN_EXCHANGE, DLXName, Msg2),
     %% Because of implicit default bindings rabbit_exchange:route/2 can route to target
     %% queues that do not exist. Therefore, filter out non-existent target queues.
     RouteToQs0 = queue_names(
                    rabbit_amqqueue:prepend_extra_bcc(
                      rabbit_amqqueue:lookup_many(
-                       rabbit_exchange:route(DLX, Delivery)))),
+                       rabbit_exchange:route(DLX, Msg)))),
     case {RouteToQs0, Settled} of
         {[], [_|_]} ->
             %% Routes changed dynamically so that we don't await any publisher confirms anymore.
@@ -490,7 +512,7 @@ redeliver0(#pending{delivery = #delivery{message = BasicMsg} = Delivery0,
             %% Note that a quorum queue client does not redeliver on our behalf if it previously
             %% rejected the message. This is why we always redeliver rejected messages here.
             RouteToQs1 = Unsettled -- clients_redeliver(Unsettled0, QTypeState),
-            {RouteToQs, Cycles} = rabbit_dead_letter:detect_cycles(Reason, BasicMsg, RouteToQs1),
+            {Cycles, RouteToQs} = rabbit_dead_letter:detect_cycles(Reason, Msg, RouteToQs1),
             State1 = log_cycles(Cycles, DLRKeys, State0),
             case RouteToQs of
                 [] ->
@@ -498,14 +520,15 @@ redeliver0(#pending{delivery = #delivery{message = BasicMsg} = Delivery0,
                 _ ->
                     Pend = Pend0#pending{publish_count = PublishCount + 1,
                                          last_published_at = os:system_time(millisecond),
-                                         delivery = Delivery,
+                                         delivery = Msg,
                                          %% Override 'unsettled' because topology could have changed.
                                          unsettled = Unsettled,
                                          %% Any target queue that rejected previously and still need
                                          %% to be routed to is moved back to 'unsettled'.
                                          rejected = []},
                     State = State0#state{pendings = maps:update(OutSeq, Pend, Pendings)},
-                    deliver_to_queues(Delivery, rabbit_amqqueue:lookup_many(RouteToQs), State)
+                    Options = #{correlation => OutSeq},
+                    deliver_to_queues(Msg, Options, rabbit_amqqueue:lookup_many(RouteToQs), State)
             end
     end.
 
@@ -558,35 +581,37 @@ queue_names(Qs)
   when is_list(Qs) ->
     lists:map(fun amqqueue:get_name/1, Qs).
 
-format_status(_Opt, [_PDict, #state{
-                                queue_ref = QueueRef,
-                                exchange_ref = ExchangeRef,
-                                routing_key = RoutingKey,
-                                dlx_client_state = DlxClientState,
-                                queue_type_state = QueueTypeState,
-                                pendings = Pendings,
-                                settled_ids = SettledIds,
-                                next_out_seq = NextOutSeq,
-                                settle_timeout = SettleTimeout,
-                                timer = Timer,
-                                logged = Logged
-                               }]) ->
-    S = #{queue_ref => QueueRef,
-          exchange_ref => ExchangeRef,
-          routing_key => RoutingKey,
-          dlx_client_state => rabbit_fifo_dlx_client:overview(DlxClientState),
-          queue_type_state => QueueTypeState,
-          pendings => maps:map(fun(_, P) -> format_pending(P) end, Pendings),
-          settled_ids => SettledIds,
-          next_out_seq => NextOutSeq,
-          settle_timeout => SettleTimeout,
-          timer_is_active => Timer =/= undefined,
-          logged => Logged},
-    [{data, [{"State", S}]}].
+format_status(#{state := #state{
+                            queue_ref = QueueRef,
+                            exchange_ref = ExchangeRef,
+                            routing_key = RoutingKey,
+                            dlx_client_state = DlxClientState,
+                            queue_type_state = QueueTypeState,
+                            pendings = Pendings,
+                            settled_ids = SettledIds,
+                            next_out_seq = NextOutSeq,
+                            settle_timeout = SettleTimeout,
+                            timer = Timer,
+                            logged = Logged
+                           }} = Status) ->
+    Status#{state :=
+             #{queue_ref => QueueRef,
+               exchange_ref => ExchangeRef,
+               routing_key => RoutingKey,
+               dlx_client_state => rabbit_fifo_dlx_client:overview(DlxClientState),
+               queue_type_state => QueueTypeState,
+               pendings => maps:map(fun(_, P) -> format_pending(P) end, Pendings),
+               settled_ids => SettledIds,
+               next_out_seq => NextOutSeq,
+               settle_timeout => SettleTimeout,
+               timer_is_active => Timer =/= undefined,
+               logged => Logged}
+           }.
 
 format_pending(#pending{consumed_msg_id = ConsumedMsgId,
                         delivery = _DoNotLogLargeBinary,
                         reason = Reason,
+                        original_routing_keys = OriginalRoutingKeys,
                         unsettled = Unsettled,
                         rejected = Rejected,
                         settled = Settled,
@@ -595,6 +620,7 @@ format_pending(#pending{consumed_msg_id = ConsumedMsgId,
                         consumed_at = ConsumedAt}) ->
     #{consumed_msg_id => ConsumedMsgId,
       reason => Reason,
+      original_routing_keys => OriginalRoutingKeys,
       unsettled => Unsettled,
       rejected => Rejected,
       settled => Settled,

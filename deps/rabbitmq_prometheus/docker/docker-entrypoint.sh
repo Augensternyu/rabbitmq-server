@@ -55,7 +55,6 @@ rabbitConfigKeys=(
 	default_pass
 	default_user
 	default_vhost
-	hipe_compile
 	vm_memory_high_watermark
 )
 fileConfigKeys=(
@@ -267,7 +266,7 @@ rabbit_env_config() {
 		local val="${!var:-}"
 		local rawVal="$val"
 		case "$conf" in
-			fail_if_no_peer_cert|hipe_compile)
+			fail_if_no_peer_cert)
 				case "${val,,}" in
 					false|no|0|'') rawVal='false' ;;
 					true|yes|1|*) rawVal='true' ;;
@@ -395,7 +394,7 @@ if [ "$haveSslConfig" ] && [ -f "$combinedSsl" ]; then
 	# More ENV vars for make clustering happiness
 	# we don't handle clustering in this script, but these args should ensure
 	# clustered SSL-enabled members will talk nicely
-	export ERL_SSL_PATH="$(erl -eval 'io:format("~p", [code:lib_dir(ssl, ebin)]),halt().' -noshell)"
+	export ERL_SSL_PATH="$(erl -eval 'io:format("~p", [filename:join(code:lib_dir(ssl), "ebin")]),halt().' -noshell)"
 	sslErlArgs="-pa $ERL_SSL_PATH -proto_dist inet_tls -ssl_dist_opt server_certfile $combinedSsl -ssl_dist_opt server_secure_renegotiate true client_secure_renegotiate true"
 	export RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS="${RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS:-} $sslErlArgs"
 	export RABBITMQ_CTL_ERL_ARGS="${RABBITMQ_CTL_ERL_ARGS:-} $sslErlArgs"

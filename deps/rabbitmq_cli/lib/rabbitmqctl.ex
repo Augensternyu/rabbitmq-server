@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule RabbitMQCtl do
   alias RabbitMQ.CLI.Core.{
@@ -26,10 +26,18 @@ defmodule RabbitMQCtl do
 
   @spec main(list()) :: no_return()
   def main(["--auto-complete" | []]) do
+    # silence Erlang/OTP's standard library warnings, it's acceptable for CLI tools,
+    # see rabbitmq/rabbitmq-server#8912
+    _ = :logger.set_primary_config(:level, :error)
+
     handle_shutdown(:ok)
   end
 
   def main(unparsed_command) do
+    # silence Erlang/OTP's standard library warnings, it's acceptable for CLI tools,
+    # see rabbitmq/rabbitmq-server#8912
+    _ = :logger.set_primary_config(:level, :error)
+
     exec_command(unparsed_command, &process_output/3)
     |> handle_shutdown
   end
@@ -393,6 +401,9 @@ defmodule RabbitMQCtl do
   defp format_validation_error(:unsupported_formatter),
     do: "the requested formatter is not supported by this command"
 
+  defp format_validation_error({:not_a_cluster_member, potential_member}),
+    do: "node #{potential_member} is not a member of the cluster"
+
   defp format_validation_error(err), do: inspect(err)
 
   @spec exit_program(integer()) :: no_return()
@@ -463,6 +474,21 @@ defmodule RabbitMQCtl do
 
   defp format_error({:error, {:no_such_vhost, vhost} = result}, _opts, _) do
     {:error, ExitCodes.exit_code_for(result), "Virtual host '#{vhost}' does not exist"}
+  end
+
+  defp format_error({:error, {:not_found, vhost, name} = result}, _opts, _) do
+    {:error, ExitCodes.exit_code_for(result),
+     "Object (queue, stream, exchange, etc) '#{name}' was not found in virtual host '#{vhost}'"}
+  end
+
+  defp format_error({:error, {:not_found, object_type, vhost, name} = result}, _opts, _) do
+    {:error, ExitCodes.exit_code_for(result),
+     "#{object_type} '#{name}' was not found in virtual host '#{vhost}'"}
+  end
+
+  defp format_error({:error, :not_found = result}, _opts, _) do
+    {:error, ExitCodes.exit_code_for(result),
+     "Object (queue, stream, exchange, etc) was not found"}
   end
 
   defp format_error(
@@ -610,7 +636,7 @@ defmodule RabbitMQCtl do
   ## {:fun, fun} - run a custom function to enable distribution.
   ## custom mode is usefult for commands which should have specific node name.
   ## Runs code if distribution is successful, or not needed.
-  @spec maybe_with_distribution(module(), options(), (() -> command_result())) :: command_result()
+  @spec maybe_with_distribution(module(), options(), (-> command_result())) :: command_result()
   defp maybe_with_distribution(command, options, code) do
     try do
       maybe_with_distribution_without_catch(command, options, code)

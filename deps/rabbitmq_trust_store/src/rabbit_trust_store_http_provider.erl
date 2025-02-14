@@ -2,12 +2,10 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_trust_store_http_provider).
-
--include_lib("public_key/include/public_key.hrl").
 
 -behaviour(rabbit_trust_store_certificate_provider).
 
@@ -67,8 +65,8 @@ join_url(BaseUrl, CertPath)  ->
     string:strip(rabbit_data_coercion:to_list(CertPath), left, $/).
 
 init(Config) ->
-    inets:start(httpc, [{profile, ?PROFILE}]),
-    _ = application:ensure_all_started(ssl),
+    _ = inets:start(httpc, [{profile, ?PROFILE}]),
+    {ok, _} = application:ensure_all_started(ssl),
     Options = proplists:get_value(proxy_options, Config, []),
     httpc:set_options(Options, ?PROFILE).
 

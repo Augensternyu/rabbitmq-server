@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 defmodule ForceBootCommandTest do
   use ExUnit.Case, async: false
@@ -37,14 +37,22 @@ defmodule ForceBootCommandTest do
   end
 
   test "run: sets a force boot marker file on target node", context do
-    stop_rabbitmq_app()
-    on_exit(fn -> start_rabbitmq_app() end)
-    assert @command.run([], context[:opts]) == :ok
-    data_dir = :rpc.call(get_rabbit_hostname(), :rabbit, :data_dir, [])
+    node = get_rabbit_hostname()
 
-    path = Path.join(data_dir, "force_load")
-    assert File.exists?(path)
-    File.rm(path)
+    case :rabbit_misc.rpc_call(node, :rabbit_khepri, :is_enabled, []) do
+      true ->
+        :ok
+
+      false ->
+        stop_rabbitmq_app()
+        on_exit(fn -> start_rabbitmq_app() end)
+        assert @command.run([], context[:opts]) == :ok
+        data_dir = :rpc.call(node, :rabbit, :data_dir, [])
+
+        path = Path.join(data_dir, "force_load")
+        assert File.exists?(path)
+        File.rm(path)
+    end
   end
 
   test "run: if RABBITMQ_MNESIA_DIR is defined, creates a force boot marker file" do

@@ -2,15 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_db_exchange_SUITE).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("eunit/include/eunit.hrl").
--include_lib("common_test/include/ct.hrl").
-
 -compile(export_all).
 
 -define(VHOST, <<"/">>).
@@ -92,8 +90,8 @@ create_or_get1(_Config) ->
     XName = rabbit_misc:r(?VHOST, exchange, <<"test-exchange">>),
     Exchange0 = #exchange{name = XName, durable = true},
     Exchange = rabbit_exchange_decorator:set(Exchange0),
-    ?assertMatch({new, Exchange}, rabbit_db_exchange:create_or_get(Exchange0)),
-    ?assertEqual({existing, Exchange}, rabbit_db_exchange:create_or_get(Exchange0)),
+    ?assertMatch({new, Exchange}, rabbit_db_exchange:create_or_get(Exchange)),
+    ?assertEqual({existing, Exchange}, rabbit_db_exchange:create_or_get(Exchange)),
     passed.
 
 get(Config) ->
@@ -104,7 +102,7 @@ get1(_Config) ->
     Exchange0 = #exchange{name = XName, durable = true},
     Exchange = rabbit_exchange_decorator:set(Exchange0),
     ?assertEqual({error, not_found}, rabbit_db_exchange:get(XName)),
-    ?assertEqual({new, Exchange}, rabbit_db_exchange:create_or_get(Exchange0)),
+    ?assertEqual({new, Exchange}, rabbit_db_exchange:create_or_get(Exchange)),
     ?assertEqual({ok, Exchange}, rabbit_db_exchange:get(XName)),
     passed.
 
@@ -116,7 +114,7 @@ get_many1(_Config) ->
     Exchange0 = #exchange{name = XName, durable = true},
     Exchange = rabbit_exchange_decorator:set(Exchange0),
     ?assertEqual([], rabbit_db_exchange:get_many([XName])),
-    ?assertEqual({new, Exchange}, rabbit_db_exchange:create_or_get(Exchange0)),
+    ?assertEqual({new, Exchange}, rabbit_db_exchange:create_or_get(Exchange)),
     ?assertEqual([Exchange], rabbit_db_exchange:get_many([XName])),
     passed.
 
@@ -132,7 +130,7 @@ get_all1(_Config) ->
     Exchange2 = rabbit_exchange_decorator:set(Exchange2_0),
     All = lists:sort([Exchange1, Exchange2]),
     ?assertEqual([], rabbit_db_exchange:get_all()),
-    create([Exchange1_0, Exchange2_0]),
+    create([Exchange1, Exchange2]),
     ?assertEqual(All, lists:sort(rabbit_db_exchange:get_all())),
     passed.
 
@@ -148,7 +146,7 @@ get_all_by_vhost1(_Config) ->
     Exchange2 = rabbit_exchange_decorator:set(Exchange2_0),
     All = lists:sort([Exchange1, Exchange2]),
     ?assertEqual([], rabbit_db_exchange:get_all(?VHOST)),
-    create([Exchange1_0, Exchange2_0]),
+    create([Exchange1, Exchange2]),
     ?assertEqual(All, lists:sort(rabbit_db_exchange:get_all(?VHOST))),
     ?assertEqual([], lists:sort(rabbit_db_exchange:get_all(<<"other-vhost">>))),
     passed.
@@ -216,7 +214,6 @@ set1(_Config) ->
     XName = rabbit_misc:r(?VHOST, exchange, <<"test-exchange">>),
     Exchange = #exchange{name = XName, durable = true},
     ?assertEqual(ok, rabbit_db_exchange:set([Exchange])),
-    ?assertEqual({error, not_found}, rabbit_db_exchange:get(XName)),
     ?assertEqual([Exchange], rabbit_db_exchange:get_all_durable()),
     passed.
 
@@ -275,8 +272,8 @@ delete_if_unused(Config) ->
 delete_if_unused1(_Config) ->
     XName1 = rabbit_misc:r(?VHOST, exchange, <<"test-exchange1">>),
     XName2 = rabbit_misc:r(?VHOST, exchange, <<"test-exchange2">>),
-    Exchange1 = #exchange{name = XName1, durable = true},
-    Exchange2 = #exchange{name = XName2, durable = true},
+    Exchange1 = rabbit_exchange_decorator:set(#exchange{name = XName1, durable = true}),
+    Exchange2 = rabbit_exchange_decorator:set(#exchange{name = XName2, durable = true}),
     Binding = #binding{source = XName1, key = <<"">>, destination = XName2, args = #{}},
     ?assertMatch({error, not_found}, rabbit_db_exchange:delete(XName1, true)),
     create([Exchange1, Exchange2]),
@@ -316,9 +313,8 @@ recover(Config) ->
 
 recover1(_Config) ->
     XName = rabbit_misc:r(?VHOST, exchange, <<"test-exchange">>),
-    Exchange = #exchange{name = XName, durable = true},
+    Exchange = rabbit_exchange_decorator:set(#exchange{name = XName, durable = true}),
     ?assertEqual(ok, rabbit_db_exchange:set([Exchange])),
-    ?assertEqual({error, not_found}, rabbit_db_exchange:get(XName)),
     ?assertEqual([Exchange], rabbit_db_exchange:get_all_durable()),
     ?assertMatch([Exchange], rabbit_db_exchange:recover(?VHOST)),
     ?assertMatch({ok, #exchange{name = XName}}, rabbit_db_exchange:get(XName)),

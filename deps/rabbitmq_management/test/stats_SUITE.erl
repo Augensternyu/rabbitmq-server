@@ -2,12 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2016-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(stats_SUITE).
 
 -include_lib("proper/include/proper.hrl").
+-include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
 
 -compile(export_all).
@@ -175,4 +176,4 @@ format_range_constant(_Config) ->
                                          SamplesFun),
     5 = proplists:get_value(publish, Got),
     PD = proplists:get_value(publish_details, Got),
-    0.0 = proplists:get_value(rate, PD).
+    ?assertEqual(0.0, proplists:get_value(rate, PD)).

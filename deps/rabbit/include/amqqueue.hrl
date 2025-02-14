@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -include("amqqueue_v2.hrl").
@@ -40,6 +40,9 @@
 
 -define(amqqueue_is_stream(Q),
         ?amqqueue_type_is(Q, rabbit_stream_queue)).
+
+-define(amqqueue_is_mqtt_qos0(Q),
+    ?amqqueue_type_is(Q, rabbit_mqtt_qos0_queue)).
 
 -define(amqqueue_type_is(Q, Type),
         (?is_amqqueue_v2(Q) andalso

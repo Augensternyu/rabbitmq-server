@@ -2,13 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2011-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_plugins).
 -include_lib("rabbit_common/include/rabbit.hrl").
--include_lib("stdlib/include/zip.hrl").
-
 -export([setup/0, active/0, read_enabled/1, list/1, list/2, dependencies/3, running_plugins/0]).
 -export([ensure/1]).
 -export([validate_plugins/1, format_invalid_plugins/1]).
@@ -267,7 +265,7 @@ prepare_plugins(Enabled) ->
                                       [ExpandDir, E2]}})
     end,
     [prepare_plugin(Plugin, ExpandDir) || Plugin <- ValidPlugins],
-    Wanted.
+    [P#plugin.name || P <- ValidPlugins].
 
 maybe_warn_about_invalid_plugins([]) ->
     ok;

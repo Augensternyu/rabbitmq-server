@@ -2,12 +2,11 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_channel_interceptor).
 
--include_lib("rabbit_common/include/rabbit_framing.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -export([init/1, intercept_in/3]).
@@ -19,8 +18,8 @@
 -type(method_name() :: rabbit_framing:amqp_method_name()).
 -type(original_method() :: rabbit_framing:amqp_method_record()).
 -type(processed_method() :: rabbit_framing:amqp_method_record()).
--type(original_content() :: rabbit_types:maybe(rabbit_types:content())).
--type(processed_content() :: rabbit_types:maybe(rabbit_types:content())).
+-type(original_content() :: rabbit_types:'maybe'(rabbit_types:content())).
+-type(processed_content() :: rabbit_types:'maybe'(rabbit_types:content())).
 -type(interceptor_state() :: term()).
 
 -callback description() -> [proplists:property()].
@@ -72,7 +71,9 @@ call_module(Mod, St, M, C) ->
     % this little dance is because Mod might be unloaded at any point
     case (catch {ok, Mod:intercept(M, C, St)}) of
         {ok, R} -> validate_response(Mod, M, C, R);
-        {'EXIT', {undef, [{Mod, intercept, _, _} | _]}} -> {M, C}
+        {'EXIT', {undef, [{Mod, intercept, _, _} | _]}} -> {M, C};
+        {'EXIT', {amqp_error, _Type, _ErrMsg, _} = AMQPError} ->
+            rabbit_misc:protocol_error(AMQPError)
     end.
 
 validate_response(Mod, M1, C1, R = {M2, C2}) ->

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @type close_reason(Type) = {shutdown, amqp_reason(Type)}.
@@ -65,7 +65,8 @@
 -export([error_atom/1]).
 -export([info/2, info_keys/1, info_keys/0]).
 -export([connection_name/1, update_secret/3]).
--export([socket_adapter_info/2]).
+-export([socket_adapter_info/2,
+         socket_adapter_info/3]).
 
 -define(DEFAULT_CONSUMER, {amqp_selective_consumer, []}).
 
@@ -87,8 +88,10 @@
 %% <li>node :: atom() - The node the broker runs on (direct only)</li>
 %% <li>adapter_info :: amqp_adapter_info() - Extra management information for if
 %%     this connection represents a non-AMQP network connection.</li>
-%% <li>client_properties :: [{binary(), atom(), binary()}] - A list of extra
-%%     client properties to be sent to the server, defaults to []</li>
+%% <li>client_properties :: [{binary(), atom(), binary()}]
+%%                          | #{binary() => binary()}
+%%     - A list (or a map) of extra client properties to be sent to the server,
+%%      defaults to []</li>
 %% </ul>
 %%
 %% @type amqp_params_network() = #amqp_params_network{}.
@@ -115,8 +118,10 @@
 %%     defaults to 30000 (network only)</li>
 %% <li>ssl_options :: term() - The second parameter to be used with the
 %%     ssl:connect/2 function, defaults to 'none' (network only)</li>
-%% <li>client_properties :: [{binary(), atom(), binary()}] - A list of extra
-%%     client properties to be sent to the server, defaults to []</li>
+%% <li>client_properties :: [{binary(), atom(), binary()}]
+%%                          | #{binary() => binary()}
+%%     - A list (or a map) of extra client properties to be sent to the server,
+%%      defaults to []</li>
 %% <li>socket_options :: [any()] - Extra socket options.  These are
 %%     appended to the default options.  See
 %%     <a href="https://www.erlang.org/doc/man/inet.html#setopts-2">inet:setopts/2</a>
@@ -154,10 +159,12 @@ start(AmqpParams, ConnName) when ConnName == undefined; is_binary(ConnName) ->
     ensure_started(),
     AmqpParams0 =
         case AmqpParams of
-            #amqp_params_direct{password = Password} ->
-                AmqpParams#amqp_params_direct{password = credentials_obfuscation:encrypt(Password)};
-            #amqp_params_network{password = Password} ->
-                AmqpParams#amqp_params_network{password = credentials_obfuscation:encrypt(Password)}
+            #amqp_params_direct{password = Password, client_properties = Props} ->
+                AmqpParams#amqp_params_direct{password          = credentials_obfuscation:encrypt(Password),
+                                              client_properties = rabbit_data_coercion:to_proplist(Props)};
+            #amqp_params_network{password = Password, client_properties = Props} ->
+                AmqpParams#amqp_params_network{password          = credentials_obfuscation:encrypt(Password),
+                                               client_properties = rabbit_data_coercion:to_proplist(Props)}
         end,
     AmqpParams1 =
         case AmqpParams0 of
@@ -379,7 +386,12 @@ info_keys() ->
 %% @doc Takes a socket and a protocol, returns an #amqp_adapter_info{}
 %% based on the socket for the protocol given.
 socket_adapter_info(Sock, Protocol) ->
-    amqp_direct_connection:socket_adapter_info(Sock, Protocol).
+    socket_adapter_info(Sock, Protocol, undefined).
+
+%% @doc Takes a socket and a protocol, returns an #amqp_adapter_info{}
+%% based on the socket for the protocol given.
+socket_adapter_info(Sock, Protocol, UniqueId) ->
+    amqp_direct_connection:socket_adapter_info(Sock, Protocol, UniqueId).
 
 %% @spec (ConnectionPid) -> ConnectionName
 %% where

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% An HTTP API counterpart of 'rabbitmq-diagnostics check_certificate_expiration'
@@ -50,7 +50,7 @@ to_json(ReqData, Context) ->
                                             end, [], Local),
             case ExpiringListeners of
                 [] ->
-                    rabbit_mgmt_util:reply([{status, ok}], ReqData, Context);
+                    rabbit_mgmt_util:reply(#{status => ok}, ReqData, Context);
                 _ ->
                     Msg = <<"Certificates expiring">>,
                     failure(Msg, ExpiringListeners, ReqData, Context)
@@ -58,10 +58,12 @@ to_json(ReqData, Context) ->
     end.
 
 failure(Message, Listeners, ReqData, Context) ->
-    {Response, ReqData1, Context1} = rabbit_mgmt_util:reply([{status, failed},
-                                                             {reason, Message},
-                                                             {expired, Listeners}],
-                                                            ReqData, Context),
+    Body = #{
+        status  => failed,
+        reason  => Message,
+        expired => Listeners
+    },
+    {Response, ReqData1, Context1} = rabbit_mgmt_util:reply(Body, ReqData, Context),
     {stop, cowboy_req:reply(503, #{}, Response, ReqData1), Context1}.
 
 is_authorized(ReqData, Context) ->
@@ -81,7 +83,7 @@ convert(Time, Unit) ->
             {error, "Invalid expiration value."};
         invalid_unit ->
             {error, "Time unit not recognised. Supported units: days, weeks, months, years."}
-    end. 
+    end.
 
 do_convert(Time, "days") ->
     Time * ?DAYS_SECONDS;
@@ -159,7 +161,7 @@ cert_validity(Cert) ->
                       {error, io_lib:format("The certificate file provided contains a ~tp entry",
                                             [Type])}
               end, DsaEntries)
-    end.                      
+    end.
 
 expired(undefined, _ExpiryDate) ->
     [];

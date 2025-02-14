@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_nodes).
@@ -15,7 +15,7 @@
          is_running/2, is_process_running/2,
          cluster_name/0, set_cluster_name/1, set_cluster_name/2, ensure_epmd/0,
          all_running/0,
-         is_member/1, list_members/0,
+         is_member/1, list_members/0, list_consistent_members/0,
          filter_members/1,
          is_reachable/1, list_reachable/0, list_unreachable/0,
          filter_reachable/1, filter_unreachable/1,
@@ -30,11 +30,11 @@
 -export([all/0, all_running_with_hashes/0, target_cluster_size_hint/0, reached_target_cluster_size/0,
          if_reached_target_cluster_size/2]).
 -export([lock_id/1, lock_retries/0]).
+-export([me_in_nodes/1, nodes_incl_me/1, nodes_excl_me/1]).
 
 -deprecated({all, 0, "Use rabbit_nodes:list_members/0 instead"}).
 -deprecated({all_running, 0, "Use rabbit_nodes:list_running/0 instead"}).
 
--include_lib("kernel/include/inet.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
 -define(SAMPLING_INTERVAL, 1000).
@@ -182,6 +182,14 @@ is_member(Node) when is_atom(Node) ->
 list_members() ->
     rabbit_db_cluster:members().
 
+-spec list_consistent_members() -> Nodes when
+      Nodes :: [node()].
+%% @doc Returns the list of nodes in the cluster as reported by the leader.
+%%
+
+list_consistent_members() ->
+    rabbit_db_cluster:consistent_members().
+
 -spec filter_members(Nodes) -> Nodes when
       Nodes :: [node()].
 %% @doc Filters the given list of nodes to only select those belonging to the
@@ -216,7 +224,7 @@ is_reachable(Node) when is_atom(Node) ->
 
 list_reachable() ->
     Members = list_members(),
-    filter_reachable(Members).
+    do_filter_reachable(Members).
 
 -spec list_unreachable() -> Nodes when
       Nodes :: [node()].
@@ -281,14 +289,16 @@ do_filter_reachable(Members) ->
       Members).
 
 -spec is_running(Node) -> IsRunning when
-      Node :: node(),
+      Node :: node() | [node()],
       IsRunning :: boolean().
 %% @doc Indicates if the given node is running.
 %%
 %% @see filter_running/1.
 
 is_running(Node) when is_atom(Node) ->
-    [Node] =:= filter_running([Node]).
+    [Node] =:= filter_running([Node]);
+is_running(Nodes) when is_list(Nodes) ->
+    lists:sort(Nodes) =:= lists:sort(filter_running(Nodes)).
 
 -spec list_running() -> Nodes when
       Nodes :: [node()].
@@ -302,7 +312,7 @@ is_running(Node) when is_atom(Node) ->
 
 list_running() ->
     Members = list_members(),
-    filter_running(Members).
+    do_filter_running(Members).
 
 -spec list_not_running() -> Nodes when
       Nodes :: [node()].
@@ -363,9 +373,10 @@ filter_not_running(Nodes) ->
 do_filter_running(Members) ->
     %% All clustered members where `rabbit' is running, regardless if they are
     %% under maintenance or not.
+    ReachableMembers = do_filter_reachable(Members),
     Rets = erpc:multicall(
-             Members, rabbit, is_running, [], ?FILTER_RPC_TIMEOUT),
-    RetPerMember = lists:zip(Members, Rets),
+             ReachableMembers, rabbit, is_running, [], ?FILTER_RPC_TIMEOUT),
+    RetPerMember = lists:zip(ReachableMembers, Rets),
     lists:filtermap(
       fun
           ({Member, {ok, true}}) ->
@@ -402,7 +413,7 @@ is_serving(Node) when is_atom(Node) ->
 
 list_serving() ->
     Members = list_members(),
-    filter_serving(Members).
+    do_filter_serving(Members).
 
 -spec list_not_serving() -> Nodes when
       Nodes :: [node()].
@@ -580,6 +591,11 @@ lock_id(Node) ->
 lock_retries() ->
     cluster_formation_key_or_default(internal_lock_retries, ?DEFAULT_LOCK_RETRIES).
 
+me_in_nodes(Nodes) -> lists:member(node(), Nodes).
+
+nodes_incl_me(Nodes) -> lists:usort([node()|Nodes]).
+
+nodes_excl_me(Nodes) -> Nodes -- [node()].
 
 %%
 %% Implementation

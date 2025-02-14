@@ -2,31 +2,24 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_upgrade_preparation).
 
 -export([await_online_quorum_plus_one/1,
-         await_online_synchronised_mirrors/1,
          list_with_minimum_quorum_for_cli/0]).
 
--include_lib("rabbit_common/include/rabbit.hrl").
 %%
 %% API
 %%
 
 -define(SAMPLING_INTERVAL, 200).
+-define(LOGGING_FREQUENCY, ?SAMPLING_INTERVAL * 100).
 
 await_online_quorum_plus_one(Timeout) ->
     Iterations = ceil(Timeout / ?SAMPLING_INTERVAL),
     do_await_safe_online_quorum(Iterations).
-
-
-await_online_synchronised_mirrors(Timeout) ->
-    Iterations = ceil(Timeout / ?SAMPLING_INTERVAL),
-    do_await_online_synchronised_mirrors(Iterations).
-
 
 %%
 %% Implementation
@@ -38,7 +31,11 @@ online_members(Component) ->
                                                   erlang, whereis, [Component])).
 
 endangered_critical_components() ->
-    CriticalComponents = [rabbit_stream_coordinator],
+    CriticalComponents = [rabbit_stream_coordinator] ++
+                            case rabbit_feature_flags:is_enabled(khepri_db) of
+                                true -> [rabbitmq_metadata];
+                                false -> []
+                            end,
     Nodes = rabbit_nodes:list_members(),
     lists:filter(fun (Component) ->
                          NumAlive = length(online_members(Component)),
@@ -65,19 +62,23 @@ do_await_safe_online_quorum(IterationsLeft) ->
     case EndangeredQueues =:= [] andalso endangered_critical_components() =:= [] of
         true -> true;
         false ->
+            case IterationsLeft rem ?LOGGING_FREQUENCY of
+                0 ->
+                    case length(EndangeredQueues) of
+                        0 -> ok;
+                        N -> rabbit_log:info("Waiting for ~p queues and streams to have quorum+1 replicas online. "
+                                             "You can list them with `rabbitmq-diagnostics check_if_node_is_quorum_critical`", [N])
+                    end,
+                    case endangered_critical_components() of
+                        [] -> ok;
+                        _ -> rabbit_log:info("Waiting for the following critical components to have quorum+1 replicas online: ~p.",
+                                             [endangered_critical_components()])
+                    end;
+                _ ->
+                    ok
+            end,
             timer:sleep(?SAMPLING_INTERVAL),
             do_await_safe_online_quorum(IterationsLeft - 1)
-    end.
-
-
-do_await_online_synchronised_mirrors(0) ->
-    false;
-do_await_online_synchronised_mirrors(IterationsLeft) ->
-    case rabbit_amqqueue:list_local_mirrored_classic_without_synchronised_mirrors() of
-        []  -> true;
-        List when is_list(List) ->
-            timer:sleep(?SAMPLING_INTERVAL),
-            do_await_online_synchronised_mirrors(IterationsLeft - 1)
     end.
 
 -spec list_with_minimum_quorum_for_cli() -> [#{binary() => term()}].
@@ -85,18 +86,10 @@ list_with_minimum_quorum_for_cli() ->
     EndangeredQueues = lists:append(
                          rabbit_quorum_queue:list_with_minimum_quorum(),
                          rabbit_stream_queue:list_with_minimum_quorum()),
-    [begin
-         #resource{name = Name} = QName = amqqueue:get_name(Q),
-         #{
-           <<"readable_name">> => rabbit_data_coercion:to_binary(rabbit_misc:rs(QName)),
-           <<"name">> => Name,
-           <<"virtual_host">> => amqqueue:get_vhost(Q),
-           <<"type">> => amqqueue:get_type(Q)
-          }
-     end || Q <- EndangeredQueues] ++
+    [amqqueue:to_printable(Q) || Q <- EndangeredQueues] ++
     [#{
            <<"readable_name">> => C,
            <<"name">> => C,
-           <<"virtual_host">> => "-",
+           <<"virtual_host">> => <<"(not applicable)">>,
            <<"type">> => process
       } || C <- endangered_critical_components()].

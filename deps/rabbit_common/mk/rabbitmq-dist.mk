@@ -1,8 +1,8 @@
 .PHONY: dist test-dist do-dist cli-scripts cli-escripts clean-dist
 
-DIST_DIR = plugins
-CLI_SCRIPTS_DIR = sbin
-CLI_ESCRIPTS_DIR = escript
+DIST_DIR ?= $(CURDIR)/plugins
+CLI_SCRIPTS_DIR ?= $(CURDIR)/sbin
+CLI_ESCRIPTS_DIR ?= $(CURDIR)/escript
 MIX = echo y | mix
 
 # Set $(DIST_AS_EZS) to a non-empty value to enable the packaging of
@@ -16,12 +16,6 @@ endif
 dist_verbose_0 = @echo " DIST  " $@;
 dist_verbose_2 = set -x;
 dist_verbose = $(dist_verbose_$(V))
-
-MIX_ARCHIVES ?= $(HOME)/.mix/archives
-
-MIX_TASK_ARCHIVE_DEPS_VERSION = 1.0.0
-MIX_TASK_ARCHIVE_DEPS_SHA512 = 6947124c0848d0584416251fc31335d8c17ecd3dbcf8c4013a9c1f0df7a31d16b790dfc1cb45721624fb77610e31975b6804771fe5268797740002bf54c789b8
-mix_task_archive_deps = $(MIX_ARCHIVES)/mix_task_archive_deps-$(MIX_TASK_ARCHIVE_DEPS_VERSION)
 
 # We take the version of an Erlang application from the .app file. This
 # macro is called like this:
@@ -43,12 +37,6 @@ $(shell awk '
 	print vsn;
 	exit;
 }' $(1))
-endef
-
-define get_mix_project_version
-$(shell cd $(1) && \
-	$(MIX) do deps.get, deps.compile, compile >/dev/null && \
-	$(MIX) run --no-start -e "IO.puts(Mix.Project.config[:version])")
 endef
 
 # Define the target to create an .ez plugin archive for an
@@ -91,40 +79,12 @@ ERLANGMK_DIST_EZS += $$(dist_$(1)_ez)
 
 endef
 
-# Define the target to create an .ez plugin archive for a Mix-based
-# project. This macro is called like this:
-#
-#   $(call do_ez_target_mix,app_name,app_version,app_dir)
-
-define get_mix_project_dep_ezs
-$(shell cd $(1) && \
-	$(MIX) do deps.get, deps.compile, compile >/dev/null && \
-	$(MIX) archive.build.all.list -e -o $(DIST_DIR) --skip "rabbit $(ERLANGMK_DIST_APPS)")
-endef
-
-define do_ez_target_mix
-dist_$(1)_ez_dir = $$(if $(2),$(DIST_DIR)/$(1)-$(2), \
-	$$(if $$(VERSION),$(DIST_DIR)/$(1)-$$(VERSION),$(DIST_DIR)/$(1)))
-dist_$(1)_ez = $$(dist_$(1)_ez_dir).ez
-
-$$(dist_$(1)_ez): APP     = $(1)
-$$(dist_$(1)_ez): VSN     = $(2)
-$$(dist_$(1)_ez): SRC_DIR = $(3)
-$$(dist_$(1)_ez): EZ_DIR  = $$(abspath $$(dist_$(1)_ez_dir))
-$$(dist_$(1)_ez): EZ      = $$(dist_$(1)_ez)
-$$(dist_$(1)_ez): $$(if $$(wildcard _build/dev/lib/$(1)/ebin $(3)/priv),\
-	$$(filter-out %/dep_built,$$(call core_find,$$(wildcard _build/dev/lib/$(1)/ebin $(3)/priv),*)),)
-
-MIX_DIST_EZS += $$(dist_$(1)_ez)
-EXTRA_DIST_EZS += $$(call get_mix_project_dep_ezs,$(3))
-
-endef
-
 # Real entry point: it tests the existence of an .app file to determine
 # if it is an Erlang application (and therefore if it should be provided
 # as an .ez plugin archive) and calls do_ez_target_erlangmk. If instead
-# it finds a Mix configuration file, it calls do_ez_target_mix. It
-# should be called as:
+# it finds a Mix configuration file, it is skipped, as the only elixir
+# applications in the directory are used by rabbitmq_cli and compiled
+# with it.
 #
 #   $(call ez_target,path_to_app)
 
@@ -134,9 +94,7 @@ dist_$(1)_appfile = $$(dist_$(1)_appdir)/ebin/$(1).app
 dist_$(1)_mixfile = $$(dist_$(1)_appdir)/mix.exs
 
 $$(if $$(shell test -f $$(dist_$(1)_appfile) && echo OK), \
-  $$(eval $$(call do_ez_target_erlangmk,$(1),$$(call get_app_version,$$(dist_$(1)_appfile)),$$(dist_$(1)_appdir))), \
-  $$(if $$(shell test -f $$(dist_$(1)_mixfile) && [ "x$(1)" != "xrabbitmqctl" ] && [ "x$(1)" != "xrabbitmq_cli" ] && echo OK), \
-    $$(eval $$(call do_ez_target_mix,$(1),$$(call get_mix_project_version,$$(dist_$(1)_appdir)),$$(dist_$(1)_appdir)))))
+  $$(eval $$(call do_ez_target_erlangmk,$(1),$$(call get_app_version,$$(dist_$(1)_appfile)),$$(dist_$(1)_appdir))))
 
 endef
 
@@ -176,14 +134,10 @@ ZIP_V = $(ZIP_V_$(V))
 $(ERLANGMK_DIST_EZS):
 	$(verbose) rm -rf $(EZ_DIR) $(EZ)
 	$(verbose) mkdir -p $(EZ_DIR)
-	$(dist_verbose) $(RSYNC) -a $(RSYNC_V) \
-		--exclude '/ebin/dep_built' \
-		--exclude '/ebin/test' \
-		--include '/ebin/***' \
-		--include '/include/***' \
-		--include '/priv/***' \
-		--exclude '*' \
-		$(call core_unix_path,$(SRC_DIR))/ $(call core_unix_path,$(EZ_DIR))/
+	$(eval SRC_DIR_UNIX := $(call core_unix_path,$(SRC_DIR)))
+	$(eval EZ_DIR_UNIX := $(call core_unix_path,$(EZ_DIR)))
+	$(dist_verbose) cp -a $(SRC_DIR_UNIX)/ebin $(wildcard $(SRC_DIR_UNIX)/include) $(wildcard $(SRC_DIR_UNIX)/priv) $(EZ_DIR_UNIX)/
+	$(verbose) rm -f $(EZ_DIR_UNIX)/ebin/dep_built $(EZ_DIR_UNIX)/ebin/test
 	@# Give a chance to the application to make any modification it
 	@# wants to the tree before we make an archive.
 ifneq ($(RABBITMQ_COMPONENTS),)
@@ -201,16 +155,6 @@ ifneq ($(DIST_AS_EZS),)
 		< "$(basename $(notdir $@)).manifest")
 	$(verbose) rm -rf $(EZ_DIR) $(EZ_DIR).manifest
 endif
-
-$(MIX_DIST_EZS): $(mix_task_archive_deps)
-	$(verbose) cd $(SRC_DIR) && \
-		$(MIX) do deps.get, deps.compile, compile, archive.build.all \
-		-e -o $(abspath $(DIST_DIR)) --skip "rabbit $(ERLANGMK_DIST_APPS)"
-
-MIX_TASK_ARCHIVE_DEPS_URL = https://github.com/rabbitmq/mix_task_archive_deps/releases/download/$(MIX_TASK_ARCHIVE_DEPS_VERSION)/mix_task_archive_deps-$(MIX_TASK_ARCHIVE_DEPS_VERSION).ez
-
-$(mix_task_archive_deps):
-	$(gen_verbose) mix archive.install --force --sha512 $(MIX_TASK_ARCHIVE_DEPS_SHA512) $(MIX_TASK_ARCHIVE_DEPS_URL)
 
 # We need to recurse because the top-level make instance is evaluated
 # before dependencies are downloaded.
@@ -266,77 +210,35 @@ do-dist:: $(DIST_EZS)
 CLI_SCRIPTS_LOCK = $(CLI_SCRIPTS_DIR).lock
 CLI_ESCRIPTS_LOCK = $(CLI_ESCRIPTS_DIR).lock
 
+ifeq ($(MAKELEVEL),0)
 ifneq ($(filter-out rabbit_common amqp10_common rabbitmq_stream_common,$(PROJECT)),)
-dist:: install-cli
+# These do not depend on 'rabbit' as DEPS but may as TEST_DEPS.
+ifneq ($(filter-out amqp_client amqp10_client rabbitmq_amqp_client rabbitmq_ct_helpers,$(PROJECT)),)
+app:: install-cli
+endif
 test-build:: install-cli
+endif
 endif
 
 install-cli: install-cli-scripts install-cli-escripts
 	@:
 
-ifeq ($(PROJECT),rabbit)
-install-cli-scripts:
-	$(gen_verbose) \
-	if command -v flock >/dev/null; then \
-		flock $(CLI_SCRIPTS_LOCK) \
-		sh -c 'mkdir -p "$(CLI_SCRIPTS_DIR)" && \
-		for file in scripts/*; do \
-			cmp -s "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")" || \
-			cp -a "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")"; \
-		done'; \
-	elif command -v lockf >/dev/null; then \
-		lockf $(CLI_SCRIPTS_LOCK) \
-		sh -c 'mkdir -p "$(CLI_SCRIPTS_DIR)" && \
-		for file in scripts/*; do \
-			cmp -s "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")" || \
-			cp -a "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")"; \
-		done'; \
-	else \
-		mkdir -p "$(CLI_SCRIPTS_DIR)" && \
-		for file in scripts/*; do \
-			cmp -s "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")" || \
-			cp -a "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")"; \
-		done; \
-	fi
-else
-
 install-cli-scripts:
 	$(gen_verbose) \
 	set -e; \
-	if test -d "$(DEPS_DIR)/rabbit/scripts"; then \
-		rabbit_scripts_dir='$(DEPS_DIR)/rabbit/scripts'; \
-	elif test -d "$(DEPS_DIR)/../scripts"; then \
-		rabbit_scripts_dir='$(DEPS_DIR)/../scripts'; \
-	else \
-		echo 'rabbit/scripts directory not found' 1>&2; \
-		exit 1; \
-	fi; \
-	test -d "$$rabbit_scripts_dir"; \
+	test -d "$(DEPS_DIR)/rabbit/scripts"; \
 	if command -v flock >/dev/null; then \
 		flock $(CLI_SCRIPTS_LOCK) \
 		sh -e -c 'mkdir -p "$(CLI_SCRIPTS_DIR)" && \
-		for file in "'$$rabbit_scripts_dir'"/*; do \
-			test -f "$$file"; \
-			cmp -s "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")" || \
-			cp -a "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")"; \
-		done'; \
+			cp -a $(DEPS_DIR)/rabbit/scripts/* $(CLI_SCRIPTS_DIR)/'; \
 	elif command -v lockf >/dev/null; then \
 		lockf $(CLI_SCRIPTS_LOCK) \
 		sh -e -c 'mkdir -p "$(CLI_SCRIPTS_DIR)" && \
-		for file in "'$$rabbit_scripts_dir'"/*; do \
-			test -f "$$file"; \
-			cmp -s "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")" || \
-			cp -a "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")"; \
-		done'; \
+			cp -a $(DEPS_DIR)/rabbit/scripts/* $(CLI_SCRIPTS_DIR)/'; \
 	else \
 		mkdir -p "$(CLI_SCRIPTS_DIR)" && \
-		for file in "$$rabbit_scripts_dir"/*; do \
-			test -f "$$file"; \
-			cmp -s "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")" || \
-			cp -a "$$file" "$(CLI_SCRIPTS_DIR)/$$(basename "$$file")"; \
-		done; \
+			cp -a $(DEPS_DIR)/rabbit/scripts/* $(CLI_SCRIPTS_DIR)/; \
 	fi
-endif
 
 install-cli-escripts:
 	$(gen_verbose) \

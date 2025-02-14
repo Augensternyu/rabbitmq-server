@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @type close_reason(Type) = {shutdown, amqp_reason(Type)}.
@@ -91,7 +91,7 @@
                 waiting_set        = gb_trees:empty(),
                 only_acks_received = true,
 
-                %% true | false, only relevant in the direct
+                %% boolean(), only relevant in the direct
                 %% client case.
                 %% when true, consumers will manually notify
                 %% queue pids using rabbit_amqqueue_common:notify_sent/2
@@ -797,11 +797,6 @@ handle_method_from_server1(#'basic.nack'{} = BasicNack, none,
                            #state{confirm_handler = {CH, _Ref}} = State) ->
     CH ! BasicNack,
     {noreply, update_confirm_set(BasicNack, State)};
-
-handle_method_from_server1(#'basic.credit_drained'{} = CreditDrained, none,
-                           #state{consumer = Consumer} = State) ->
-    Consumer ! CreditDrained,
-    {noreply, State};
 handle_method_from_server1(Method, none, State) ->
     {noreply, rpc_bottom_half(Method, State)};
 handle_method_from_server1(Method, Content, State) ->
@@ -844,7 +839,11 @@ handle_channel_exit(Reason = #amqp_error{name = ErrorName, explanation = Expl},
     handle_shutdown({connection_closing, ReportedReason}, State);
 handle_channel_exit(Reason, State) ->
     %% Unexpected death of a channel infrastructure process
-    {stop, {infrastructure_died, Reason}, State}.
+    Reason1 = case Reason of
+                  {shutdown, R} -> R;
+                  _             -> Reason
+              end,
+    {stop, {infrastructure_died, Reason1}, State}.
 
 handle_shutdown({_, 200, _}, State) ->
     {stop, normal, State};
@@ -877,15 +876,15 @@ do(Method, Content, Flow, #state{driver = direct, writer = W}) ->
 
 
 flush_writer(#state{driver = network, writer = Writer}) ->
-    try
-        rabbit_writer:flush(Writer)
-    catch
-        exit:noproc -> ok
-    end;
+    _ = catch rabbit_writer:flush(Writer),
+    ok;
 flush_writer(#state{driver = direct}) ->
     ok.
 amqp_msg(none) ->
     none;
+amqp_msg({DTag, Content}) ->
+    {Props, Payload} = rabbit_basic_common:from_content(Content),
+    {DTag, #amqp_msg{props = Props, payload = Payload}};
 amqp_msg(Content) ->
     {Props, Payload} = rabbit_basic_common:from_content(Content),
     #amqp_msg{props = Props, payload = Payload}.

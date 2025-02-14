@@ -4,6 +4,8 @@ set -euo pipefail
 GREEN='\033[0;32m'
 NO_COLOR='\033[0m'
 
+export PATH="{ERLANG_HOME}/bin:$PATH"
+
 rmq_realpath() {
     local path=$1
 
@@ -76,8 +78,7 @@ write_config_file() {
       ${rabbitmq_prometheus_fragment}
     ]},
   {ra, [
-      {data_dir, "${RABBITMQ_QUORUM_DIR}"},
-      {wal_sync_method, sync}
+      {data_dir, "${RABBITMQ_QUORUM_DIR}"}
     ]},
   {osiris, [
       {data_dir, "${RABBITMQ_STREAM_DIR}"}
@@ -193,8 +194,6 @@ fi
 
 RABBITMQ_PLUGINS_DIR=${RABBITMQ_PLUGINS_DIR:=${DEFAULT_PLUGINS_DIR}}
 export RABBITMQ_PLUGINS_DIR
-RABBITMQ_SERVER_START_ARGS="${RABBITMQ_SERVER_START_ARGS:=-ra wal_sync_method sync}"
-export RABBITMQ_SERVER_START_ARGS
 
 # Enable colourful debug logging by default
 # To change this, set RABBITMQ_LOG to info, notice, warning etc.
@@ -248,8 +247,9 @@ case $CMD in
             while ps -p "$pid" >/dev/null 2>&1; do sleep 1; done
         ;;
     start-cluster)
-        nodes=${NODES:=3}
-        for ((n=0; n < nodes; n++))
+        start_index=${NODES_START_INDEX:=0}
+        nodes=${NODES:=3}+$start_index
+        for ((n=start_index; n < nodes; n++))
         do
             setup_node_env "$n"
 
@@ -280,8 +280,9 @@ case $CMD in
         done
         ;;
     stop-cluster)
-        nodes=${NODES:=3}
-        for ((n=nodes-1; n >= 0; n--))
+        start_index=${NODES_START_INDEX:=0}
+        nodes=${NODES:=3}+$start_index
+        for ((n=nodes-1; n >= start_index; n--))
         do
             "$RABBITMQCTL" -n "rabbit-$n@$HOSTNAME" stop
         done

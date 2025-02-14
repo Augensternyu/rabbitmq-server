@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% The classic queue store works as follow:
@@ -41,11 +41,6 @@
 %% need to look into the store to discard them. Messages on disk
 %% will be dropped at the same time as the index deletes the
 %% corresponding segment file.
-%%
-%% The file_handle_cache reservations are done by the v2 index
-%% because they are handled at a pid level. Since we are using
-%% up to 2 FDs in this module we make the index reserve 2 extra
-%% FDs.
 
 -module(rabbit_classic_queue_store_v2).
 
@@ -71,7 +66,7 @@
 
 -type buffer() :: #{
     %% SeqId => {Offset, Size, Msg}
-    rabbit_variable_queue:seq_id() => {non_neg_integer(), non_neg_integer(), #basic_message{}}
+                    rabbit_variable_queue:seq_id() => {non_neg_integer(), non_neg_integer(), mc:state()}
 }.
 
 -record(qs, {
@@ -118,7 +113,8 @@ init(#resource{ virtual_host = VHost } = Name) ->
     ?DEBUG("~0p", [Name]),
     VHostDir = rabbit_vhost:msg_store_dir_path(VHost),
     Dir = rabbit_classic_queue_index_v2:queue_dir(VHostDir, Name),
-    #qs{dir = rabbit_file:filename_to_binary(Dir)}.
+    DirBin = rabbit_file:filename_to_binary(Dir),
+    #qs{dir = << DirBin/binary, "/" >>}.
 
 -spec terminate(State) -> State when State::state().
 
@@ -142,7 +138,7 @@ maybe_close_fd(Fd) ->
 info(#qs{ write_buffer = WriteBuffer }) ->
     [{qs_buffer_size, map_size(WriteBuffer)}].
 
--spec write(rabbit_variable_queue:seq_id(), rabbit_types:basic_message(),
+-spec write(rabbit_variable_queue:seq_id(), mc:state(),
             rabbit_types:message_properties(), State)
         -> {msg_location(), State} when State::state().
 
@@ -283,7 +279,7 @@ build_data({_, Size, Msg}, CheckCRC32) ->
     ].
 
 -spec read(rabbit_variable_queue:seq_id(), msg_location(), State)
-        -> {rabbit_types:basic_message(), State} when State::state().
+        -> {mc:state(), State} when State::state().
 
 read(SeqId, DiskLocation, State = #qs{ write_buffer = WriteBuffer,
                                        cache = Cache }) ->
@@ -328,7 +324,7 @@ read_from_disk(SeqId, {?MODULE, Offset, Size}, State0) ->
     {Msg, State}.
 
 -spec read_many([{rabbit_variable_queue:seq_id(), msg_location()}], State)
-        -> {[rabbit_types:basic_message()], State} when State::state().
+        -> {[mc:state()], State} when State::state().
 
 read_many([], State) ->
     {[], State};
@@ -560,16 +556,16 @@ delete_segments(Segments, State0 = #qs{ write_buffer = WriteBuffer0,
 
 segment_entry_count() ->
     %% We use the same value as the index.
-    persistent_term:get({rabbit, classic_queue_index_v2_segment_entry_count}, 4096).
+    persistent_term:get(classic_queue_index_v2_segment_entry_count, 4096).
 
 max_cache_size() ->
-    persistent_term:get({rabbit, classic_queue_store_v2_max_cache_size}, 512000).
+    persistent_term:get(classic_queue_store_v2_max_cache_size, 512000).
 
 check_crc32() ->
-    persistent_term:get({rabbit, classic_queue_store_v2_check_crc32}, true).
+    persistent_term:get(classic_queue_store_v2_check_crc32, true).
 
 %% Same implementation as rabbit_classic_queue_index_v2:segment_file/2,
 %% but with a different state record.
-segment_file(Segment, #qs{ dir = Dir }) ->
-    filename:join(rabbit_file:binary_to_filename(Dir),
-                  integer_to_list(Segment) ++ ?SEGMENT_EXTENSION).
+segment_file(Segment, #qs{dir = Dir}) ->
+    N = integer_to_binary(Segment),
+    <<Dir/binary, N/binary, ?SEGMENT_EXTENSION>>.

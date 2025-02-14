@@ -1,25 +1,23 @@
 PROJECT = rabbitmq_cli
 
 BUILD_DEPS = rabbit_common
-DEPS = csv json observer_cli parallel_stream stdout_formatter
-TEST_DEPS = amqp amqp_client dialyxir temp x509 rabbit
+DEPS = csv json observer_cli stdout_formatter
+TEST_DEPS = amqp amqp_client temp x509 rabbit
 
-dep_amqp = hex 2.1.1
-dep_csv = hex 2.4.1
-dep_dialyxir = hex 0.5.1
-dep_parallel_stream = hex 1.0.6
+dep_amqp = hex 3.3.0
+dep_csv = hex 3.2.1
 dep_json = hex 1.4.1
 dep_temp = hex 0.4.7
-dep_x509 = hex 0.7.0
+dep_x509 = hex 0.8.8
 
 DEP_EARLY_PLUGINS = rabbit_common/mk/rabbitmq-early-plugin.mk
-DEP_PLUGINS = rabbit_common/mk/rabbitmq-plugin.mk
+DEP_PLUGINS = rabbit_common/mk/rabbitmq-build.mk
 
 VERBOSE_TEST ?= true
 MAX_CASES ?= 1
 
 MIX_TEST_OPTS ?= ""
-MIX_TEST = ERL_COMPILER_OPTIONS=deterministic mix test --max-cases=$(MAX_CASES)
+MIX_TEST = ERL_COMPILER_OPTIONS=deterministic MIX_ENV=test mix do compile --warnings-as-errors, test --max-cases=$(MAX_CASES) --warnings-as-errors
 
 ifneq ("",$(MIX_TEST_OPTS))
 MIX_TEST := $(MIX_TEST) $(MIX_TEST_OPTS)
@@ -28,6 +26,8 @@ endif
 ifeq ($(VERBOSE_TEST),true)
 MIX_TEST := $(MIX_TEST) --trace
 endif
+
+export MAKE
 
 include ../../rabbitmq-components.mk
 include ../../erlang.mk
@@ -80,7 +80,8 @@ app:: $(ESCRIPTS)
 	@:
 
 rabbitmqctl_srcs := mix.exs \
-		    $(shell find config lib -name "*.ex" -o -name "*.exs")
+	$(call core_find,config/,*.exs) \
+	$(call core_find,lib/,*.ex)
 
 # Elixir dependencies are fetched and compiled as part of the alias
 # `mix make_all`. We do not fetch and build them in `make deps` because
@@ -114,7 +115,16 @@ rel:: $(ESCRIPTS)
 	@:
 
 tests:: $(ESCRIPTS)
-	$(gen_verbose) $(MIX_TEST) $(TEST_FILE)
+	$(verbose) $(MAKE) -C ../../ install-cli
+	$(verbose) $(MAKE) -C ../../ start-background-broker \
+		PLUGINS="rabbit rabbitmq_federation rabbitmq_stomp rabbitmq_stream_management amqp_client" \
+		$(if $(filter khepri,$(RABBITMQ_METADATA_STORE)),,RABBITMQ_FEATURE_FLAGS="-khepri_db")
+	$(gen_verbose) $(MIX_TEST) \
+		$(if $(RABBITMQ_METADATA_STORE),--exclude $(filter-out $(RABBITMQ_METADATA_STORE),khepri mnesia),) \
+		$(TEST_FILE); \
+		RES=$$?; \
+		$(MAKE) -C ../../ stop-node; \
+		exit $$RES
 
 .PHONY: test
 

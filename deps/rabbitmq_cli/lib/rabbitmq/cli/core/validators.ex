@@ -2,7 +2,7 @@
 ## License, v. 2.0. If a copy of the MPL was not distributed with this
 ## file, You can obtain one at https://mozilla.org/MPL/2.0/.
 ##
-## Copyright (c) 2007-2023 VMware, Inc. or its affiliates.  All rights reserved.
+## Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.  All rights reserved.
 
 # Provides common validation functions.
 defmodule RabbitMQ.CLI.Core.Validators do
@@ -43,6 +43,22 @@ defmodule RabbitMQ.CLI.Core.Validators do
   def node_is_running(_, %{node: node_name}) do
     case Helpers.node_running?(node_name) do
       false -> {:validation_failure, :node_not_running}
+      true -> :ok
+    end
+  end
+
+  def existing_cluster_member([potential_member | _], %{node: node_name}) do
+    case Helpers.cluster_member?(node_name, potential_member) do
+      false -> {:validation_failure, {:not_a_cluster_member, potential_member}}
+      true -> :ok
+    end
+  end
+
+  def existing_cluster_member(args, %{node: node_name}, extract_member) do
+    potential_member = extract_member.(args)
+
+    case Helpers.cluster_member?(node_name, potential_member) do
+      false -> {:validation_failure, {:not_a_cluster_member, potential_member}}
       true -> :ok
     end
   end

@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2020-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% These tables contain the raw metrics as stored by RabbitMQ core
@@ -27,6 +27,14 @@
 -define(CORE_EXTRA_TABLES, [{gen_server2_metrics, set},
                             {auth_attempt_metrics, set},
                             {auth_attempt_detailed_metrics, set}]).
+
+% `CORE_NON_CHANNEL_TABLES` are tables that store counters representing the
+% same info as some of the channel_queue_metrics, channel_exchange_metrics and
+% channel_queue_exchange_metrics but without including the channel ID in the
+% key.
+-define(CORE_NON_CHANNEL_TABLES, [{queue_delivery_metrics, set},
+                                  {exchange_metrics, set},
+                                  {queue_exchange_metrics, set}]).
 
 -define(CONNECTION_CHURN_METRICS, {node(), 0, 0, 0, 0, 0, 0, 0}).
 
