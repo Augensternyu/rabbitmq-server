@@ -38,8 +38,9 @@ describe('Virtual Hosts in Admin tab', function () {
     assert.equal(true, await vhostsTab.hasVhosts("/"))
   })
   it('find default vhost and view it', async function () {
-    await overview.clickOnOverviewTab()
+    //await overview.clickOnOverviewTab()
     await overview.clickOnAdminTab()
+    await adminTab.isLoaded()
     await adminTab.clickOnVhosts()
     await vhostsTab.clickOnVhost(await vhostsTab.searchForVhosts("/"), "/")
     if (!await vhostTab.isLoaded()) {
@@ -49,9 +50,11 @@ describe('Virtual Hosts in Admin tab', function () {
   })
     
   it('vhost selectable columns', async function () {  
-    await overview.clickOnOverviewTab()
+    //await overview.clickOnOverviewTab()
     await overview.clickOnAdminTab()
+    await adminTab.isLoaded()
     await adminTab.clickOnVhosts()
+    await vhostsTab.isLoaded()
     await vhostsTab.searchForVhosts("/")
     await doWhile(async function() { return vhostsTab.getVhostsTable() },
       function(table) { 
@@ -105,7 +108,7 @@ describe('Virtual Hosts in Admin tab', function () {
     before(async function() {
       log("Creating vhost")
       createVhost(getManagementUrl(), vhost, "selenium", "selenium-tag")
-      await overview.clickOnOverviewTab()
+    //  await overview.clickOnOverviewTab()
       await overview.clickOnAdminTab()
       await adminTab.clickOnVhosts()
     })
